@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fifth-time-lucky-api"
+version = "0.1.0"
+description = "Riot API client with rate limiting"
+requires-python = ">=3.8"
+dependencies = [
+    "aiohttp",
+    # Add other dependencies here
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+exclude = ["tests*", "scripts*"]

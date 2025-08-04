@@ -1,0 +1,21 @@
+# Core dependencies
+fastapi
+uvicorn[standard]
+pydantic
+requests
+aiohttp
+pydantic-settings
+pytest
+pytest-asyncio
+tenacity
+memory-profiler
+psutil
+orjson
+aioprocessing
+zstandard
+ijson
+
+# Database dependencies
+redis[hiredis]
+pymongo>=4.9
+beanie
