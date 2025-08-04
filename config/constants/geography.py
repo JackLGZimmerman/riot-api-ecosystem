@@ -1,6 +1,5 @@
 from enum import StrEnum
 from typing import Final, Mapping
-from collections import defaultdict
 
 class Continent(StrEnum):
     AMERICAS = "americas"
@@ -43,8 +42,7 @@ REGION_TO_CONTINENT: Final[Mapping[Region, Continent]] = {
     Region.SG2:  Continent.SEA,
 }
 
-_temp: dict[Continent, list[Region]] = defaultdict(list)
-for region, continent in REGION_TO_CONTINENT.items():
-    _temp[continent].append(region)
-
-CONTINENT_TO_REGIONS: Final[Mapping[Continent, list[Region]]] = dict(_temp)
+CONTINENT_TO_REGIONS: Final[Mapping[Continent, tuple[Region, ...]]] = {
+    continent: tuple(r for r, c in REGION_TO_CONTINENT.items() if c is continent)
+    for continent in Continent
+}

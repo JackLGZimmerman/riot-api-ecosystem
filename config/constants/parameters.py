@@ -1,52 +1,39 @@
-from typing import Final, List
-from enum import StrEnum
+from functools import lru_cache
+from typing import Tuple, Mapping, Final
 
-class Queue(StrEnum):
-    RANKED_SOLO_5x5 = "RANKED_SOLO_5x5"
-    RANKED_FLEX_SR  = "RANKED_FLEX_SR"
+QUEUES: Final[Tuple[str, ...]] = ("RANKED_SOLO_5x5", "RANKED_FLEX_SR")
+ELITE_TIERS: Final[Tuple[str, ...]] = ("CHALLENGER", "GRANDMASTER", "MASTER")
+TIERS: Final[Tuple[str, ...]] = (
+    "DIAMOND",
+    "EMERALD",
+    "PLATINUM",
+    "GOLD",
+    "SILVER",
+    "BRONZE",
+    "IRON",
+)
+DIVISIONS: Final[Tuple[str, ...]] = ("I", "II", "III", "IV")
 
-class EliteTier(StrEnum):
-    CHALLENGER  = "CHALLENGER"
-    GRANDMASTER = "GRANDMASTER"
-    MASTER      = "MASTER"    
-
-class Tier(StrEnum):
-    DIAMOND     = "DIAMOND"
-    EMERALD     = "EMERALD"
-    PLATINUM    = "PLATINUM"
-    GOLD        = "GOLD"
-    SILVER      = "SILVER"
-    BRONZE      = "BRONZE"
-    IRON        = "IRON"
-
-class Division(StrEnum):
-    I   = "I"
-    II  = "II"
-    III = "III"
-    IV  = "IV"
-
-
-QUEUES:   Final[list[Queue]]   = list(Queue)
-TIERS:    Final[list[Tier]]    = list(Tier)
-DIVISIONS:Final[list[Division]] = list(Division)
-ELITE_TIERS: Final[List[EliteTier]] = list(EliteTier)
-
-QUEUE_TYPE_TO_QUEUE_CODE: dict[str, int] = {
+QUEUE_TYPE_TO_QUEUE_CODE: Final[Mapping[str, int]] = {
     "RANKED_SOLO_5x5": 420,
     "RANKED_FLEX_SR": 440,
 }
 
-DIVISION_MAPPING: Final[dict[Division, list[Division]]] = {
-    div: DIVISIONS[: i + 1]
-    for i, div in enumerate(DIVISIONS)
-}
 
-ELITE_TIER_MAPPING: Final[dict[EliteTier, List[EliteTier]]] = {
-    tier: ELITE_TIERS[: i + 1]
-    for i, tier in enumerate(ELITE_TIERS)
-}
+def cumulative_mapping(sequence: Tuple[str, ...]) -> Mapping[str, Tuple[str, ...]]:
+    return {value: sequence[: i + 1] for i, value in enumerate(sequence)}
 
-TIER_MAPPING: Final[dict[Tier, list[Tier]]] = {
-    tier: TIERS[: i + 1]
-    for i, tier in enumerate(TIERS)
-}
+
+@lru_cache(maxsize=None)
+def cumulative_tier_mapping() -> Mapping[str, Tuple[str, ...]]:
+    return cumulative_mapping(TIERS)
+
+
+@lru_cache(maxsize=None)
+def cumulative_elite_tier_mapping() -> Mapping[str, Tuple[str, ...]]:
+    return cumulative_mapping(ELITE_TIERS)
+
+
+@lru_cache(maxsize=None)
+def cumulative_division_mapping() -> Mapping[str, Tuple[str, ...]]:
+    return cumulative_mapping(DIVISIONS)
