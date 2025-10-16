@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from .base import RiotAPI
+from ..base import RiotAPI
 from config.settings import settings
 
 

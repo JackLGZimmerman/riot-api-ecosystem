@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import aiohttp
-from contextlib import asynccontextmanager
-from typing import Final, Dict, Optional, Literal
+from typing import Final, Literal
+from http import HTTPStatus
+from functools import lru_cache
 
 from config.settings import settings
 from utils.rate_limiter import RateLimiter
-from config.constants import Region, Continent, REGION_TO_CONTINENT
-from config.constants.http import RETRYABLE_STATUS_CODES, ERROR_MESSAGES
+from config.constants import Regions, Continents, REGION_TO_CONTINENT
+
+RETRYABLE = {
+    HTTPStatus.TOO_MANY_REQUESTS.value,      # 429
+    HTTPStatus.INTERNAL_SERVER_ERROR.value,  # 500
+    HTTPStatus.BAD_GATEWAY.value,            # 502
+    HTTPStatus.SERVICE_UNAVAILABLE.value,    # 503
+    HTTPStatus.GATEWAY_TIMEOUT.value,        # 504
+}
 
 from tenacity import (
     retry,
@@ -18,6 +26,20 @@ from tenacity import (
 
 LocationScope = Literal["region", "continent"]
 
+# ---------- LRU-cached limiter factories (singletons per key) ----------
+
+@lru_cache(maxsize=None)
+def _limiter(
+    location_key: Regions | Continents,
+    calls_per_two_minutes: int,
+    time_period_two_minutes: int,
+) -> RateLimiter:
+    return RateLimiter(
+        max_calls=calls_per_two_minutes,
+        time_period=time_period_two_minutes,
+    )
+
+
 class RiotAPI:
     _api_key: str = settings.api_key
 
@@ -25,17 +47,13 @@ class RiotAPI:
         self,
         *,
         calls_per_two_minutes: int = settings.calls_per_two_minutes,
-        time_period_two_minutes: int = settings.time_period_two_minutes
-
+        time_period_two_minutes: int = settings.time_period_two_minutes,
     ) -> None:
         self.calls_per_two_minutes: Final[int] = calls_per_two_minutes
         self.time_period_two_minutes: Final[int] = time_period_two_minutes
+        self._session: aiohttp.ClientSession | None = None
 
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._region_limiters: Dict[Region, RateLimiter] = {}
-        self._continent_limiters: Dict[Continent, RateLimiter] = {}
-
-    @classmethod
+    @property
     def get_api_key(cls):
         return cls._api_key
 
@@ -43,60 +61,34 @@ class RiotAPI:
         if self._session is None:
             self._session = aiohttp.ClientSession()
         return self._session
+    
+    # ==========================================================
 
-    def _region_limiter(self, region: Region) -> RateLimiter:
-        if region not in self._region_limiters:
-            self._region_limiters[region] = RateLimiter(
-                max_calls=self.calls_per_two_minutes, 
-                time_period=self.time_period_two_minutes
-            )
-        return self._region_limiters[region]
-
-    def _continent_limiter(self, location: Region | Continent) -> RateLimiter:
-        if isinstance(location, Continent):
-            continent = location
-        else:
-            continent = REGION_TO_CONTINENT[location]
-        if continent not in self._continent_limiters:
-            self._continent_limiters[continent] = RateLimiter(
-                max_calls=self.calls_per_two_minutes, 
-                time_period=self.time_period_two_minutes,
-                print_func=lambda msg: print(f"[{continent}] {msg}")
-            )
-        return self._continent_limiters[continent]
-
-    @asynccontextmanager
-    async def _with_limiter(self, location: Region | Continent, scope: LocationScope):
-        if scope == "region":
-            limiter = self._region_limiter(location)
-        elif scope == "continent":
-            limiter = self._continent_limiter(location)
-        else:
-            raise ValueError(f"Invalid scope {scope}; must be 'region' or 'continent'")
-
-        async with limiter:
-            yield
+    def _get_limiter(self, location: Regions | Continents) -> RateLimiter:
+        return _limiter(location, self.calls_per_two_minutes, self.time_period_two_minutes)
 
     @retry(
         reraise=True,
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception(
-            lambda e: isinstance(e, aiohttp.ClientResponseError)
-            and e.status in RETRYABLE_STATUS_CODES
+            lambda e: isinstance(e, aiohttp.ClientResponseError) and e.status in RETRYABLE
         ),
     )
     async def fetch_json(
         self,
         *,
         url: str,
-        location: Region | Continent,
-        scope: LocationScope = "region",
+        location: Regions | Continents,
     ) -> dict:
-        async with self._with_limiter(location, scope):
+        limiter = self._get_limiter(location)
+        async with limiter:
             sess = await self.session()
             async with sess.get(url) as resp:
                 resp.raise_for_status()
                 return await resp.json()
 
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
 

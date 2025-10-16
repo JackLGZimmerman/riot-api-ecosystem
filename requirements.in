@@ -13,7 +13,8 @@ psutil
 orjson
 aioprocessing
 zstandard
-ijson
+aiofiles
+pylint
 
 # Database dependencies
 redis[hiredis]

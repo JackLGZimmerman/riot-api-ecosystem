@@ -1,113 +1,167 @@
 # file_storage.py
 from __future__ import annotations
 
+import asyncio
+import aiofiles
 import csv
 import io
-from collections import namedtuple
-import os
 from pathlib import Path
-from typing import Iterator, List, Optional, Iterable, Mapping, Any
+from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, AsyncIterator, AsyncGenerator
 
 import zstandard as zstd
 
+# ───────────────────────────────  league_v4  ─────────────────────────────── #
 
-def league_v4_load(
+async def save_league_v4(
     path: str | Path,
-    chunk_size: Optional[int] = 1000,
-    indexes: Optional[List[int]] = None,  # zero-based positions to keep
-) -> Iterator[List[List[Any]]]:
+    rows: Iterable[Sequence[Any]]
+) -> None:
+    rows = list(rows)
+    if not rows:
+        return
+
     p = Path(path)
-    with open(p, "rb") as raw:
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    csv_buf = io.StringIO(newline="")
+    csv.writer(csv_buf).writerows(rows)
+    csv_bytes = csv_buf.getvalue().encode("utf-8")
+
+    compressor = zstd.ZstdCompressor(level=15)
+    compressed = compressor.compress(csv_bytes)
+
+    async with aiofiles.open(p, "wb") as f:
+        await f.write(compressed)
+
+
+async def load_league_v4(
+    path: str | Path,
+    *,
+    indexes: Optional[List[int]] = None,
+) -> AsyncIterator[List[Any]]:
+    p = Path(path)
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    async with aiofiles.open(p, "rb") as f:
+        compressed = await f.read()
+
+    decompressed = zstd.ZstdDecompressor().decompress(compressed)
+    txt = io.StringIO(decompressed.decode("utf-8"))
+    reader = csv.reader(txt)
+
+    for row in reader:
+        yield [row[i] for i in indexes] if indexes else row
+                    
+
+# ───────────────────────────────  match_v5_ids  ─────────────────────────────── #
+
+async def save_match_v5_ids(
+    path: str | Path,
+    rows: Iterable[Sequence[Any]],
+) -> None:
+    rows = list(rows)
+    if not rows:
+        return
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    csv_buf = io.StringIO(newline="")
+    csv.writer(csv_buf).writerows(rows)
+    csv_bytes = csv_buf.getvalue().encode("utf-8")
+
+    compressor = zstd.ZstdCompressor(level=15)
+    compressed = compressor.compress(csv_bytes)
+
+    async with aiofiles.open(p, "ab") as f:
+        await f.write(compressed)
+
+
+async def load_match_v5_ids(path: str | Path, chunk_size: int = 100) -> AsyncGenerator[list[list[Any]], None]:
+    p = Path(path)
+
+    def _stream_batches():
         dctx = zstd.ZstdDecompressor()
-        with dctx.stream_reader(raw) as decompressed_bin:
-            with io.TextIOWrapper(decompressed_bin, encoding="utf-8", newline="") as text_f:
-                reader = csv.reader(text_f)
-                if chunk_size is None:
-                    all_rows: List[List[Any]] = []
-                    for row in reader:
-                        if indexes is not None:
-                            projected = [row[i] for i in indexes if 0 <= i < len(row)]
-                        else:
-                            projected = row
-                        all_rows.append(projected)
-                    yield all_rows
-                    return
+        with open(p, "rb") as f, dctx.stream_reader(f) as reader:
+            text_stream = io.TextIOWrapper(reader, encoding="utf-8", newline="")
+            csv_reader = csv.reader(text_stream)
+            batch = []
+            for row in csv_reader:
+                batch.append(row)
+                if len(batch) >= chunk_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
 
-                chunk: List[List[Any]] = []
-                for row in reader:
-                    if indexes is not None:
-                        projected = [row[i] for i in indexes if 0 <= i < len(row)]
-                    else:
-                        projected = row
-                    chunk.append(projected)
-                    if len(chunk) >= chunk_size:
-                        yield chunk
-                        chunk = []
-                if chunk:
-                    yield chunk
+    for batch in await asyncio.to_thread(lambda: list(_stream_batches())):
+        yield batch
 
-def league_v4_save(
+# ───────────────────────────────  match_v5_collected_players  ─────────────────────────────── #
+
+async def save_match_v5_collected_players(
     path: str | Path,
-    data: Iterable[List[str]],
-    compression_level: int = 15,
-):
-    p = Path(path)
-    cctx = zstd.ZstdCompressor(level=compression_level)
-
-    with open(p, "ab") as raw_out:
-        with cctx.stream_writer(raw_out) as compressor_stream:
-            with io.TextIOWrapper(compressor_stream, encoding="utf-8", newline="") as text_out:
-                try:
-                    writer = csv.writer(text_out)
-                    for row in data:
-                        writer.writerow(row)
-                    text_out.flush()
-                except:
-                    print("There was an error writing the batch for league_v4_save")
-
-
-league_v4 = {
-    "load": league_v4_load,
-    "save": league_v4_save
-}
-
-
-def match_v5_load(
-    path: str | Path,
-    chunk_size: int = 1000,
-    indexes: Optional[List[str]] = None,
-) -> Iterator[List[dict]]:
+    rows: Iterable[Sequence[Any]],
+) -> None:
+    rows = list(rows)
+    if not rows:
+        return
 
     p = Path(path)
-    with open(p, "rb") as raw, zstd.ZstdDecompressor().stream_reader(raw) as decompressed_bin:
-        with io.TextIOWrapper(decompressed_bin, encoding="utf-8", newline="") as text_f:
-            reader = csv.reader(text_f)
-            if chunk_size:
-                buffer: List[List[str]] = []
-                
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    csv_buf = io.StringIO(newline="")
+    csv.writer(csv_buf).writerows(rows)
+    csv_bytes = csv_buf.getvalue().encode("utf-8")
+
+    compressor = zstd.ZstdCompressor(level=15)
+    compressed = compressor.compress(csv_bytes)
+
+    async with aiofiles.open(p, "ab") as f:
+        await f.write(compressed)
 
 
-def match_v5_save(
+async def load_match_v5_collected_players(
     path: str | Path,
-    data: Iterable[List[str]],
-    compression_level: int = 15,
-):
+) -> AsyncIterator[List[Any]]:
     p = Path(path)
-    cctx = zstd.ZstdCompressor(level=compression_level)
 
-    with open(p, "ab") as raw_out:
-        with cctx.stream_writer(raw_out) as compressor_stream:
-            with io.TextIOWrapper(compressor_stream, encoding="utf-8", newline="") as text_out:
-                try:
-                    writer = csv.writer(text_out)
-                    for row in data:
-                        writer.writerow(row)
-                    text_out.flush()
-                except:
-                    print("There was an error writing the batch for match_v5_save")
+    async with aiofiles.open(p, "rb") as f:
+        compressed = await f.read()
+
+    decompressed = zstd.ZstdDecompressor().decompress(compressed)
+    txt = io.StringIO(decompressed.decode("utf-8"))
+    reader = csv.reader(txt)
+
+    for row in reader:
+        yield row
+
+# ───────────────────────────────  match_v5_ids  ─────────────────────────────── #
+
+async def save_match_v5_data():
+    pass
 
 
-match_v5 = {
-    "load": match_v5_load,
-    "save": match_v5_save
+
+async def load_match_v5_data():
+    pass
+
+
+# ────────────────────────────────  registry  ─────────────────────────────── #
+
+storages: Mapping[
+    str,
+    Mapping[str, Mapping[str, Callable[..., Any]]]
+] = {
+    "league_v4": {
+        "default": {"save": save_league_v4, "load": load_league_v4},
+    },
+    "match_v5": {
+        "ids": {"save": save_match_v5_ids, "load": load_match_v5_ids},
+        "collected": {
+                "save": save_match_v5_collected_players, 
+                "load": load_match_v5_collected_players
+            }
+    },
 }

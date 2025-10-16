@@ -4,7 +4,6 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from typing import ParamSpec, TypeVar
-
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -19,9 +18,7 @@ class RateLimiter:
     """
 
     __slots__ = (
-        # limiting
         "_capacity", "_tokens", "_fill_rate", "_last_checked", "_lock",
-        # debug / metrics
         "_debug", "_print", "_cycle_calls", "_cycle_start", "_time_period"
     )
 
@@ -40,15 +37,13 @@ class RateLimiter:
         if time_period <= 0.0:
             raise ValueError("time_period must be > 0")
 
-        # limiting parameters
         self._capacity: int = max_calls
         self._time_period: float = time_period
-        self._tokens: float = 0.0              # empty bucket → no bursts
+        self._tokens: float = 0.0
         self._fill_rate: float = max_calls / time_period
         self._last_checked: float = time.perf_counter()
         self._lock = asyncio.Lock()
 
-        # metrics / debug
         self._debug: bool = debug
         self._print = print_func
         self._cycle_calls: int = 0
@@ -66,12 +61,11 @@ class RateLimiter:
                 elapsed = now - self._last_checked
                 self._last_checked = now
 
-                # drip tokens; never store more than 1 (prevents bursts)
                 self._tokens += elapsed * self._fill_rate
 
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
-                    self._after_grant(now)     # metrics + cycle bookkeeping
+                    self._after_grant(now)
                     return
 
                 wait_time = (1.0 - self._tokens) / self._fill_rate
@@ -98,18 +92,17 @@ class RateLimiter:
         without needing an explicit ``async with limiter`` inside the function.
         """
 
-        async def wrapper(*args: _P.args, **kwargs: _P.kwargs):  # type: ignore[misc]
+        async def wrapper(*args: _P.args, **kwargs: _P.kwargs):
             async with self:
                 return await fn(*args, **kwargs)
 
-        return wrapper  # type: ignore[return-value]
+        return wrapper
 
     # ────────────────────────── private helpers ───────────────────────── #
 
     def _after_grant(self, now: float) -> None:
         elapsed = now - self._cycle_start
 
-        # (1) time-based reset when we cross the period boundary
         if elapsed >= self._time_period:
             self._cycle_calls = 0
             self._cycle_start = now
@@ -117,16 +110,12 @@ class RateLimiter:
 
             self._tokens = 0.0
 
-        # (2) record this call
         self._cycle_calls += 1
 
-        # (3) compute “ideal” for this window (uncapped!)
         ideal = elapsed * self._fill_rate
 
-        # (4) drift = actual – ideal
         drift = self._cycle_calls - ideal
 
-        # (5) debug print
         if self._debug:
             self._print(
                 f"{self._cycle_calls}/{self._capacity} | "
@@ -146,7 +135,7 @@ class RateLimiter:
         tokens = min(1.0, self._tokens + elapsed * self._fill_rate)
         return int(tokens)
 
-    def __repr__(self) -> str:  # pragma: no cover
+    def __repr__(self) -> str:
         interval = 1 / self._fill_rate
         return (
             f"{self.__class__.__name__}(interval≈{interval:.4f}s, "
