@@ -1,70 +1,57 @@
-from ..base import BaseORJSONModel
-from pydantic import ConfigDict
+from pydantic import BaseModel
 from typing import List
 
 
-#-----------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------#
 #                 /lol/match/v5/matches/by-puuid/{puuid}/ids                  #
-#-----------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------#
 
 MatchIds = List[str]
 
-#-----------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------#
 #                        /lol/match/v5/matches/{matchId}                      #
-#-----------------------------------------------------------------------------#
-
-class MatchDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+# -----------------------------------------------------------------------------#
 
 
-class MetadataDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+class MatchDto(BaseModel):
+    pass
 
+class MetadataDto(BaseModel):
+    pass
 
-class InfoDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+class InfoDto(BaseModel):
+    pass
 
+class ParticipantDto(BaseModel):
+    pass
 
-class ParticipantDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+class ChallengesDto(BaseModel):
+    pass
 
+class MissionsDto(BaseModel):
+    pass
 
-class ChallengesDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+class PerksDto(BaseModel):
+    pass
 
+class PerkStatsDto(BaseModel):
+    pass
 
-class MissionsDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+class PerkStyleDto(BaseModel):
+    pass
 
+class PerkStyleSelectionDto(BaseModel):
+    pass
 
-class PerksDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+class TeamDto(BaseModel):
+    pass
 
+class BanDto(BaseModel):
+    pass
 
-class PerkStatsDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+class ObjectivesDto(BaseModel):
+    pass
 
-
-class PerkStyleDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
-
-
-class PerkStyleSelectionDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
-
-
-class TeamDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
-
-
-class BanDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
-
-
-class ObjectivesDto(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
-
-
-class ObjectiveDto(BaseORJSONModel):
+class ObjectiveDto(BaseModel):
     first: bool
     kills: int

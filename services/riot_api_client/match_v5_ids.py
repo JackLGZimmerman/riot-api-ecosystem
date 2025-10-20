@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
-import os
 import time
 from pathlib import Path
 from collections import namedtuple, defaultdict, deque
-from typing import AsyncGenerator, Iterable, List, Tuple, Set, Any, Deque, Dict, Iterator
+from typing import (
+    AsyncGenerator,
+    Iterable,
+    List,
+    Tuple,
+    Set,
+    Any,
+    Deque,
+    Dict,
+    Iterator,
+)
 
 from .base import RiotAPI
 from config.constants import (
@@ -19,20 +27,26 @@ from utils import storages
 from models import MatchIds
 
 SENTINEL: object = object()
-MAX_PAGE_START  = 900
-MAX_PAGE_COUNT  = 100
+MAX_PAGE_START = 900
+MAX_PAGE_COUNT = 100
 
-CrawlKey   = Tuple[str, str]          # (puuid, queueType)
-CrawlState = namedtuple("CrawlState", ["puuid", "queueType", "continent", "start_time", "start"])
+CrawlKey = Tuple[str, str]  # (puuid, queueType)
+CrawlState = namedtuple(
+    "CrawlState", ["puuid", "queueType", "continent", "start_time", "start"]
+)
 PendingItem = Tuple[str, "CrawlKey", "CrawlState"]  # (url, key, state)
 # ───────────────────────── helper ───────────────────────── #
 
-def build_buckets_by_continent(pending: Iterable[PendingItem]) -> Dict[str, Deque[PendingItem]]:
+
+def build_buckets_by_continent(
+    pending: Iterable[PendingItem],
+) -> Dict[str, Deque[PendingItem]]:
     buckets: Dict[str, Deque[PendingItem]] = defaultdict(deque)
     for item in pending:
         _, _, state = item
         buckets[state.continent].append(item)
     return buckets
+
 
 def chunks_round_robin_from_buckets(
     buckets: Dict[str, Deque[PendingItem]],
@@ -54,7 +68,9 @@ def chunks_round_robin_from_buckets(
         if batch:
             yield batch
 
+
 # ─────────────────────── MatchV5 client ─────────────────── #
+
 
 class MatchV5Ids(RiotAPI):
     def __init__(self, *args, **kwargs):
@@ -72,7 +88,9 @@ class MatchV5Ids(RiotAPI):
             r"\data\database\raw\league\league_players.csv.zst"
         )
 
-        async for player in storages["league_v4"]["default"]["load"](path=in_path, indexes=[0, 1, 7]):
+        async for player in storages["league_v4"]["default"]["load"](
+            path=in_path, indexes=[0, 1, 7]
+        ):
             yield player
 
     @staticmethod
@@ -120,13 +138,11 @@ class MatchV5Ids(RiotAPI):
             raise RuntimeError((key, e))
         return key, state, data
 
-
     async def get_match_ids(
         self,
     ) -> AsyncGenerator[Tuple[MatchIds, CrawlKey], None]:
         puuid_endpoint = ENDPOINTS.match.by_puuid
         active: dict[CrawlKey, CrawlState] = {}
-
 
         collected_players, date_collected = await self._collected_players()
         async for puuid, queue_type, continent in self._players():
@@ -156,8 +172,10 @@ class MatchV5Ids(RiotAPI):
             buckets = build_buckets_by_continent(pending)
 
             for batch in chunks_round_robin_from_buckets(buckets, self.max_in_flight):
-                tasks = [asyncio.create_task(self._fetch_with_meta(url, key, state))
-                        for url, key, state in batch]
+                tasks = [
+                    asyncio.create_task(self._fetch_with_meta(url, key, state))
+                    for url, key, state in batch
+                ]
 
                 for fut in asyncio.as_completed(tasks):
                     try:
@@ -170,7 +188,10 @@ class MatchV5Ids(RiotAPI):
 
                     yield match_ids, key
 
-                    if (state.start != MAX_PAGE_START and len(match_ids) == MAX_PAGE_COUNT):
+                    if (
+                        state.start != MAX_PAGE_START
+                        and len(match_ids) == MAX_PAGE_COUNT
+                    ):
                         active[key] = state._replace(start=state.start + len(match_ids))
                     else:
                         active.pop(key, None)
@@ -208,7 +229,6 @@ class MatchV5Ids(RiotAPI):
             await self._session.close()
 
 
-
-'''
+"""
 We need a seperate file to save the collected date (fileName) + puuid-queueType (tuples) associated with that. We can convert the list to a hashset after loading.
-'''
+"""

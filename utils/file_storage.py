@@ -6,162 +6,45 @@ import aiofiles
 import csv
 import io
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, AsyncIterator, AsyncGenerator
-
+from typing import Any, Callable, ParamSpec, TypeVar, Final, Dict
+from functools import wraps
 import zstandard as zstd
+from pydantic import BaseModel
 
-# ───────────────────────────────  league_v4  ─────────────────────────────── #
+P = ParamSpec("P")
+R = TypeVar("R")
 
-async def save_league_v4(
-    path: str | Path,
-    rows: Iterable[Sequence[Any]]
-) -> None:
-    rows = list(rows)
-    if not rows:
-        return
-
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-    csv_buf = io.StringIO(newline="")
-    csv.writer(csv_buf).writerows(rows)
-    csv_bytes = csv_buf.getvalue().encode("utf-8")
-
-    compressor = zstd.ZstdCompressor(level=15)
-    compressed = compressor.compress(csv_bytes)
-
-    async with aiofiles.open(p, "wb") as f:
-        await f.write(compressed)
+_ZSTD_COMPRESSION: Final[int] = 15
 
 
-async def load_league_v4(
-    path: str | Path,
-    *,
-    indexes: Optional[List[int]] = None,
-) -> AsyncIterator[List[Any]]:
-    p = Path(path)
-
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-    async with aiofiles.open(p, "rb") as f:
-        compressed = await f.read()
-
-    decompressed = zstd.ZstdDecompressor().decompress(compressed)
-    txt = io.StringIO(decompressed.decode("utf-8"))
-    reader = csv.reader(txt)
-
-    for row in reader:
-        yield [row[i] for i in indexes] if indexes else row
-                    
-
-# ───────────────────────────────  match_v5_ids  ─────────────────────────────── #
-
-async def save_match_v5_ids(
-    path: str | Path,
-    rows: Iterable[Sequence[Any]],
-) -> None:
-    rows = list(rows)
-    if not rows:
-        return
-
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-    csv_buf = io.StringIO(newline="")
-    csv.writer(csv_buf).writerows(rows)
-    csv_bytes = csv_buf.getvalue().encode("utf-8")
-
-    compressor = zstd.ZstdCompressor(level=15)
-    compressed = compressor.compress(csv_bytes)
-
-    async with aiofiles.open(p, "ab") as f:
-        await f.write(compressed)
+# Registry can hold heterogeneous callables, so value type must be Callable[..., Any]
+_EXPORT_REGISTRY: Final[Dict[str, Callable[..., Any]]] = {}
 
 
-async def load_match_v5_ids(path: str | Path, chunk_size: int = 100) -> AsyncGenerator[list[list[Any]], None]:
-    p = Path(path)
+def register_exporter(name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """
+    Decorator factory to register an exporter function under `name`.
 
-    def _stream_batches():
-        dctx = zstd.ZstdDecompressor()
-        with open(p, "rb") as f, dctx.stream_reader(f) as reader:
-            text_stream = io.TextIOWrapper(reader, encoding="utf-8", newline="")
-            csv_reader = csv.reader(text_stream)
-            batch = []
-            for row in csv_reader:
-                batch.append(row)
-                if len(batch) >= chunk_size:
-                    yield batch
-                    batch = []
-            if batch:
-                yield batch
+    Usage:
+        @register_exporter("csv")
+        def export_csv(path: str, rows: list[dict[str, Any]]) -> None: ...
+    """
 
-    for batch in await asyncio.to_thread(lambda: list(_stream_batches())):
-        yield batch
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        if name in _EXPORT_REGISTRY:
+            raise ValueError(f"Exporter '{name}' is already registered")
 
-# ───────────────────────────────  match_v5_collected_players  ─────────────────────────────── #
+        _EXPORT_REGISTRY[name] = func
 
-async def save_match_v5_collected_players(
-    path: str | Path,
-    rows: Iterable[Sequence[Any]],
-) -> None:
-    rows = list(rows)
-    if not rows:
-        return
+        @wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            return func(*args, **kwargs)
 
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+        return wrapper
 
-    csv_buf = io.StringIO(newline="")
-    csv.writer(csv_buf).writerows(rows)
-    csv_bytes = csv_buf.getvalue().encode("utf-8")
-
-    compressor = zstd.ZstdCompressor(level=15)
-    compressed = compressor.compress(csv_bytes)
-
-    async with aiofiles.open(p, "ab") as f:
-        await f.write(compressed)
+    return decorator
 
 
-async def load_match_v5_collected_players(
-    path: str | Path,
-) -> AsyncIterator[List[Any]]:
-    p = Path(path)
-
-    async with aiofiles.open(p, "rb") as f:
-        compressed = await f.read()
-
-    decompressed = zstd.ZstdDecompressor().decompress(compressed)
-    txt = io.StringIO(decompressed.decode("utf-8"))
-    reader = csv.reader(txt)
-
-    for row in reader:
-        yield row
-
-# ───────────────────────────────  match_v5_ids  ─────────────────────────────── #
-
-async def save_match_v5_data():
+@register_exporter(name="zstandard_streamed_export")
+def zstandard_streamed_export(data: type[BaseModel]) -> None:
     pass
-
-
-
-async def load_match_v5_data():
-    pass
-
-
-# ────────────────────────────────  registry  ─────────────────────────────── #
-
-storages: Mapping[
-    str,
-    Mapping[str, Mapping[str, Callable[..., Any]]]
-] = {
-    "league_v4": {
-        "default": {"save": save_league_v4, "load": load_league_v4},
-    },
-    "match_v5": {
-        "ids": {"save": save_match_v5_ids, "load": load_match_v5_ids},
-        "collected": {
-                "save": save_match_v5_collected_players, 
-                "load": load_match_v5_collected_players
-            }
-    },
-}

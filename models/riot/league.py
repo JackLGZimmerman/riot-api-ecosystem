@@ -1,16 +1,15 @@
-from typing import List, Optional, Union
-from models.base import BaseORJSONModel
-from pydantic import ConfigDict, BaseModel, computed_field, TypeAdapter
+from typing import List, Optional, TypedDict
+from pydantic import BaseModel, TypeAdapter
 
-class MiniSeriesDTO(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+
+class MiniSeriesDTO(BaseModel):
     losses: int
     progress: str
     target: int
     wins: int
 
-class LeagueItemDTO(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+
+class LeagueItemDTO(BaseModel):
     freshBlood: bool
     wins: int
     miniSeries: Optional[MiniSeriesDTO] = None
@@ -22,16 +21,16 @@ class LeagueItemDTO(BaseORJSONModel):
     losses: int
     puuid: str
 
-class LeagueListDTO(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+
+class LeagueListDTO(BaseModel):
     leagueId: str
     entries: List[LeagueItemDTO]
     tier: str
     name: str
     queue: str
 
-class LeagueEntryDTO(BaseORJSONModel):
-    model_config = ConfigDict(slots=True)
+
+class LeagueEntryDTO(BaseModel):
     leagueId: str
     puuid: str
     queueType: str
@@ -46,8 +45,18 @@ class LeagueEntryDTO(BaseORJSONModel):
     inactive: bool
     miniSeries: Optional[MiniSeriesDTO] = None
 
+
+class EntryPayload(TypedDict):
+    puuid: str
+    queueType: str
+    tier: str
+    rank: str
+    wins: int
+    losses: int
+    region: str
+
+
 class MinifiedLeagueEntryDTO(BaseModel):
-    model_config = ConfigDict(slots=True)
     puuid: str
     queueType: str
     tier: str
@@ -63,7 +72,7 @@ class MinifiedLeagueEntryDTO(BaseModel):
         *,
         region: str,
     ) -> "MinifiedLeagueEntryDTO":
-        data = {
+        data: EntryPayload = {
             "puuid": entry.puuid,
             "queueType": entry.queueType,
             "tier": entry.tier,
@@ -81,7 +90,7 @@ class MinifiedLeagueEntryDTO(BaseModel):
         *,
         region: str,
     ) -> List["MinifiedLeagueEntryDTO"]:
-        payload = [
+        payload: List[EntryPayload] = [
             {
                 "puuid": e.puuid,
                 "queueType": dto.queue,

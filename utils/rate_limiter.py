@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from typing import ParamSpec, TypeVar
+
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -18,8 +19,16 @@ class RateLimiter:
     """
 
     __slots__ = (
-        "_capacity", "_tokens", "_fill_rate", "_last_checked", "_lock",
-        "_debug", "_print", "_cycle_calls", "_cycle_start", "_time_period"
+        "_capacity",
+        "_tokens",
+        "_fill_rate",
+        "_last_checked",
+        "_lock",
+        "_debug",
+        "_print",
+        "_cycle_calls",
+        "_cycle_start",
+        "_time_period",
     )
 
     # ─────────────────────────── construction ─────────────────────────── #
@@ -70,7 +79,6 @@ class RateLimiter:
 
                 wait_time = (1.0 - self._tokens) / self._fill_rate
 
-
             await asyncio.sleep(wait_time)
 
     # ───────────────────── context-manager helpers ────────────────────── #
@@ -84,9 +92,7 @@ class RateLimiter:
 
     # ───────────────────────────── decorator ──────────────────────────── #
 
-    def decorator(
-        self, fn: Callable[_P, Awaitable[_T]]
-    ) -> Callable[_P, Awaitable[_T]]:
+    def decorator(self, fn: Callable[_P, Awaitable[_T]]) -> Callable[_P, Awaitable[_T]]:
         """
         Decorate an **async** function so each invocation is rate-limited
         without needing an explicit ``async with limiter`` inside the function.
@@ -122,6 +128,7 @@ class RateLimiter:
                 f"ideal≈{ideal:.2f} | "
                 f"drift={drift:+.2f}"
             )
+
     # ──────────────────────────── diagnostics ─────────────────────────── #
 
     @property

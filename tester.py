@@ -17,7 +17,7 @@ import re
 #     with zstd.ZstdDecompressor().stream_reader(bytes) as decompressed:
 #         with io.TextIOWrapper(decompressed, encoding="utf-8", newline="") as text:
 #             text = csv.reader(text)
-            
+
 #             count = 0
 #             for line in text:
 #                 count += 1
@@ -96,13 +96,13 @@ import zstandard as zstd
 # print(digits)
 
 
-dir_path = Path(settings.base_project_path) / 'data/database/raw/match'
+dir_path = Path(settings.base_project_path) / "data/database/raw/match"
 
 if dir_path.is_dir():
     print(f"[OK] Path is a directory as expected")
 
 
-file_name = 'matchids.csv.zst'
+file_name = "matchids.csv.zst"
 # pattern = re.compile(r"^(collected_players_)(.*)")
 # for child in dir_path.iterdir():
 #     if pattern.match(str(child.name)):
@@ -131,8 +131,10 @@ async def get_data(file_path: Path):
         if batch:
             yield batch
 
+
 async def main():
     async for batch in get_data(file_path):
         print("Got batch with", len(batch), "rows")
+
 
 asyncio.run(main())

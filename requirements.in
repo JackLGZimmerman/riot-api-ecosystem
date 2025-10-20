@@ -10,12 +10,12 @@ pytest-asyncio
 tenacity
 memory-profiler
 psutil
-orjson
 aioprocessing
 zstandard
 aiofiles
 pylint
-
+ruff
+celery
 # Database dependencies
 redis[hiredis]
 pymongo>=4.9
