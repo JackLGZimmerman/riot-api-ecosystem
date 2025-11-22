@@ -1,21 +1,21 @@
-# =====================
-# Python
-# =====================
+##############################
+# Python / General
+##############################
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions
 *.so
 
-# =====================
-# Virtual Environments
-# =====================
+# Virtual environments
 .venv/
-env/
 venv/
+env/
+ENV/
 
-# =====================
-# Packaging / Distribution
-# =====================
+# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -33,90 +33,149 @@ var/
 *.egg
 MANIFEST
 
-# =====================
 # PyInstaller
-# =====================
 *.manifest
 *.spec
 
-# =====================
-# Logs / Reports / Tests
-# =====================
+# Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+
+##############################
+# Testing / Coverage
+##############################
 htmlcov/
 .tox/
 .nox/
 .coverage
 .coverage.*
-.cache/
+.cache
 nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
-.pyre/
-.pytype/
+
+##############################
+# Jupyter
+##############################
+.ipynb_checkpoints
+
+##############################
+# Type checking / tooling
+##############################
+# mypy
 .mypy_cache/
 .dmypy.json
 dmypy.json
 
-# =====================
-# Linters / Formatters
-# =====================
-.ruff_cache/
-ruff.toml
-.mypy_cache/
-.pytype/
+# Pyre
 .pyre/
 
-# =====================
-# Jupyter
-# =====================
-.ipynb_checkpoints/
+# pytype
+.pytype/
 
-# =====================
-# IDEs / Editors
-# =====================
-.vscode/
-.idea/
-*.swp
+# Cython debug symbols
+cython_debug/
 
-# =====================
-# OS-specific
-# =====================
-.DS_Store
-Thumbs.db
+##############################
+# Linting / Formatting
+##############################
+# Ruff
+.ruff_cache/
+ruff.toml.bak
 
-# =====================
-# Environment / Config
-# =====================
+##############################
+# Dependency / Env management
+##############################
+# uv (Python package manager)
+.uv/
+.uv-cache/
+.uv-temp/
+uv.lock
+uv.json
+
+# uvw (runtime / watcher workspace)
+.uvw/
+uvw.log
+uvw-temp/
+
+# Generic lock files
+*.lock
+Pipfile.lock
+poetry.lock
+requirements.lock
+
+# Environment files (secrets)
 .env
 .env.*
 *.env
 
-# =====================
-# App Data / Artifacts
-# =====================
-data/
+##############################
+# Editors / IDEs
+##############################
+# VS Code
+.vscode/
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+
+# Other editor cruft
+*.swp
+*.swo
+
+##############################
+# OS-specific
+##############################
+.DS_Store
+Thumbs.db
+
+##############################
+# Docker / Containers / Traefik
+##############################
+# Local docker volumes / state (if any)
+docker-data/
+docker-volume-*/
+tmp-docker/
+
+# Traefik cert & logs (sensitive / noisy)
+acme.json
+traefik.log
+traefik-access.log
+
+##############################
+# Celery / Async workers
+##############################
+celerybeat-schedule
+celerybeat.pid
+celerybeat.lock
+
+##############################
+# Logs / temp files
+##############################
 logs/
-tmp/
-__temp__/
-uploads/
-cache/
-*.db
-*.sqlite3
-
-# =====================
-# Docker
-# =====================
-*.pid
 *.log
-*.bak
-docker-compose.override.yml
+*.tmp
+tmp/
+temp/
 
-# =====================
-# Local dev configs
-# =====================
-*.local
-*.secret
+##############################
+# Project data / exports
+##############################
+# Main project data path
+data/
+
+# Common export formats (if you don’t want them in git)
+*.zst
+*.gz
+*.parquet
+*.feather
+
+##############################
+# Local overrides
+##############################
+# Uncomment if you keep local-only overrides:
+# docker-compose.override.yml
+# .env.local
+# settings.local.py
