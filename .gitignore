@@ -1,12 +1,21 @@
-# Byte-compiled / optimized / DLL files
+# =====================
+# Python
+# =====================
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
 
-# Distribution / packaging
+# =====================
+# Virtual Environments
+# =====================
+.venv/
+env/
+venv/
+
+# =====================
+# Packaging / Distribution
+# =====================
 .Python
 build/
 develop-eggs/
@@ -24,58 +33,90 @@ var/
 *.egg
 MANIFEST
 
+# =====================
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+# =====================
 *.manifest
 *.spec
 
-# Installer logs
+# =====================
+# Logs / Reports / Tests
+# =====================
 pip-log.txt
 pip-delete-this-directory.txt
-
-# Unit test / coverage reports
 htmlcov/
 .tox/
 .nox/
 .coverage
 .coverage.*
-.cache
+.cache/
 nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
-.python-version
-
-# VS Code
-.vscode/
-
-# mypy
+.pyre/
+.pytype/
 .mypy_cache/
 .dmypy.json
 dmypy.json
 
-# Pyre type checker
+# =====================
+# Linters / Formatters
+# =====================
+.ruff_cache/
+ruff.toml
+.mypy_cache/
+.pytype/
 .pyre/
 
-# pytype
-.pytype/
+# =====================
+# Jupyter
+# =====================
+.ipynb_checkpoints/
 
-# Cython debug symbols
-cython_debug/
+# =====================
+# IDEs / Editors
+# =====================
+.vscode/
+.idea/
+*.swp
 
+# =====================
 # OS-specific
+# =====================
 .DS_Store
 Thumbs.db
 
+# =====================
+# Environment / Config
+# =====================
+.env
+.env.*
+*.env
 
-
-# Data and cache
+# =====================
+# App Data / Artifacts
+# =====================
 data/
+logs/
+tmp/
+__temp__/
+uploads/
+cache/
+*.db
+*.sqlite3
 
+# =====================
+# Docker
+# =====================
+*.pid
+*.log
+*.bak
+docker-compose.override.yml
+
+# =====================
+# Local dev configs
+# =====================
+*.local
+*.secret
