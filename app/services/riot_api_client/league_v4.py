@@ -1,7 +1,10 @@
+# app/services/riot_api_client/league_v4.py
+
 from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 from typing import (
     AsyncIterator,
     Iterable,
@@ -11,7 +14,7 @@ from typing import (
     TypeVar,
 )
 
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from app.core.config.constants import (
     ENDPOINTS,
@@ -33,17 +36,14 @@ from app.models import (
     LeagueListDTO,
     MinifiedLeagueEntryDTO,
 )
-from app.services import RiotAPI
-from app.services.errors import LeagueListDTOError, MinifiedLeagueEntryError
-from app.services.riot_api_client.base import get_riot_api
-from app.services.utils import reraise
+from app.services.riot_api_client.base import RiotAPI, get_riot_api
 
 LEAGUE_PAGE_UPPER_BOUND: int = 1024
 MAX_IN_FLIGHT: int = 128
 REQUEST_TIMEOUT: int = 10
 
 riot_api: RiotAPI = get_riot_api()
-api_key: SecretStr = riot_api.api_key
+api_key: str = riot_api.api_key
 
 _ELITE_ORDER = list(EliteTiers)
 _BASIC_RANKS = [(tier, div) for tier in Tiers for div in Divisions]
@@ -53,6 +53,9 @@ T = TypeVar("T")
 UrlRegion: TypeAlias = tuple[str, Regions]
 UrlTuple: TypeAlias = list[UrlRegion]
 PageKey = Tuple[Regions, Queues, Tiers, Divisions]
+
+logger = logging.getLogger(__name__)
+
 
 # ==================================== Helpers ====================================
 
@@ -67,7 +70,11 @@ def chunked(iterable: Iterable[T], n: int) -> Iterator[list[T]]:
         yield batch
 
 
-async def _fetch_with_region_obj(url: str, region: Regions) -> tuple[Regions, JSON]:
+async def _fetch_with_region_obj(
+    url: str,
+    region: Regions,
+    riot_api: RiotAPI,
+) -> tuple[Regions, JSON]:
     data = await asyncio.wait_for(
         riot_api.fetch_json(url=url, location=region),
         timeout=REQUEST_TIMEOUT,
@@ -78,7 +85,9 @@ async def _fetch_with_region_obj(url: str, region: Regions) -> tuple[Regions, JS
 
 
 async def _fetch_with_region_list(
-    url: str, region: Regions
+    url: str,
+    region: Regions,
+    riot_api: RiotAPI,
 ) -> tuple[Regions, JSONList]:
     data = await asyncio.wait_for(
         riot_api.fetch_json(url=url, location=region),
@@ -133,9 +142,11 @@ def bounded_basic_brackets(cfg: BasicBoundConfig) -> list[tuple[Tiers, Divisions
 
 async def stream_elite_players(
     queue_bounds: EliteBoundsConfig,
+    riot_api: RiotAPI,
 ) -> AsyncIterator[MinifiedLeagueEntryDTO]:
     urls: UrlTuple = []
     template: URLTemplate = ENDPOINTS["league"]["elite"]
+    api_key = riot_api.api_key
 
     for queue, bounds in queue_bounds.items():
         if not bounds.collect:
@@ -158,32 +169,47 @@ async def stream_elite_players(
             )
 
     for batch in chunked(urls, MAX_IN_FLIGHT):
-        tasks: list[asyncio.Task[tuple[Regions, JSON]]] = [
-            asyncio.create_task(_fetch_with_region_obj(url, region))
+        tasks = [
+            asyncio.create_task(_fetch_with_region_obj(url, region, riot_api))
             for url, region in batch
         ]
 
         for future in asyncio.as_completed(tasks):
             region, resp = await future
-            with reraise(
-                LeagueListDTOError,
-                f"Failed to build LeagueListDTO (region={region.value})",
-            ):
-                dto = LeagueListDTO(**resp)
 
-            with reraise(
-                MinifiedLeagueEntryError,
-                f"Failed to create entries via MinifiedLeagueEntryDTO.from_list (region={region.value})",
-            ):
+            try:
+                dto = LeagueListDTO(**resp)
+            except Exception as e:
+                logger.warning(
+                    "Failed to build LeagueListDTO for region=%s | %s: %s",
+                    region.value,
+                    type(e).__name__,
+                    e,
+                )
+                continue
+
+            try:
                 for entry in MinifiedLeagueEntryDTO.from_list(dto, region=region):
                     yield entry
+            except Exception as e:
+                logger.warning(
+                    "Failed to create entries for region=%s | %s: %s",
+                    region.value,
+                    type(e).__name__,
+                    e,
+                )
+                continue
 
 
 async def stream_sub_elite_players(
     queue_bounds: BasicBoundsConfig,
+    riot_api: RiotAPI,
 ) -> AsyncIterator[MinifiedLeagueEntryDTO]:
-    page_bounds: dict[PageKey, int] = await _discover_page_bounds(queue_bounds)
+    page_bounds: dict[PageKey, int] = await _discover_page_bounds(
+        queue_bounds, riot_api
+    )
     template: URLTemplate = ENDPOINTS["league"]["by_queue_tier_division"]
+    api_key = riot_api.api_key
 
     for (region, queue, tier, div), last_page in page_bounds.items():
         pages = range(1, last_page + 1)
@@ -200,6 +226,7 @@ async def stream_sub_elite_players(
                             api_key=api_key,
                         ),
                         region,
+                        riot_api,
                     )
                 )
                 for pg in batch
@@ -215,8 +242,12 @@ async def stream_sub_elite_players(
                     yield MinifiedLeagueEntryDTO.from_entry(dto, region=region)
 
 
-async def _discover_page_bounds(queue_bounds: BasicBoundsConfig) -> dict[PageKey, int]:
+async def _discover_page_bounds(
+    queue_bounds: BasicBoundsConfig,
+    riot_api: RiotAPI,
+) -> dict[PageKey, int]:
     template: URLTemplate = ENDPOINTS["league"]["by_queue_tier_division"]
+    api_key = riot_api.api_key
 
     async def probe(
         region: Regions,

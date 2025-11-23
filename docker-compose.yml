@@ -11,7 +11,7 @@ services:
     depends_on:
       - rabbitmq
     volumes:
-      - ./data:/app/data   # maps local data/ into container
+      - ./data:/app/data # maps local data/ into container
 
   worker:
     build: .
@@ -21,9 +21,20 @@ services:
       CELERY_BROKER_URL: amqp://user:password@rabbitmq:5672//
     depends_on:
       - rabbitmq
+    volumes:
+      - ./data:/app/data
+
+  beat:
+    build: .
+    container_name: fifth-time-lucky-beat
+    command: celery --app app.workers.app:celery_app beat --loglevel=info
+    environment:
+      CELERY_BROKER_URL: amqp://user:password@rabbitmq:5672//
+    depends_on:
+      - rabbitmq
 
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3.13-management
     container_name: rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: user

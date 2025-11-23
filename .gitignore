@@ -148,6 +148,8 @@ traefik-access.log
 # Celery / Async workers
 ##############################
 celerybeat-schedule
+celerybeat-schedule.*
+celerybeat-schedule*
 celerybeat.pid
 celerybeat.lock
 

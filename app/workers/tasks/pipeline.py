@@ -1,13 +1,21 @@
+# app/workers/tasks/pipeline.py
+
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from logging import Logger
 
 from celery import Task
 from celery.utils.log import get_task_logger
 
-from app.models import parse_basic_bounds, parse_elite_bounds
+from app.models import (
+    BasicBoundsConfig,
+    EliteBoundsConfig,
+    parse_basic_bounds,
+    parse_elite_bounds,
+)
 from app.services.pipelines.players import run_player_collection_pipeline
+from app.services.riot_api_client.base import get_riot_api
 from app.workers.app import celery_app
 
 logger: Logger = get_task_logger(__name__)
@@ -54,7 +62,7 @@ def player_collection_task(self: Task) -> str:
     Runs in the background on the Celery worker.
     """
 
-    start_ts = datetime.utcnow()
+    start_ts = datetime.now(timezone.utc)
     logger.info(
         "Starting player_collection_task | task_id=%s | worker=%s | timestamp=%s",
         self.request.id,
@@ -62,46 +70,65 @@ def player_collection_task(self: Task) -> str:
         start_ts.isoformat(),
     )
 
-    try:
-        elite_bounds = parse_elite_bounds(
-            {
+    elite_bounds: EliteBoundsConfig = parse_elite_bounds(
+        {
+            "RANKED_SOLO_5x5": {
                 "collect": True,
                 "upper": None,
                 "lower": None,
-            }
-        )
-        sub_elite_bounds = parse_basic_bounds(
-            {
+            },
+            "RANKED_FLEX_SR": {
+                "collect": True,
+                "upper": None,
+                "lower": None,
+            },
+        }
+    )
+
+    sub_elite_bounds: BasicBoundsConfig = parse_basic_bounds(
+        {
+            "RANKED_SOLO_5x5": {
                 "collect": True,
                 "upper_tier": None,
                 "upper_division": None,
                 "lower_tier": None,
                 "lower_division": None,
-            }
-        )
+            },
+            "RANKED_FLEX_SR": {
+                "collect": True,
+                "upper_tier": None,
+                "upper_division": None,
+                "lower_tier": None,
+                "lower_division": None,
+            },
+        }
+    )
 
-        logger.info(
-            "Bounds parsed successfully | task_id=%s | elite_keys=%s | sub_elite_keys=%s",
-            self.request.id,
-            list(elite_bounds.keys()),
-            list(sub_elite_bounds.keys()),
-        )
+    logger.info(
+        "Bounds parsed successfully | task_id=%s | elite_keys=%s | sub_elite_keys=%s",
+        self.request.id,
+        list(elite_bounds.keys()),
+        list(sub_elite_bounds.keys()),
+    )
 
-        asyncio.run(
-            run_player_collection_pipeline(
+    async def _main() -> None:
+        async with get_riot_api() as riot_api:
+            await run_player_collection_pipeline(
                 elite_bounds=elite_bounds,
                 sub_elite_bounds=sub_elite_bounds,
+                riot_api=riot_api,
             )
-        )
 
-        end_ts = datetime.utcnow()
+    try:
+        asyncio.run(_main())
+
+        end_ts = datetime.now(timezone.utc)
         logger.info(
             "Finished player_collection_task | task_id=%s | runtime=%.2fs | worker=%s",
             self.request.id,
             (end_ts - start_ts).total_seconds(),
             self.request.hostname,
         )
-
         return "ok"
 
     except Exception as e:

@@ -7,6 +7,7 @@ from typing import Callable
 
 from app.core.config import settings
 from app.models import BasicBoundsConfig, EliteBoundsConfig
+from app.services.riot_api_client.base import RiotAPI
 from app.services.riot_api_client.league_v4 import (
     stream_elite_players,
     stream_sub_elite_players,
@@ -18,8 +19,10 @@ FILE_OPERATIONS: dict[str, Callable] = get_file_operations()
 
 
 async def run_player_collection_pipeline(
+    *,
     elite_bounds: EliteBoundsConfig,
     sub_elite_bounds: BasicBoundsConfig,
+    riot_api: RiotAPI,
 ) -> None:
     base_data_dir: Path = settings.data_path
 
@@ -28,13 +31,11 @@ async def run_player_collection_pipeline(
     index_dir.mkdir(parents=True, exist_ok=True)
     snapshots_dir.mkdir(parents=True, exist_ok=True)
 
-    index_path = index_dir / "seen_puuids.txt"
-
     # ============ Saving: load existing index ============
     load_index = FILE_OPERATIONS["load_puuid_index"]
     append_index = FILE_OPERATIONS["append_puuid_index"]
 
-    seen_puuids: set[str] = load_index(index_path)
+    seen_puuids: set[str] = load_index()
     new_puuids: set[str] = set()
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -42,14 +43,12 @@ async def run_player_collection_pipeline(
     # ============ Producer + Consumer: elite snapshot ============
     elite_output = snapshots_dir / f"elite_{ts}.zst"
 
-    # Producer: stream -> dedupe
     elite_rows = deduplicate_by_puuid(
-        rows=stream_elite_players(elite_bounds),
+        rows=stream_elite_players(elite_bounds, riot_api=riot_api),
         seen_puuids=seen_puuids,
         new_puuids=new_puuids,
     )
 
-    # Consumer: export to compressed file
     await zstandard_streamed_export_async(
         rows=elite_rows,
         path=elite_output,
@@ -59,7 +58,7 @@ async def run_player_collection_pipeline(
     sub_elite_output = snapshots_dir / f"sub_elite_{ts}.zst"
 
     sub_rows = deduplicate_by_puuid(
-        rows=stream_sub_elite_players(sub_elite_bounds),
+        rows=stream_sub_elite_players(sub_elite_bounds, riot_api=riot_api),
         seen_puuids=seen_puuids,
         new_puuids=new_puuids,
     )
@@ -71,4 +70,4 @@ async def run_player_collection_pipeline(
 
     # ============ Saving: append new puuids to index ============
     if new_puuids:
-        append_index(index_path, new_puuids)
+        append_index(new_puuids)

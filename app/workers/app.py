@@ -1,3 +1,4 @@
+# app/workers/app.py.venv/
 from celery import Celery  # type: ignore[import]
 
 celery_app = Celery("data_ecosystem")

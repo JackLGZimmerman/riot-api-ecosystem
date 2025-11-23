@@ -1,3 +1,5 @@
+# app/core/config/settings.py
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,6 +16,8 @@ class Settings(BaseSettings):
     base_project_path: Path = Path.cwd()
     data_path: Path = Path("data") 
     
+    data_collection_frequency: PositiveInt = 3
+
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
         case_sensitive=False,

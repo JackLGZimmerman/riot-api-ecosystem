@@ -10,6 +10,12 @@ This is to give us the minimum required threshold for all regions which acts as 
 
 Note all games will have further processing to remove games not representative of champion quality.
 
-
 ## Step 1
+
 We need to extract all of the players at the required level and above and store them in a database.
+
+## Commands
+
+- celery -A app.workers.app.celery_app worker --pool=solo -l info
+- celery -A app.workers.app.celery_app beat -l info
+- celery -A app.workers.app.celery_app call pipelines.player_collection
