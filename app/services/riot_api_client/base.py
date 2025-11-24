@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from http import HTTPStatus
 from typing import Final, Literal
@@ -29,6 +30,8 @@ RETRYABLE = {
 
 LocationScope = Literal["region", "continent"]
 
+logger = logging.getLogger("limiter")
+
 # ---------- LRU-cached limiter factories (singletons per key) ----------
 
 
@@ -40,11 +43,16 @@ def _limiter(
 ) -> RateLimiter:
     """
     One RateLimiter instance per (location, calls, period) tuple.
-
-    Using lru_cache here means the same limiter is reused across all
-    RiotAPI instances that share these parameters.
     """
-    return RateLimiter(max_calls=calls, time_period=time_period)
+
+    def log_with_location(msg: str) -> None:
+        logger.debug("[%s] %s", location_key.value, msg)
+
+    return RateLimiter(
+        max_calls=calls,
+        time_period=time_period,
+        print_func=log_with_location,
+    )
 
 
 class RiotAPI:
