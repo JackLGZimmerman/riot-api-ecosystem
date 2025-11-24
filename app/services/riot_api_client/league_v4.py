@@ -40,7 +40,6 @@ from app.services.riot_api_client.base import RiotAPI, get_riot_api
 
 LEAGUE_PAGE_UPPER_BOUND: int = 1024
 MAX_IN_FLIGHT: int = 128
-REQUEST_TIMEOUT: int = 10
 
 riot_api: RiotAPI = get_riot_api()
 api_key: str = riot_api.api_key
@@ -75,12 +74,11 @@ async def _fetch_with_region_obj(
     region: Regions,
     riot_api: RiotAPI,
 ) -> tuple[Regions, JSON]:
-    data = await asyncio.wait_for(
-        riot_api.fetch_json(url=url, location=region),
-        timeout=REQUEST_TIMEOUT,
-    )
+    data = await riot_api.fetch_json(url=url, location=region)
+
     if not isinstance(data, dict):
         raise TypeError(f"Expected dict JSON, got {type(data)}")
+
     return region, data
 
 
@@ -89,12 +87,11 @@ async def _fetch_with_region_list(
     region: Regions,
     riot_api: RiotAPI,
 ) -> tuple[Regions, JSONList]:
-    data = await asyncio.wait_for(
-        riot_api.fetch_json(url=url, location=region),
-        timeout=REQUEST_TIMEOUT,
-    )
+    data = await riot_api.fetch_json(url=url, location=region)
+
     if not isinstance(data, list):
         raise TypeError(f"Expected list[dict] JSON, got {type(data)}")
+
     return region, data
 
 
