@@ -43,6 +43,7 @@ dependencies = [
     "packaging==25.0",
     "platformdirs==4.4.0",
     "pluggy==1.6.0",
+    "prometheus-client>=0.23.1",
     "prompt-toolkit==3.0.52",
     "propcache==0.3.2",
     "psutil==7.0.0",
