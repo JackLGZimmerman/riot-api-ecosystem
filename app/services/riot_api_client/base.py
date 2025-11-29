@@ -6,6 +6,7 @@ import logging
 from functools import lru_cache
 from http import HTTPStatus
 from typing import Final, Literal
+import itertools
 
 import aiohttp
 from pydantic import PositiveFloat, PositiveInt
@@ -32,6 +33,9 @@ LocationScope = Literal["region", "continent"]
 
 logger = logging.getLogger("limiter")
 
+_global_call_counter = itertools.count(1)
+
+
 # ---------- LRU-cached limiter factories (singletons per key) ----------
 
 
@@ -45,8 +49,19 @@ def _limiter(
     One RateLimiter instance per (location, calls, period) tuple.
     """
 
+    local_call_counter = itertools.count(1)
+
     def log_with_location(msg: str) -> None:
-        logger.info("[%s] %s", location_key.value, msg)
+        local_n = next(local_call_counter)
+        global_n = next(_global_call_counter)
+
+        logger.info(
+            "[%s] [local=%d] [total=%d] %s",
+            location_key.value,
+            local_n,
+            global_n,
+            msg,
+        )
 
     return RateLimiter(
         max_calls=calls,
@@ -155,7 +170,18 @@ class RiotAPI:
             sess = await self.session()
             async with sess.get(url) as resp:
                 resp.raise_for_status()
-                return await resp.json()
+                
+                try:
+                    return await resp.json()
+                except Exception as e:
+                    body = await resp.text()
+                    logger.info(
+                        f"""
+                        [{resp.status}] [{location}] {url} Unable to JSON-deserialise response. Body: {body} generating exception {e}
+                        """
+                    )
+                    return None
+
 
     async def close(self) -> None:
         """

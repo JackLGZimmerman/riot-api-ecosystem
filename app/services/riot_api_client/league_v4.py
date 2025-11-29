@@ -178,7 +178,7 @@ async def stream_elite_players(
                 dto = LeagueListDTO(**resp)
             except Exception as e:
                 logger.warning(
-                    "Failed to build LeagueListDTO for region=%s | %s: %s",
+                    "[LeagueListDTO] Build failed | region=%s | error=%s | message=%s",
                     region.value,
                     type(e).__name__,
                     e,
