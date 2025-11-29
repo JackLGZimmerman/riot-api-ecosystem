@@ -46,7 +46,7 @@ def _limiter(
     """
 
     def log_with_location(msg: str) -> None:
-        logger.debug("[%s] %s", location_key.value, msg)
+        logger.info("[%s] %s", location_key.value, msg)
 
     return RateLimiter(
         max_calls=calls,

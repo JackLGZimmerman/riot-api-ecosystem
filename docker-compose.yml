@@ -8,11 +8,10 @@ services:
       - "8000:8000"
     environment:
       CELERY_BROKER_URL: amqp://user:password@rabbitmq:5672//
-      # any other env your app needs
     depends_on:
       - rabbitmq
     volumes:
-      - ./data:/app/data # maps local data/ into container
+      - ./data:/app/data
 
   worker:
     build: .
@@ -41,8 +40,8 @@ services:
       RABBITMQ_DEFAULT_USER: user
       RABBITMQ_DEFAULT_PASS: password
     ports:
-      - "5672:5672" # AMQP
-      - "15672:15672" # Web UI
+      - "5672:5672"
+      - "15672:15672"
 
   # ─────────────── Monitoring stack ─────────────── #
 
@@ -85,9 +84,9 @@ services:
       - "8080:8080"
     volumes:
       - /:/rootfs:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro   # talk to Docker daemon
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       - /sys:/sys:ro
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro              # cgroups
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /var/lib/docker:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
 
