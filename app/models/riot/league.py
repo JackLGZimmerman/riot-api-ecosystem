@@ -1,5 +1,18 @@
-from typing import List, Optional, TypedDict
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, TypedDict
+
 from pydantic import BaseModel, TypeAdapter
+
+from app.core.config.constants import (
+    Queues,
+    Region,
+)
+from app.core.config.constants.parameters import (
+    Divisions,
+    EliteTiers,
+    Tiers,
+)
 
 
 class MiniSeriesDTO(BaseModel):
@@ -58,20 +71,20 @@ class EntryPayload(TypedDict):
 
 class MinifiedLeagueEntryDTO(BaseModel):
     puuid: str
-    queueType: str
+    queueType: Queues
     tier: str
     rank: str
     wins: int
     losses: int
-    region: str
+    region: Region
 
     @classmethod
     def from_entry(
         cls,
-        entry: "LeagueEntryDTO",
+        entry: LeagueEntryDTO,
         *,
         region: str,
-    ) -> "MinifiedLeagueEntryDTO":
+    ) -> MinifiedLeagueEntryDTO:
         data: EntryPayload = {
             "puuid": entry.puuid,
             "queueType": entry.queueType,
@@ -86,10 +99,10 @@ class MinifiedLeagueEntryDTO(BaseModel):
     @classmethod
     def from_list(
         cls,
-        dto: "LeagueListDTO",
+        dto: LeagueListDTO,
         *,
         region: str,
-    ) -> List["MinifiedLeagueEntryDTO"]:
+    ) -> List[MinifiedLeagueEntryDTO]:
         payload: List[EntryPayload] = [
             {
                 "puuid": e.puuid,
@@ -104,3 +117,72 @@ class MinifiedLeagueEntryDTO(BaseModel):
         ]
         adapter = TypeAdapter(List[MinifiedLeagueEntryDTO])
         return adapter.validate_python(payload)
+
+
+class EliteBoundConfig(BaseModel):
+    collect: bool = True
+    upper: EliteTiers | None = None
+    lower: EliteTiers | None = None
+
+
+class BasicBoundConfig(BaseModel):
+    collect: bool = True
+    upper_tier: Tiers | None = None
+    upper_division: Divisions | None = None
+    lower_tier: Tiers | None = None
+    lower_division: Divisions | None = None
+
+
+EliteBoundsConfig = Dict[Queues, EliteBoundConfig]
+BasicBoundsConfig = Dict[Queues, BasicBoundConfig]
+
+
+_elite_bounds_adapter = TypeAdapter(EliteBoundsConfig)
+_basic_bounds_adapter = TypeAdapter(BasicBoundsConfig)
+
+
+def parse_elite_bounds(data: Any) -> EliteBoundsConfig:
+    """
+    Validate and coerce an incoming elite-bounds payload into
+    a dict[Queues, EliteBoundConfig].
+    """
+    return _elite_bounds_adapter.validate_python(data)
+
+
+def parse_basic_bounds(data: Any) -> BasicBoundsConfig:
+    """
+    Validate and coerce an incoming basic-bounds payload into
+    a dict[Queues, BasicBoundConfig].
+    """
+    return _basic_bounds_adapter.validate_python(data)
+
+
+ELITE_BOUNDS: EliteBoundsConfig = {
+    Queues.RANKED_SOLO_5x5: EliteBoundConfig(
+        collect=True,
+        upper=EliteTiers.CHALLENGER,
+        lower=EliteTiers.CHALLENGER,
+    ),
+    Queues.RANKED_FLEX_SR: EliteBoundConfig(
+        collect=False,
+        upper=EliteTiers.CHALLENGER,
+        lower=EliteTiers.CHALLENGER,
+    ),
+}
+
+BASIC_BOUNDS: BasicBoundsConfig = {
+    Queues.RANKED_SOLO_5x5: BasicBoundConfig(
+        collect=False,
+        upper_tier=Tiers.DIAMOND,
+        upper_division=Divisions.I,
+        lower_tier=Tiers.DIAMOND,
+        lower_division=Divisions.IV,
+    ),
+    Queues.RANKED_FLEX_SR: BasicBoundConfig(
+        collect=False,
+        upper_tier=Tiers.DIAMOND,
+        upper_division=Divisions.I,
+        lower_tier=Tiers.DIAMOND,
+        lower_division=Divisions.IV,
+    ),
+}

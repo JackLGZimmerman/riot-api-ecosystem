@@ -1,17 +1,16 @@
-from .league_v4 import (
-    BasicBoundConfig,
-    BasicBoundsConfig,
-    EliteBoundConfig,
-    EliteBoundsConfig,
-    parse_basic_bounds,
-    parse_elite_bounds,
-)
+
 from .riot.league import (
     LeagueEntryDTO,
     LeagueItemDTO,
     LeagueListDTO,
     MinifiedLeagueEntryDTO,
     MiniSeriesDTO,
+    BasicBoundConfig,
+    BasicBoundsConfig,
+    EliteBoundConfig,
+    EliteBoundsConfig,
+    parse_basic_bounds,
+    parse_elite_bounds,
 )
 from .riot.match import MatchIds
 

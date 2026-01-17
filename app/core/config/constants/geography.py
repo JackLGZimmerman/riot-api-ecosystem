@@ -2,14 +2,14 @@ from enum import StrEnum
 from typing import Final, Mapping
 
 
-class Continents(StrEnum):
+class Continent(StrEnum):
     AMERICAS = "americas"
     EUROPE = "europe"
     ASIA = "asia"
     SEA = "sea"
 
 
-class Regions(StrEnum):
+class Region(StrEnum):
     BR1 = "br1"
     LA1 = "la1"
     LA2 = "la2"
@@ -27,25 +27,25 @@ class Regions(StrEnum):
     SG2 = "sg2"
 
 
-REGION_TO_CONTINENT: Final[Mapping[Regions, Continents]] = {
-    Regions.BR1: Continents.AMERICAS,
-    Regions.LA1: Continents.AMERICAS,
-    Regions.LA2: Continents.AMERICAS,
-    Regions.NA1: Continents.AMERICAS,
-    Regions.EUW1: Continents.EUROPE,
-    Regions.EUN1: Continents.EUROPE,
-    Regions.RU: Continents.EUROPE,
-    Regions.TR1: Continents.EUROPE,
-    Regions.ME1: Continents.EUROPE,
-    Regions.JP1: Continents.ASIA,
-    Regions.KR: Continents.ASIA,
-    Regions.TW2: Continents.SEA,
-    Regions.OC1: Continents.SEA,
-    Regions.VN2: Continents.SEA,
-    Regions.SG2: Continents.SEA,
+REGION_TO_CONTINENT: Final[Mapping[Region, Continent]] = {
+    Region.BR1: Continent.AMERICAS,
+    Region.LA1: Continent.AMERICAS,
+    Region.LA2: Continent.AMERICAS,
+    Region.NA1: Continent.AMERICAS,
+    Region.EUW1: Continent.EUROPE,
+    Region.EUN1: Continent.EUROPE,
+    Region.RU: Continent.EUROPE,
+    Region.TR1: Continent.EUROPE,
+    Region.ME1: Continent.EUROPE,
+    Region.JP1: Continent.ASIA,
+    Region.KR: Continent.ASIA,
+    Region.TW2: Continent.SEA,
+    Region.OC1: Continent.SEA,
+    Region.VN2: Continent.SEA,
+    Region.SG2: Continent.SEA,
 }
 
-CONTINENT_TO_REGIONS: Final[Mapping[Continents, tuple[Regions, ...]]] = {
+CONTINENT_TO_REGIONS: Final[Mapping[Continent, tuple[Region, ...]]] = {
     continent: tuple(r for r, c in REGION_TO_CONTINENT.items() if c is continent)
-    for continent in Continents
+    for continent in Continent
 }

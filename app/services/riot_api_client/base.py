@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from functools import lru_cache
-from http import HTTPStatus
-from typing import Final, Literal
-import itertools
+from typing import Final
 
 import aiohttp
 from pydantic import PositiveFloat, PositiveInt
@@ -17,56 +16,47 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.core.config.constants import JSON, Continents, JSONList, Regions
+from app.api.v1.metrics.telemetry import (
+    export_http_error_code_counter,
+    export_location_event,
+)
+from app.core.config.constants import JSON, Continent, JSONList, Region
+from app.core.config.constants.generic import RETRYABLE
 from app.core.config.settings import settings
-from app.services.utils.rate_limiter import RateLimiter
+from app.services.riot_api_client.rate_limiter import (
+    DualWindowSpec,
+    Limiter,
+    TelemetryLimiter,
+)
 
-RETRYABLE = {
-    HTTPStatus.TOO_MANY_REQUESTS.value,  # 429
-    HTTPStatus.INTERNAL_SERVER_ERROR.value,  # 500
-    HTTPStatus.BAD_GATEWAY.value,  # 502
-    HTTPStatus.SERVICE_UNAVAILABLE.value,  # 503
-    HTTPStatus.GATEWAY_TIMEOUT.value,  # 504
-}
-
-LocationScope = Literal["region", "continent"]
+MAX_BODY_PREVIEW = 200
 
 logger = logging.getLogger("limiter")
 
-_global_call_counter = itertools.count(1)
 
-
-# ---------- LRU-cached limiter factories (singletons per key) ----------
+def mask_api_key(url: str) -> str:
+    return re.sub(r"(api_key=)[^&]+", r"\1*", url)
 
 
 @lru_cache(maxsize=None)
-def _limiter(
-    location_key: Regions | Continents,
-    calls: int,
-    time_period: float,
-) -> RateLimiter:
-    """
-    One RateLimiter instance per (location, calls, period) tuple.
-    """
+def _limiter(location_key: Region | Continent, calls: int, time_period: float):
+    sustained_calls = int(calls)
+    sustained_period = float(time_period)
 
-    local_call_counter = itertools.count(1)
+    core = Limiter(
+        DualWindowSpec(
+            location=location_key,
+            long_calls=sustained_calls,
+            long_period_s=sustained_period,
+        ),
+        debug=True,
+    )
 
-    def log_with_location(msg: str) -> None:
-        local_n = next(local_call_counter)
-        global_n = next(_global_call_counter)
-
-        logger.info(
-            "[%s] [local=%d] [total=%d] %s",
-            location_key.value,
-            local_n,
-            global_n,
-            msg,
-        )
-
-    return RateLimiter(
-        max_calls=calls,
-        time_period=time_period,
-        print_func=log_with_location,
+    return TelemetryLimiter(
+        core,
+        location=location_key,
+        period=sustained_period,
+        export=export_location_event,
     )
 
 
@@ -92,16 +82,16 @@ class RiotAPI:
         api_key: str | None = None,
         calls: PositiveInt = settings.rate_limit_calls,
         time_period: PositiveFloat = settings.rate_limit_period,
-        session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._api_key: Final[str] = api_key or settings.api_key.get_secret_value()
         self.calls: Final[PositiveInt] = calls
         self.time_period: Final[PositiveFloat] = time_period
 
-        self._session: aiohttp.ClientSession | None = session
-        self._external_session: Final[bool] = session is not None
+        self._session: aiohttp.ClientSession | None = None
 
-    # -------- lifecycle / context manager --------
+    @property
+    def api_key(self):
+        return self._api_key
 
     async def __aenter__(self) -> "RiotAPI":
         """
@@ -119,85 +109,80 @@ class RiotAPI:
 
         Closes the internal session if this instance created it.
         """
-        await self.close()
-
-    @property
-    def api_key(self) -> str:
-        """Expose the configured API key as a plain string."""
-        return self._api_key
-
-    async def session(self) -> aiohttp.ClientSession:
-        """
-        Return a ClientSession for this instance.
-
-        If no session exists (or it was closed), a new one is created.
-        The session is tied to the lifetime of this RiotAPI instance,
-        not globally to the process.
-        """
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
 
     # ==========================================================
 
     @retry(
-        reraise=True,
+        reraise=False,
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception(
             lambda e: isinstance(e, aiohttp.ClientResponseError)
             and e.status in RETRYABLE
         ),
+        retry_error_callback=lambda rs: None,
     )
     async def fetch_json(
         self,
         *,
         url: str,
-        location: Regions | Continents,
-    ) -> JSON | JSONList:
+        location: Region | Continent,
+    ) -> JSON | JSONList | None:
         """
         Fetch JSON from Riot API with:
         - per-(location, calls, period) rate limiter
         - retry on transient HTTP errors (429/5xx)
+        - single enriched log line per granted token from RateLimiter
         """
-        limiter: RateLimiter = _limiter(
+
+        limiter = _limiter(
             location,
-            int(self.calls),
-            float(self.time_period),
+            self.calls,
+            self.time_period,
         )
 
+        if self._session is None or self._session.closed:
+            raise RuntimeError(
+                "RiotAPI session is not initialised. "
+                "Use `async with RiotAPI()` when calling fetch_json."
+            )
+
+        session = self._session
+
         async with limiter:
-            sess = await self.session()
-            async with sess.get(url) as resp:
-                resp.raise_for_status()
-                
-                try:
-                    return await resp.json()
-                except Exception as e:
-                    body = await resp.text()
-                    logger.info(
-                        f"""
-                        [{resp.status}] [{location}] {url} Unable to JSON-deserialise response. Body: {body} generating exception {e}
-                        """
+            headers = {"X-Riot-Token": self.api_key}
+            async with session.get(url, headers=headers) as resp:
+                status: int = resp.status
+
+                if not 200 <= status < 300:
+                    export_http_error_code_counter(status)
+
+                    if status in RETRYABLE:
+                        resp.raise_for_status()
+
+                    logger.warning(
+                        "NonRetryableHTTP status=%s url=%s location=%s",
+                        status,
+                        mask_api_key(str(resp.url)),
+                        location,
                     )
                     return None
-
-
-    async def close(self) -> None:
-        """
-        Close the internal session if we own it.
-
-        If a session was injected via the constructor, we assume the caller
-        is responsible for closing it.
-        """
-        if (
-            self._session is not None
-            and not self._session.closed
-            and not self._external_session
-        ):
-            await self._session.close()
-        if not self._external_session:
-            self._session = None
+                try:
+                    return await resp.json()
+                except (aiohttp.ContentTypeError, Exception):
+                    body = await resp.text()
+                    preview = body.replace("\n", " ")[:MAX_BODY_PREVIEW]
+                    logger.warning(
+                        "NonJSONResponse status=%s url=%s location=%s len=%d preview=%r",
+                        status,
+                        mask_api_key(str(resp.url)),
+                        location,
+                        len(body),
+                        preview,
+                    )
+                    return None
 
 
 def get_riot_api(
@@ -205,23 +190,12 @@ def get_riot_api(
     api_key: str | None = None,
     calls: PositiveInt | None = None,
     time_period: PositiveFloat | None = None,
-    session: aiohttp.ClientSession | None = None,
 ) -> RiotAPI:
     """
-    Convenience factory for creating a RiotAPI instance.
-
-    This is now just a thin wrapper (no caching):
-      - Use it when you want a slightly nicer call site, or
-      - Construct RiotAPI(...) directly.
-
-    Typical usage in a pipeline:
-
-        async with get_riot_api() as riot:
-            data = await riot.fetch_json(...)
+    Factory for creating a RiotAPI instance.
     """
     return RiotAPI(
         api_key=api_key,
         calls=calls or settings.rate_limit_calls,
         time_period=time_period or settings.rate_limit_period,
-        session=session,
     )

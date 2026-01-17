@@ -1,49 +1,33 @@
-# docker-compose.yml
+x-pipeline: &pipeline
+  build: .
+  env_file:
+    - .env
+  volumes:
+    - ./app:/app/app
+    - ./lake:/app/lake
+    - player_data_collection_venv:/app/.venv
+
 services:
-  api:
-    build: .
-    container_name: fifth-time-lucky-api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+  player_data_collection:
+    <<: *pipeline
+    container_name: player_data_collection
+    command: ["/app/.venv/bin/python", "-m", "app.worker.pipelines.recurring_runner"]
     ports:
-      - "8000:8000"
+      - "8001:8001"
+  
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
     environment:
-      CELERY_BROKER_URL: amqp://user:password@rabbitmq:5672//
-    depends_on:
-      - rabbitmq
-    volumes:
-      - ./data:/app/data
-
-  worker:
-    build: .
-    container_name: fifth-time-lucky-worker
-    command: celery --app app.workers.app:celery_app worker --loglevel=info
-    environment:
-      CELERY_BROKER_URL: amqp://user:password@rabbitmq:5672//
-    depends_on:
-      - rabbitmq
-    volumes:
-      - ./data:/app/data
-
-  beat:
-    build: .
-    container_name: fifth-time-lucky-beat
-    command: celery --app app.workers.app:celery_app beat --loglevel=info
-    environment:
-      CELERY_BROKER_URL: amqp://user:password@rabbitmq:5672//
-    depends_on:
-      - rabbitmq
-
-  rabbitmq:
-    image: rabbitmq:3.13-management
-    container_name: rabbitmq
-    environment:
-      RABBITMQ_DEFAULT_USER: user
-      RABBITMQ_DEFAULT_PASS: password
+      CLICKHOUSE_DB: player_data
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
 
-  # ─────────────── Monitoring stack ─────────────── #
 
   prometheus:
     image: prom/prometheus:latest
@@ -54,7 +38,7 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=15d"
+      - "--storage.tsdb.retention.time=14d"
       - "--web.enable-lifecycle"
     ports:
       - "9090:9090"
@@ -93,3 +77,5 @@ services:
 volumes:
   prometheus_data:
   grafana_data:
+  player_data_collection_venv:
+  clickhouse_data:

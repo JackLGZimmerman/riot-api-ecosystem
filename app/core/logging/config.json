@@ -1,0 +1,56 @@
+{
+    "version": 1,
+    "disable_existing_loggers": false,
+    "formatters": {
+        "json": {
+            "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            "format": "%(asctime) %(levelname) %(name) %(message)",
+            "ensure_ascii": false
+        }
+    },  
+    "handlers": {
+        "stdout": {
+            "class": "logging.StreamHandler",
+            "level": "INFO",
+            "formatter": "json",
+            "stream": "ext://sys.stdout"
+        },
+        "stderr": {
+            "class": "logging.StreamHandler",
+            "level": "WARNING",
+            "formatter": "json",
+            "stream": "ext://sys.stderr"
+        },
+        "json_file": {
+            "class": "logging.handlers.TimedRotatingFileHandler",
+            "level": "DEBUG",
+            "formatter": "json",
+            "filename": "app/core/logging/logs/app.log.jsonl",
+            "when": "midnight",
+            "backupCount": 7,
+            "encoding": "utf-8"
+        }
+    },
+    "root": {
+        "level": "DEBUG",
+        "handlers": [
+            "stdout",
+            "stderr",
+            "json_file"
+        ]
+    },
+    "loggers": {
+        "celery": {
+            "level": "INFO",
+            "propagate": true
+        },
+        "tasks": {
+            "level": "INFO",
+            "propagate": true
+        },
+        "tasks.player_collection": {
+            "level": "DEBUG",
+            "propagate": true
+        }
+    }
+}

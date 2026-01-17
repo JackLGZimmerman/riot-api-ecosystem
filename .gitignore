@@ -1,25 +1,17 @@
-##############################
-# Python / General
-##############################
-# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
 
-# Virtual environments
 .venv/
 venv/
 env/
 ENV/
 
-# Distribution / packaging
 .Python
 build/
-develop-eggs/
 dist/
+develop-eggs/
 downloads/
 eggs/
 .eggs/
@@ -33,20 +25,10 @@ var/
 *.egg
 MANIFEST
 
-# PyInstaller
 *.manifest
 *.spec
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-##############################
-# Testing / Coverage
-##############################
 htmlcov/
-.tox/
-.nox/
 .coverage
 .coverage.*
 .cache
@@ -56,128 +38,61 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
-##############################
-# Jupyter
-##############################
-.ipynb_checkpoints
+.ipynb_checkpoints/
 
-##############################
-# Type checking / tooling
-##############################
-# mypy
 .mypy_cache/
 .dmypy.json
 dmypy.json
-
-# Pyre
 .pyre/
-
-# pytype
 .pytype/
+.pyright/
 
-# Cython debug symbols
-cython_debug/
-
-##############################
-# Linting / Formatting
-##############################
-# Ruff
 .ruff_cache/
 ruff.toml.bak
+cython_debug/
 
-##############################
-# Dependency / Env management
-##############################
-# uv (Python package manager)
 .uv/
 .uv-cache/
 .uv-temp/
-uv.lock
-uv.json
 
-# uvw (runtime / watcher workspace)
-.uvw/
-uvw.log
-uvw-temp/
-
-# Generic lock files
-*.lock
 Pipfile.lock
 poetry.lock
 requirements.lock
 
-# Environment files (secrets)
 .env
 .env.*
 *.env
+!.env.example
 
-##############################
-# Editors / IDEs
-##############################
-# VS Code
 .vscode/
-
-# PyCharm / IntelliJ
 .idea/
 *.iml
-
-# Other editor cruft
 *.swp
 *.swo
 
-##############################
-# OS-specific
-##############################
 .DS_Store
 Thumbs.db
+*.Zone.Identifier
 
-##############################
-# Docker / Containers / Traefik
-##############################
-# Local docker volumes / state (if any)
 docker-data/
 docker-volume-*/
 tmp-docker/
+docker-compose.override.yml
 
-# Traefik cert & logs (sensitive / noisy)
-acme.json
-traefik.log
-traefik-access.log
-
-##############################
-# Celery / Async workers
-##############################
 celerybeat-schedule
 celerybeat-schedule.*
-celerybeat-schedule*
 celerybeat.pid
 celerybeat.lock
 
-##############################
-# Logs / temp files
-##############################
 logs/
 *.log
 *.tmp
 tmp/
 temp/
 
-##############################
-# Project data / exports
-##############################
-# Main project data path
-data/
+app/core/logging/logs/
 
-# Common export formats (if you don’t want them in git)
-*.zst
-*.gz
-*.parquet
-*.feather
+lake/*
+!lake/.gitkeep
 
-##############################
-# Local overrides
-##############################
-# Uncomment if you keep local-only overrides:
-# docker-compose.override.yml
-# .env.local
-# settings.local.py
+__pypackages__/

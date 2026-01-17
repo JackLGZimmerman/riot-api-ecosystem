@@ -4,19 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import PositiveFloat, PositiveInt, SecretStr
+from pydantic import PositiveInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+
 class Settings(BaseSettings):
     api_key: SecretStr
     rate_limit_calls: PositiveInt = 100
-    rate_limit_period: PositiveFloat = 120.0
+    rate_limit_period: PositiveInt = 120
+    rate_limit_burst_calls: PositiveInt = 20
+    rate_limit_burst_period: PositiveInt = 1
     base_project_path: Path = Path.cwd()
-    data_path: Path = Path("data") 
-    
-    data_collection_frequency: PositiveInt = 3
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
