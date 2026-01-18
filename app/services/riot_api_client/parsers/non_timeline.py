@@ -3,40 +3,28 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, TypedDict, cast
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt, RootModel, ValidationError
-
-ChallengeValue = (
-    NonNegativeInt | float | list[NonNegativeInt] | list[float] | str | bool | None
+from pydantic import (
+    NonNegativeInt,
+    PositiveInt,
+    ValidationError,
 )
 
-InT = TypeVar("InT", contravariant=True)
-OutT = TypeVar("OutT", covariant=True)
+from app.services.riot_api_client.parsers.base_parsers import (
+    EventParser,
+    ParticipantParser,
+)
+from app.services.riot_api_client.parsers.models.non_timeline import (
+    Feats,
+    Info,
+    Metadata,
+    NonTimeline,
+    Participant,
+)
 
 
-class EventParser(Protocol[InT, OutT]):
-    def parse(self, validated: InT) -> OutT: ...
-
-
-POutT = TypeVar("POutT", covariant=True)
-
-
-class ParticipantParser(Protocol[POutT]):
-    def parse(
-        self, participants: list[Participant], gameId: NonNegativeInt
-    ) -> POutT: ...
-
-
-RawT = TypeVar("RawT", contravariant=True)
-RunOutT = TypeVar("RunOutT", covariant=True)
-
-
-class Orchestrator(Protocol[RawT, RunOutT]):
-    def run(self, raw: RawT) -> RunOutT: ...
-
-
-class TabulatedMetadata(BaseModel):
+class TabulatedMetadata(TypedDict):
     matchId: str
     dataVersion: str
     participants: list[str]
@@ -44,28 +32,28 @@ class TabulatedMetadata(BaseModel):
 
 class MetadataParser:
     def parse(self, validated: Metadata) -> TabulatedMetadata:
-        return TabulatedMetadata(
-            matchId=validated.matchId,
-            dataVersion=validated.dataVersion,
-            participants=validated.participants,
-        )
+        return {
+            "matchId": validated.matchId,
+            "dataVersion": validated.dataVersion,
+            "participants": validated.participants,
+        }
 
 
-class TabulatedInfo(BaseModel):
-    endOfGameResult: EndOfGameResult
+class TabulatedInfo(TypedDict):
+    endOfGameResult: str
     gameCreation: NonNegativeInt
     gameDuration: NonNegativeInt
     gameEndTimestamp: NonNegativeInt
     gameId: NonNegativeInt
     gameStartTimestamp: NonNegativeInt
-    gameType: GameType
+    gameType: str
     gameVersion: str
     season: str
     patch: str
     subVersion: str
-    mapId: MapID
-    platformId: PlatformID
-    queueId: QueueID
+    mapId: PositiveInt
+    platformId: str
+    queueId: PositiveInt
 
 
 class GameInfoParser:
@@ -73,84 +61,87 @@ class GameInfoParser:
         gameVersion = validated.gameVersion
         season, patch, subVersion = gameVersion.split(".", 2)
 
-        return TabulatedInfo(
-            endOfGameResult=validated.endOfGameResult,
-            gameCreation=validated.gameCreation,
-            gameDuration=validated.gameDuration,
-            gameEndTimestamp=validated.gameEndTimestamp,
-            gameId=validated.gameId,
-            gameStartTimestamp=validated.gameStartTimestamp,
-            gameType=validated.gameType,
-            gameVersion=validated.gameVersion,
-            season=season,
-            patch=patch,
-            subVersion=subVersion,
-            mapId=validated.mapId,
-            platformId=validated.platformId,
-            queueId=validated.queueId,
-        )
+        return {
+            "endOfGameResult": validated.endOfGameResult,
+            "gameCreation": validated.gameCreation,
+            "gameDuration": validated.gameDuration,
+            "gameEndTimestamp": validated.gameEndTimestamp,
+            "gameId": validated.gameId,
+            "gameStartTimestamp": validated.gameStartTimestamp,
+            "gameType": validated.gameType,
+            "gameVersion": gameVersion,
+            "season": season,
+            "patch": patch,
+            "subVersion": subVersion,
+            "mapId": validated.mapId,
+            "platformId": validated.platformId,
+            "queueId": validated.queueId,
+        }
 
 
-class TabulatedBan(BaseModel):
+class TabulatedBan(TypedDict):
     gameId: NonNegativeInt
-    teamId: TeamID
-    pickTurn: PickTurn
+    teamId: PositiveInt
+    pickTurn: PositiveInt
     championId: int
 
 
 class BansParser:
     def parse(self, validated: Info) -> list[TabulatedBan]:
-        teams = validated.teams
         gameId: NonNegativeInt = validated.gameId
+        rows: list[TabulatedBan] = []
 
-        tabulated_bans: list[TabulatedBan] = []
-        for team in teams:
-            bans: list[Ban] = team.bans
-            teamId: TeamID = team.teamId
-            for ban in bans:
-                tabulated_bans.append(
-                    TabulatedBan(
-                        gameId=gameId,
-                        teamId=teamId,
-                        pickTurn=ban.pickTurn,
-                        championId=ban.championId,
-                    )
+        for team in validated.teams:
+            teamId: PositiveInt = team.teamId
+            for ban in team.bans:
+                rows.append(
+                    {
+                        "gameId": gameId,
+                        "teamId": teamId,
+                        "pickTurn": ban.pickTurn,
+                        "championId": ban.championId,
+                    }
                 )
-        return tabulated_bans
+
+        return rows
 
 
-class TabulatedFeat(BaseModel):
+class TabulatedFeat(TypedDict):
     gameId: NonNegativeInt
-    teamId: TeamID
+    teamId: PositiveInt
     featType: str
     featState: int
 
 
 class FeatsParser:
     def parse(self, validated: Info) -> list[TabulatedFeat]:
-        tabulated_feats: list[TabulatedFeat] = []
         gameId: NonNegativeInt = validated.gameId
+        rows: list[TabulatedFeat] = []
 
         for team in validated.teams:
-            teamId: TeamID = team.teamId
+            teamId: PositiveInt = team.teamId
             feats: Feats = team.feats
 
-            for feat_type, feat_state in feats.model_dump().items():
-                tabulated_feats.append(
-                    TabulatedFeat(
-                        gameId=gameId,
-                        teamId=teamId,
-                        featType=feat_type,
-                        featState=feat_state["featState"],
+            dumped: dict[str, Any] = feats.model_dump()
+            for feat_type, feat_state in dumped.items():
+                rows.append(
+                    cast(
+                        TabulatedFeat,
+                        {
+                            "gameId": gameId,
+                            "teamId": teamId,
+                            "featType": feat_type,
+                            "featState": feat_state["featState"],
+                        },
                     )
                 )
 
-        return tabulated_feats
+        return rows
 
 
-class TabulatedObjective(BaseModel):
+class TabulatedObjective(TypedDict):
     gameId: NonNegativeInt
-    teamId: TeamID
+    teamId: PositiveInt
     objectiveType: str
     first: bool
     kills: NonNegativeInt
@@ -162,29 +153,37 @@ class ObjectivesParser:
         gameId: NonNegativeInt = validated.gameId
 
         for team in validated.teams:
-            teamId: TeamID = team.teamId
+            teamId: PositiveInt = team.teamId
             objectives = team.objectives
-
-            if not objectives:
+            if objectives is None:
                 continue
 
-            for obj_type, obj in objectives.model_dump().items():
-                rows.append(
-                    TabulatedObjective(
-                        gameId=gameId,
-                        teamId=teamId,
-                        objectiveType=obj_type,
-                        first=obj["first"],
-                        kills=obj["kills"],
-                    )
-                )
+            for objectiveType in (
+                "baron",
+                "champion",
+                "dragon",
+                "horde",
+                "inhibitor",
+                "riftHerald",
+                "tower",
+            ):
+                obj = getattr(objectives, objectiveType, None)
+                if obj is None:
+                    continue
+
+                row = {
+                    "gameId": gameId,
+                    "teamId": teamId,
+                    "objectiveType": objectiveType,
+                    "first": obj.first,
+                    "kills": obj.kills,
+                }
+                rows.append(cast(TabulatedObjective, row))
 
         return rows
 
 
-class TabulatedParticipantStats(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class TabulatedParticipantStats(TypedDict):
     gameId: NonNegativeInt
     participantId: NonNegativeInt
     puuid: str
@@ -382,16 +381,14 @@ class ParticipantStatsParser:
             )
             data["gameId"] = gameId
 
-            rows.append(TabulatedParticipantStats.model_validate(data))
+            rows.append(cast(TabulatedParticipantStats, data))
 
         return rows
 
 
-class TabulatedParticipantChallenges(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class TabulatedParticipantChallenges(TypedDict):
     gameId: NonNegativeInt
-    teamId: TeamID
+    teamId: PositiveInt
     puuid: str
 
 
@@ -401,7 +398,7 @@ class ParticipantChallengesParser:
     ) -> list[TabulatedParticipantChallenges]:
         rows: list[TabulatedParticipantChallenges] = []
         for p in participants:
-            teamId: TeamID = p.teamId
+            teamId: PositiveInt = p.teamId
             puuid: str = p.puuid
 
             data = p.challenges.model_dump()
@@ -409,15 +406,13 @@ class ParticipantChallengesParser:
             data["teamId"] = teamId
             data["puuid"] = puuid
 
-            rows.append(TabulatedParticipantChallenges.model_validate(data))
+            rows.append(data)
         return rows
 
 
-class TabulatedParticipantPerks(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class TabulatedParticipantPerks(TypedDict):
     gameId: NonNegativeInt
-    teamId: TeamID
+    teamId: PositiveInt
     puuid: str
 
     stat_defense: int
@@ -456,9 +451,7 @@ class TabulatedParticipantPerks(BaseModel):
 
 class ParticipantPerksParser:
     def parse(
-        self,
-        participants: list[Participant],
-        gameId: NonNegativeInt,
+        self, participants: list[Participant], gameId: NonNegativeInt
     ) -> list[TabulatedParticipantPerks]:
         rows: list[TabulatedParticipantPerks] = []
 
@@ -470,7 +463,7 @@ class ParticipantPerksParser:
             primary = style_by_desc["primaryStyle"]
             sub = style_by_desc["subStyle"]
 
-            payload: dict[str, int | str] = {
+            payload: dict[str, Any] = {
                 "gameId": gameId,
                 "teamId": p.teamId,
                 "puuid": p.puuid,
@@ -493,7 +486,7 @@ class ParticipantPerksParser:
             add_selections("primary", primary.selections, 4)
             add_selections("sub", sub.selections, 2)
 
-            rows.append(TabulatedParticipantPerks.model_validate(payload))
+            rows.append(cast(TabulatedParticipantPerks, payload))
 
         return rows
 
@@ -544,310 +537,6 @@ class MatchDataNonTimelineParsingOrchestrator:
             ),
             participant_perks=self.participantPerks.parse(participants, gameId),
         )
-
-
-class NonTimeline(BaseModel):
-    metadata: Metadata
-    info: Info
-
-
-class Metadata(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    dataVersion: str
-    matchId: str
-    participants: list[str]
-
-
-EndOfGameResult = Literal["GameComplete"]
-GameMode = Literal["CLASSIC"]
-GameType = Literal["MATCHED_GAME"]
-MapID = Literal[11]
-PlatformID = Literal[
-    "BR1",
-    "LA1",
-    "LA2",
-    "NA1",
-    "EUW1",
-    "EUN1",
-    "RU",
-    "TR1",
-    "ME1",
-    "JP1",
-    "KR",
-    "TW2",
-    "OC1",
-    "VN2",
-    "SG2",
-]
-QueueID = Literal[420, 440]
-PickTurn = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-TeamID = Literal[100, 200]
-IndividualPosition = Literal["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
-Lane = Literal["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
-Role = Literal["TOP", "NONE", "CARRY", "SOLO", "SUPPORT", "DUO"]
-TeamPosition = Literal["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
-
-
-class Challenges(RootModel[dict[str, ChallengeValue]]):
-    pass
-
-
-class Missions(BaseModel):
-    playerScore0: NonNegativeInt
-    playerScore1: NonNegativeInt
-    playerScore2: NonNegativeInt
-    playerScore3: NonNegativeInt
-    playerScore4: NonNegativeInt
-    playerScore5: NonNegativeInt
-    playerScore6: NonNegativeInt
-    playerScore7: NonNegativeInt
-    playerScore8: NonNegativeInt
-    playerScore9: NonNegativeInt
-    playerScore10: NonNegativeInt
-    playerScore11: NonNegativeInt
-
-
-class StatPerks(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    defense: NonNegativeInt
-    flex: NonNegativeInt
-    offense: NonNegativeInt
-
-
-class PerkSelection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    perk: NonNegativeInt
-    var1: NonNegativeInt
-    var2: NonNegativeInt
-    var3: NonNegativeInt
-
-
-class PerkStyle(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    description: str
-    selections: list[PerkSelection]
-    style: NonNegativeInt
-
-
-class Perks(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    statPerks: StatPerks
-    styles: list[PerkStyle]
-
-
-class Participant(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    PlayerScore0: NonNegativeInt
-    PlayerScore1: NonNegativeInt
-    PlayerScore10: NonNegativeInt
-    PlayerScore11: NonNegativeInt
-    PlayerScore2: NonNegativeInt
-    PlayerScore3: NonNegativeInt
-    PlayerScore4: NonNegativeInt
-    PlayerScore5: NonNegativeInt
-    PlayerScore6: NonNegativeInt
-    PlayerScore7: NonNegativeInt
-    PlayerScore8: NonNegativeInt
-    PlayerScore9: NonNegativeInt
-    allInPings: NonNegativeInt
-    assistMePings: NonNegativeInt
-    assists: NonNegativeInt
-    baronKills: NonNegativeInt
-    basicPings: NonNegativeInt
-    challenges: Challenges
-    champExperience: NonNegativeInt
-    champLevel: NonNegativeInt
-    championId: NonNegativeInt
-    championName: str
-    championTransform: NonNegativeInt
-    commandPings: NonNegativeInt
-    consumablesPurchased: NonNegativeInt
-    damageDealtToBuildings: NonNegativeInt
-    damageDealtToEpicMonsters: NonNegativeInt
-    damageDealtToObjectives: NonNegativeInt
-    damageDealtToTurrets: NonNegativeInt
-    damageSelfMitigated: NonNegativeInt
-    dangerPings: NonNegativeInt
-    deaths: NonNegativeInt
-    detectorWardsPlaced: NonNegativeInt
-    doubleKills: NonNegativeInt
-    dragonKills: NonNegativeInt
-    eligibleForProgression: bool
-    enemyMissingPings: NonNegativeInt
-    enemyVisionPings: NonNegativeInt
-    firstBloodAssist: bool
-    firstBloodKill: bool
-    firstTowerAssist: bool
-    firstTowerKill: bool
-    gameEndedInEarlySurrender: bool
-    gameEndedInSurrender: bool
-    getBackPings: NonNegativeInt
-    goldEarned: NonNegativeInt
-    goldSpent: NonNegativeInt
-    holdPings: NonNegativeInt
-    individualPosition: IndividualPosition
-    inhibitorKills: NonNegativeInt
-    inhibitorTakedowns: NonNegativeInt
-    inhibitorsLost: NonNegativeInt
-    item0: NonNegativeInt
-    item1: NonNegativeInt
-    item2: NonNegativeInt
-    item3: NonNegativeInt
-    item4: NonNegativeInt
-    item5: NonNegativeInt
-    item6: NonNegativeInt
-    itemsPurchased: NonNegativeInt
-    killingSprees: NonNegativeInt
-    kills: NonNegativeInt
-    lane: Lane
-    largestCriticalStrike: NonNegativeInt
-    largestKillingSpree: NonNegativeInt
-    largestMultiKill: NonNegativeInt
-    longestTimeSpentLiving: NonNegativeInt
-    magicDamageDealt: NonNegativeInt
-    magicDamageDealtToChampions: NonNegativeInt
-    magicDamageTaken: NonNegativeInt
-    missions: Missions
-    needVisionPings: NonNegativeInt
-    neutralMinionsKilled: NonNegativeInt
-    nexusKills: NonNegativeInt
-    nexusLost: NonNegativeInt
-    nexusTakedowns: NonNegativeInt
-    objectivesStolen: NonNegativeInt
-    objectivesStolenAssists: NonNegativeInt
-    onMyWayPings: NonNegativeInt
-    participantId: NonNegativeInt
-    pentaKills: NonNegativeInt
-    perks: Perks
-    physicalDamageDealt: NonNegativeInt
-    physicalDamageDealtToChampions: NonNegativeInt
-    physicalDamageTaken: NonNegativeInt
-    placement: NonNegativeInt
-    playerAugment1: NonNegativeInt
-    playerAugment2: NonNegativeInt
-    playerAugment3: NonNegativeInt
-    playerAugment4: NonNegativeInt
-    playerAugment5: NonNegativeInt
-    playerAugment6: NonNegativeInt
-    playerSubteamId: NonNegativeInt
-    profileIcon: NonNegativeInt
-    pushPings: NonNegativeInt
-    puuid: str
-    quadraKills: NonNegativeInt
-    retreatPings: NonNegativeInt
-    riotIdGameName: str
-    riotIdTagline: str
-    role: Role | None
-    roleBoundItem: NonNegativeInt
-    sightWardsBoughtInGame: NonNegativeInt
-    spell1Casts: NonNegativeInt
-    spell2Casts: NonNegativeInt
-    spell3Casts: NonNegativeInt
-    spell4Casts: NonNegativeInt
-    subteamPlacement: NonNegativeInt
-    summoner1Casts: NonNegativeInt
-    summoner1Id: NonNegativeInt
-    summoner2Casts: NonNegativeInt
-    summoner2Id: NonNegativeInt
-    summonerId: str
-    summonerLevel: NonNegativeInt
-    summonerName: str
-    teamEarlySurrendered: bool
-    teamId: TeamID
-    teamPosition: TeamPosition
-    timeCCingOthers: NonNegativeInt
-    timePlayed: NonNegativeInt
-    totalAllyJungleMinionsKilled: NonNegativeInt
-    totalDamageDealt: NonNegativeInt
-    totalDamageDealtToChampions: NonNegativeInt
-    totalDamageShieldedOnTeammates: NonNegativeInt
-    totalDamageTaken: NonNegativeInt
-    totalEnemyJungleMinionsKilled: NonNegativeInt
-    totalHeal: NonNegativeInt
-    totalHealsOnTeammates: NonNegativeInt
-    totalMinionsKilled: NonNegativeInt
-    totalTimeCCDealt: NonNegativeInt
-    totalTimeSpentDead: NonNegativeInt
-    totalUnitsHealed: NonNegativeInt
-    tripleKills: NonNegativeInt
-    trueDamageDealt: NonNegativeInt
-    trueDamageDealtToChampions: NonNegativeInt
-    trueDamageTaken: NonNegativeInt
-    turretKills: NonNegativeInt
-    turretTakedowns: NonNegativeInt
-    turretsLost: NonNegativeInt
-    unrealKills: NonNegativeInt
-    visionClearedPings: NonNegativeInt
-    visionScore: NonNegativeInt
-    visionWardsBoughtInGame: NonNegativeInt
-    wardsKilled: NonNegativeInt
-    wardsPlaced: NonNegativeInt
-    win: bool
-
-
-class FeatState(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    featState: NonNegativeInt
-
-
-class Feats(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    EPIC_MONSTER_KILL: FeatState
-    FIRST_BLOOD: FeatState
-    FIRST_TURRET: FeatState
-
-
-class Ban(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    championId: NonNegativeInt
-    pickTurn: PickTurn
-
-
-class ObjectiveStat(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    first: bool
-    kills: NonNegativeInt
-
-
-class Objectives(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    atakhan: ObjectiveStat
-    baron: ObjectiveStat
-    champion: ObjectiveStat
-    dragon: ObjectiveStat
-    horde: ObjectiveStat
-    inhibitor: ObjectiveStat
-    riftHerald: ObjectiveStat
-    tower: ObjectiveStat
-
-
-class Team(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    bans: list[Ban]
-    feats: Feats
-    objectives: Objectives
-    teamId: TeamID
-    win: bool
-
-
-class Info(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    endOfGameResult: EndOfGameResult
-    gameCreation: NonNegativeInt
-    gameDuration: NonNegativeInt
-    gameEndTimestamp: NonNegativeInt
-    gameId: NonNegativeInt
-    gameMode: GameMode
-    gameName: str
-    gameStartTimestamp: NonNegativeInt
-    gameType: GameType
-    gameVersion: str
-    mapId: MapID
-    participants: list[Participant]
-    platformId: PlatformID
-    queueId: QueueID
-    teams: list[Team]
-    tournamentCode: str
 
 
 if __name__ == "__main__":

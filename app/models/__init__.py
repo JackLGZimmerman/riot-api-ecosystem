@@ -1,18 +1,16 @@
-
 from .riot.league import (
+    BasicBoundConfig,
+    BasicBoundsConfig,
+    EliteBoundConfig,
+    EliteBoundsConfig,
     LeagueEntryDTO,
     LeagueItemDTO,
     LeagueListDTO,
     MinifiedLeagueEntryDTO,
     MiniSeriesDTO,
-    BasicBoundConfig,
-    BasicBoundsConfig,
-    EliteBoundConfig,
-    EliteBoundsConfig,
     parse_basic_bounds,
     parse_elite_bounds,
 )
-from .riot.match import MatchIds
 
 __all__ = [
     # League Data Transfer Objects (DTOs)
@@ -22,8 +20,6 @@ __all__ = [
     "LeagueEntryDTO",
     "MinifiedLeagueEntryDTO",
     # Match Data Transfer Objects (DTOs)
-    "MatchIds",
-    # Script Transfer Objects
     "EliteBoundsConfig",
     "BasicBoundsConfig",
     "EliteBoundConfig",

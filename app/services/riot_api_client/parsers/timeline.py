@@ -3,44 +3,51 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generic, Literal, Protocol, TypeVar
+from typing import (
+    Any,
+    ClassVar,
+    Generic,
+    Literal,
+    TypedDict,
+    TypeVar,
+    cast,
+)
 
-from pydantic import BaseModel, ConfigDict, RootModel, NonNegativeInt
+from pydantic import (
+    NonNegativeInt,
+    ValidationError,
+)
 
-Raw_contra = TypeVar("Raw_contra", bound=BaseModel, contravariant=True)
-Out_co = TypeVar("Out_co", bound=BaseModel, covariant=True)
-Out = TypeVar("Out", bound=BaseModel)
-
-
-class EventParser(Protocol[Raw_contra, Out_co]):
-    def parse(self, raw: Raw_contra) -> Out_co: ...
-
-
-class Orchestrator(Protocol[Raw_contra, Out_co]):
-    def run(self, raw: Raw_contra) -> Out_co: ...
-
-
-EndOfGameResult = Literal["GameComplete"]
-EventValues = NonNegativeInt | str | dict[str, Any]
-ParticipantID = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+from app.services.riot_api_client.parsers.base_parsers import EventParser
+from app.services.riot_api_client.parsers.models.timeline import (
+    EventBase,
+    Frame,
+    Info,
+    Metadata,
+    Position,
+    Timeline,
+)
 
 
-class MatchMetadata(BaseModel):
+class TabulatedMetadata(TypedDict):
     matchId: str
+    dataVersion: str
+    participants: list[str]
 
 
-class Participant(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class MetadataParser:
+    def parse(self, validated: Metadata) -> TabulatedMetadata:
+        return {
+            "matchId": validated.matchId,
+            "dataVersion": validated.dataVersion,
+            "participants": validated.participants,
+        }
+
+
+class TabulatedParticipantStats(TypedDict):
+    frame_timestamp: NonNegativeInt
     participantId: NonNegativeInt
-    puuid: str
 
-
-class Event(RootModel[EventValues]):
-    pass
-
-
-class ChampionStats(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     abilityHaste: NonNegativeInt
     abilityPower: NonNegativeInt
     armor: NonNegativeInt
@@ -67,9 +74,8 @@ class ChampionStats(BaseModel):
     powerRegen: NonNegativeInt
     spellVamp: NonNegativeInt
 
+    currentGold: NonNegativeInt
 
-class DamageStats(BaseModel):
-    model_config = ConfigDict(extra="forbid")
     magicDamageDone: NonNegativeInt
     magicDamageDoneToChampions: NonNegativeInt
     magicDamageTaken: NonNegativeInt
@@ -83,72 +89,299 @@ class DamageStats(BaseModel):
     trueDamageDoneToChampions: NonNegativeInt
     trueDamageTaken: NonNegativeInt
 
-
-class Position(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    x: NonNegativeInt
-    y: NonNegativeInt
-
-
-class ParticipantStats(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    championStats: ChampionStats
-    currentGold: str
-    damageStats: DamageStats
     goldPerSecond: NonNegativeInt
     jungleMinionsKilled: NonNegativeInt
     level: NonNegativeInt
     minionsKilled: NonNegativeInt
-    participantId: ParticipantID
     position: Position
     timeEnemySpentControlled: NonNegativeInt
     totalGold: NonNegativeInt
     xp: NonNegativeInt
 
 
-class ParticipantFrames(RootModel[dict[NonNegativeInt, ParticipantStats]]):
-    pass
+class ParticipantStatsParser:
+    def parse(self, frames: list[Frame]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+
+        for frame in frames:
+            frame_timestamp: NonNegativeInt = frame.timestamp
+            for pf in frame.participantFrames.root.values():
+                rows.append(
+                    {
+                        "frame_timestamp": frame_timestamp,
+                        **pf.championStats.model_dump(),
+                        "currentGold": pf.currentGold,
+                        **pf.damageStats.model_dump(),
+                        "goldPerSecond": pf.goldPerSecond,
+                        "jungleMinionsKilled": pf.jungleMinionsKilled,
+                        "level": pf.level,
+                        "minionsKilled": pf.minionsKilled,
+                        "participantId": pf.participantId,
+                        "position": pf.position,
+                        "timeEnemySpentControlled": pf.timeEnemySpentControlled,
+                        "totalGold": pf.totalGold,
+                        "xp": pf.xp,
+                    }
+                )
+
+        return rows
 
 
-class Frame(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    events: str
-    participantFrames: str
-    timestamp: NonNegativeInt
+class BuildingKillPayload(TypedDict, total=False): ...
 
 
-class Info(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    endOfGameResult: EndOfGameResult
-    framePositiveInterval: NonNegativeInt
-    Frames: list[Frame]
-    gameId: NonNegativeInt
-    participants: list[Participant]
+class BuildingKillRow(EventBase):
+    type: Literal["BUILDING_KILL"]
+    payload: BuildingKillPayload
 
 
-class Timeline(BaseModel):
-    metadata: Metadata
-    info: Info
+class ChampionKillPayload(TypedDict, total=False): ...
 
 
-class MetadataParser:
-    def parse(self, raw: Timeline) -> MatchMetadata:
-        return MatchMetadata(matchId=str(raw.metadata.matchId))
+class ChampionKillRow(EventBase):
+    type: Literal["CHAMPION_KILL"]
+    payload: ChampionKillPayload
+
+
+class ChampionSpecialKillPayload(TypedDict, total=False): ...
+
+
+class ChampionSpecialKillRow(EventBase):
+    type: Literal["CHAMPION_SPECIAL_KILL"]
+    payload: ChampionSpecialKillPayload
+
+
+class DragonSoulGivenPayload(TypedDict, total=False): ...
+
+
+class DragonSoulGivenRow(EventBase):
+    type: Literal["DRAGON_SOUL_GIVEN"]
+    payload: DragonSoulGivenPayload
+
+
+class EliteMonsterKillPayload(TypedDict, total=False): ...
+
+
+class EliteMonsterKillRow(EventBase):
+    type: Literal["ELITE_MONSTER_KILL"]
+    payload: EliteMonsterKillPayload
+
+
+class GameEndPayload(TypedDict, total=False): ...
+
+
+class GameEndRow(EventBase):
+    type: Literal["GAME_END"]
+    payload: GameEndPayload
+
+
+class ItemDestroyedPayload(TypedDict, total=False): ...
+
+
+class ItemDestroyedRow(EventBase):
+    type: Literal["ITEM_DESTROYED"]
+    payload: ItemDestroyedPayload
+
+
+class ItemPurchasedPayload(TypedDict, total=False): ...
+
+
+class ItemPurchasedRow(EventBase):
+    type: Literal["ITEM_PURCHASED"]
+    payload: ItemPurchasedPayload
+
+
+class ItemSoldPayload(TypedDict, total=False): ...
+
+
+class ItemSoldRow(EventBase):
+    type: Literal["ITEM_SOLD"]
+    payload: ItemSoldPayload
+
+
+class ItemUndoPayload(TypedDict, total=False): ...
+
+
+class ItemUndoRow(EventBase):
+    type: Literal["ITEM_UNDO"]
+    payload: ItemUndoPayload
+
+
+class LevelUpPayload(TypedDict, total=False): ...
+
+
+class LevelUpRow(EventBase):
+    type: Literal["LEVEL_UP"]
+    payload: LevelUpPayload
+
+
+class PauseEndPayload(TypedDict, total=False): ...
+
+
+class PauseEndRow(EventBase):
+    type: Literal["PAUSE_END"]
+    payload: PauseEndPayload
+
+
+class SkillLevelUpPayload(TypedDict, total=False): ...
+
+
+class SkillLevelUpRow(EventBase):
+    type: Literal["SKILL_LEVEL_UP"]
+    payload: SkillLevelUpPayload
+
+
+class TurretPlateDestroyedPayload(TypedDict, total=False): ...
+
+
+class TurretPlateDestroyedRow(EventBase):
+    type: Literal["TURRET_PLATE_DESTROYED"]
+    payload: TurretPlateDestroyedPayload
+
+
+class WardKillPayload(TypedDict, total=False): ...
+
+
+class WardKillRow(EventBase):
+    type: Literal["WARD_KILL"]
+    payload: WardKillPayload
+
+
+class WardPlacedPayload(TypedDict, total=False): ...
+
+
+class WardPlacedRow(EventBase):
+    type: Literal["WARD_PLACED"]
+    payload: WardPlacedPayload
+
+
+RowT = TypeVar("RowT", bound=EventBase)
+
+
+class EventTypeParser(Generic[RowT]):
+    EVENT_TYPE: ClassVar[str]
+
+    def parse(self, frames: list["Frame"]) -> list[RowT]:
+        rows: list[RowT] = []
+
+        for frame in frames:
+            frame_timestamp: "NonNegativeInt" = frame.timestamp
+
+            for e in frame.events:
+                if e["type"] != self.EVENT_TYPE:
+                    continue
+
+                type_: str = e["type"]
+                rows.append(
+                    cast(
+                        RowT,
+                        {
+                            "frame_timestamp": frame_timestamp,
+                            "type": type_,
+                            "timestamp": e["timestamp"],
+                            "payload": {
+                                k: v
+                                for k, v in e.items()
+                                if k not in {"type", "timestamp"}
+                            },
+                        },
+                    )
+                )
+
+        return rows
+
+
+class BuildingKillParser(EventTypeParser[BuildingKillRow]):
+    EVENT_TYPE = "BUILDING_KILL"
+
+
+class ChampionKillParser(EventTypeParser[ChampionKillRow]):
+    EVENT_TYPE = "CHAMPION_KILL"
+
+
+class ChampionSpecialKillParser(EventTypeParser[ChampionSpecialKillRow]):
+    EVENT_TYPE = "CHAMPION_SPECIAL_KILL"
+
+
+class DragonSoulGivenParser(EventTypeParser[DragonSoulGivenRow]):
+    EVENT_TYPE = "DRAGON_SOUL_GIVEN"
+
+
+class EliteMonsterKillParser(EventTypeParser[EliteMonsterKillRow]):
+    EVENT_TYPE = "ELITE_MONSTER_KILL"
+
+
+class GameEndParser(EventTypeParser[GameEndRow]):
+    EVENT_TYPE = "GAME_END"
+
+
+class ItemDestroyedParser(EventTypeParser[ItemDestroyedRow]):
+    EVENT_TYPE = "ITEM_DESTROYED"
+
+
+class ItemPurchasedParser(EventTypeParser[ItemPurchasedRow]):
+    EVENT_TYPE = "ITEM_PURCHASED"
+
+
+class ItemSoldParser(EventTypeParser[ItemSoldRow]):
+    EVENT_TYPE = "ITEM_SOLD"
+
+
+class ItemUndoParser(EventTypeParser[ItemUndoRow]):
+    EVENT_TYPE = "ITEM_UNDO"
+
+
+class LevelUpParser(EventTypeParser[LevelUpRow]):
+    EVENT_TYPE = "LEVEL_UP"
+
+
+class PauseEndParser(EventTypeParser[PauseEndRow]):
+    EVENT_TYPE = "PAUSE_END"
+
+
+class SkillLevelUpParser(EventTypeParser[SkillLevelUpRow]):
+    EVENT_TYPE = "SKILL_LEVEL_UP"
+
+
+class TurretPlateDestroyedParser(EventTypeParser[TurretPlateDestroyedRow]):
+    EVENT_TYPE = "TURRET_PLATE_DESTROYED"
+
+
+class WardKillParser(EventTypeParser[WardKillRow]):
+    EVENT_TYPE = "WARD_KILL"
+
+
+class WardPlacedParser(EventTypeParser[WardPlacedRow]):
+    EVENT_TYPE = "WARD_PLACED"
+
+
+@dataclass
+class TimelineTables:
+    metadata: TabulatedMetadata
+    participantStats: list[TabulatedParticipantStats]
 
 
 @dataclass(frozen=True)
-class MatchDataTimelineParsingOrchestrator(Generic[Out]):
-    metadata: EventParser[Timeline, Out]
+class MatchDataTimelineParsingOrchestrator:
+    metadata: EventParser[Metadata, TabulatedMetadata]
+    participantStats: EventParser[list[Frame], list[TabulatedParticipantStats]]
 
-    def run(self, raw: Timeline) -> Out:
-        return self.metadata.parse(raw)
+    def run(self, raw: dict[str, Any]) -> TimelineTables:
+        try:
+            nt = Timeline.model_validate(raw)
+        except ValidationError as e:
+            raise ValueError(f"raw did not match Timeline schema: {e}") from e
 
+        metadata: Metadata = nt.metadata
+        info: Info = nt.info
+        frames: list[Frame] = info.frames
 
-class Metadata(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    dataVersion: str
-    matchId: str
-    participants: list[str]
+        gameId = info.gameId
+
+        return TimelineTables(
+            metadata=self.metadata.parse(metadata),
+            participantStats=self.participantStats.parse(frames),
+        )
 
 
 if __name__ == "__main__":
@@ -162,6 +395,3 @@ if __name__ == "__main__":
 
     data = load_dummy_non_timeline()
     validated_data = Timeline.model_validate(**data)
-
-    # _orch = MatchDataNonTimelineParsingOrchestrator(metadata=MetadataParser())
-    # orch_as_base: Orchestrator[NonTimeline, BaseModel] = _orch

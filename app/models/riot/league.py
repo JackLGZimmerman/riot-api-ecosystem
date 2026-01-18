@@ -63,7 +63,7 @@ class EntryPayload(TypedDict):
     puuid: str
     queueType: str
     tier: str
-    rank: str
+    division: str
     wins: int
     losses: int
     region: str
@@ -73,7 +73,7 @@ class MinifiedLeagueEntryDTO(BaseModel):
     puuid: str
     queueType: Queues
     tier: str
-    rank: str
+    division: str
     wins: int
     losses: int
     region: Region
@@ -89,7 +89,7 @@ class MinifiedLeagueEntryDTO(BaseModel):
             "puuid": entry.puuid,
             "queueType": entry.queueType,
             "tier": entry.tier,
-            "rank": entry.rank,
+            "division": entry.rank,
             "wins": entry.wins,
             "losses": entry.losses,
             "region": region,
@@ -108,7 +108,7 @@ class MinifiedLeagueEntryDTO(BaseModel):
                 "puuid": e.puuid,
                 "queueType": dto.queue,
                 "tier": dto.tier,
-                "rank": e.rank,
+                "division": e.rank,
                 "wins": e.wins,
                 "losses": e.losses,
                 "region": region,

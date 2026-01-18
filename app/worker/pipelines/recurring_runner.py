@@ -7,16 +7,6 @@ import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Sequence
 
-from app.core.config.constants.paths import (
-    MATCH_DATA_MATCH_IDS_DIR,
-    MATCH_DATA_NO_TIMELINE_PATH,
-    MATCH_DATA_TIMELINE_PATH,
-    MATCH_IDS_DATA_DIR,
-    PLAYER_INFO,
-    PLAYER_PUUIDS,
-    PUUIDS_FOR_MATCH_IDS,
-    PUUIDS_FOR_MATCH_IDS_CHECKPOINT,
-)
 from app.core.config.settings import settings
 from app.services.riot_api_client.base import RiotAPI, get_riot_api
 from app.worker.pipelines.matchdata_orchestrator import (
@@ -31,7 +21,6 @@ from app.worker.pipelines.matchids_orchestrator import (
     MatchIDLoader,
     MatchIDOrchestrator,
     MatchIDSaver,
-    read_players_jsonl_zst,
 )
 from app.worker.pipelines.players_orchestrator import (
     PlayerCollector,
@@ -76,30 +65,20 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
             loader=PlayerLoader(),
             collector=PlayerCollector(riot_api=riot_api),
             saver=PlayerSaver(),
-            collected_player_puuids_path=PLAYER_PUUIDS,
-            collected_players_path=PLAYER_INFO,
         )
         await orchestrator.run()
 
     async def run_match_ids() -> None:
-        loader = MatchIDLoader(
-            all_player_details_path=PLAYER_INFO,
-            collected_puuids_path=PUUIDS_FOR_MATCH_IDS,
-            collected_puuids_checkpoint_path=PUUIDS_FOR_MATCH_IDS_CHECKPOINT,
-            read_players_jsonl_zst=read_players_jsonl_zst,
-        )
+        loader = MatchIDLoader()
         orchestrator = MatchIDOrchestrator(
             loader=loader,
             collector=MatchIDCollector(riot_api=riot_api),
             saver=MatchIDSaver(),
-            collected_match_ids_dir=MATCH_IDS_DATA_DIR,
-            collected_puuids_path=PUUIDS_FOR_MATCH_IDS,
-            checkpoint_path=PUUIDS_FOR_MATCH_IDS_CHECKPOINT,
         )
         await orchestrator.run()
 
     async def run_match_data() -> None:
-        loader = MatchDataLoader(match_ids_dir=MATCH_DATA_MATCH_IDS_DIR)
+        loader = MatchDataLoader()
 
         non_timeline_collector = MatchDataNonTimelineCollector(riot_api=riot_api)
         timeline_collector = MatchDataTimelineCollector(riot_api=riot_api)
@@ -111,9 +90,6 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
             non_timeline_collector=non_timeline_collector,
             timeline_collector=timeline_collector,
             saver=saver,
-            out_matchids=MATCH_DATA_MATCH_IDS_DIR,
-            out_non_timeline=MATCH_DATA_NO_TIMELINE_PATH,
-            out_timeline=MATCH_DATA_TIMELINE_PATH,
         )
         await orchestrator.run()
 

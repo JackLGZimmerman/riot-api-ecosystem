@@ -1,9 +1,8 @@
 import asyncio
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import AsyncGenerator, AsyncIterator
 
-from app.infrastructure.files.utils import atomic_outputs
 from app.models import MinifiedLeagueEntryDTO
 from app.models.riot.league import (
     BASIC_BOUNDS,
@@ -21,6 +20,7 @@ from app.worker.pipelines.orchestrator import (
     Saver,
     SaveSpec,
 )
+from database.clickhouse.operations.players import insert_players_stream_in_batches
 
 
 @dataclass(frozen=True)
@@ -37,16 +37,17 @@ class PlayersOrchestrator(Orchestrator):
         saver: Saver,
     ):
         super().__init__(loader, collector, saver)
+        self.ts = datetime.now(timezone.utc)
 
     async def run(self) -> None:
-        state: PlayerCollectorState = self.loader.load()
-
+        state: PlayerCollectorState = self.loader.load(-1)
+        
         players_stream: AsyncIterator[MinifiedLeagueEntryDTO] = self.collector.collect(
             state
         )
 
         async def save_players() -> None:
-            await asyncio.to_thread(_write_players_jsonl_zstd, players_stream)
+            await insert_players_stream_in_batches(players_stream, self.ts)
 
         await self.saver.save(
             SaveSpec(save=save_players),
@@ -54,7 +55,7 @@ class PlayersOrchestrator(Orchestrator):
 
 
 class PlayerLoader(Loader):
-    def load(self) -> PlayerCollectorState:
+    def load(self, ts: int) -> PlayerCollectorState:
         return PlayerCollectorState(
             elite_bounds=ELITE_BOUNDS,
             subelite_bounds=BASIC_BOUNDS,

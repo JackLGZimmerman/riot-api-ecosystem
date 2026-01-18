@@ -1,33 +1,41 @@
-x-pipeline: &pipeline
-  build: .
-  env_file:
-    - .env
-  volumes:
-    - ./app:/app/app
-    - ./lake:/app/lake
-    - player_data_collection_venv:/app/.venv
-
 services:
   player_data_collection:
-    <<: *pipeline
+    build: .
     container_name: player_data_collection
+    env_file:
+      - .env
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app
+    volumes:
+      - ./:/app
+      - player_data_collection_venv:/app/.venv
     command: ["/app/.venv/bin/python", "-m", "app.worker.pipelines.recurring_runner"]
     ports:
       - "8001:8001"
-  
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse
     environment:
-      CLICKHOUSE_DB: player_data
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
     ports:
       - "8123:8123"
       - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
-
+      - ./database/clickhouse/schema:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   prometheus:
     image: prom/prometheus:latest
@@ -48,21 +56,20 @@ services:
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
-    ports:
-      - "3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
     depends_on:
       - prometheus
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.47.2
     container_name: cadvisor
-    restart: unless-stopped
     privileged: true
     ports:
       - "8080:8080"
@@ -75,7 +82,7 @@ services:
       - /dev/disk/:/dev/disk:ro
 
 volumes:
-  prometheus_data:
-  grafana_data:
   player_data_collection_venv:
   clickhouse_data:
+  prometheus_data:
+  grafana_data:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
@@ -18,11 +17,11 @@ class OrchestrationContext:
 
 @dataclass(frozen=True)
 class SaveSpec:
-    save: Callable[[Path], Awaitable[None]]
+    save: Callable[[], Awaitable[None]]
 
 
 class Loader(Protocol):
-    def load(self) -> Any: ...
+    def load(self, ts: int) -> Any: ...
 
 
 class Collector(Protocol):

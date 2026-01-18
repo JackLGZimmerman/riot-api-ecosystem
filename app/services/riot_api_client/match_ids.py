@@ -1,5 +1,5 @@
 import asyncio
-from typing import AsyncGenerator, Iterable
+from typing import AsyncIterator, Iterable
 
 from .base import RiotAPI
 from .utils import (
@@ -21,7 +21,7 @@ async def stream_match_ids(
     initial_states: Iterable[PlayerCrawlState],
     ts: int,
     max_in_flight: int = MAX_IN_FLIGHT,
-) -> AsyncGenerator[list[str], None]:
+) -> AsyncIterator[list[str]]:
     work_q: asyncio.Queue[PlayerCrawlState | None] = asyncio.Queue()
     out_q: asyncio.Queue[list[str] | BaseException | None] = asyncio.Queue()
 

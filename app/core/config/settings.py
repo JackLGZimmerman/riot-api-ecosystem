@@ -12,11 +12,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 class Settings(BaseSettings):
     api_key: SecretStr
+
     rate_limit_calls: PositiveInt = 100
     rate_limit_period: PositiveInt = 120
     rate_limit_burst_calls: PositiveInt = 20
     rate_limit_burst_period: PositiveInt = 1
-    base_project_path: Path = Path.cwd()
+
+
+    base_project_path: Path = PROJECT_ROOT
+
+    clickhouse_host: str
+    clickhouse_port: PositiveInt = 8123
+    clickhouse_database: str
+    clickhouse_user: str
+    clickhouse_password: SecretStr
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
