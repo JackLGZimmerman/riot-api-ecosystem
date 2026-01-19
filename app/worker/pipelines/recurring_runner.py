@@ -9,6 +9,12 @@ from typing import Awaitable, Callable, Sequence
 
 from app.core.config.settings import settings
 from app.services.riot_api_client.base import RiotAPI, get_riot_api
+from app.services.riot_api_client.parsers.non_timeline import (
+    MatchDataNonTimelineParsingOrchestrator,
+)
+from app.services.riot_api_client.parsers.timeline import (
+    MatchDataTimelineParsingOrchestrator,
+)
 from app.worker.pipelines.matchdata_orchestrator import (
     MatchDataLoader,
     MatchDataNonTimelineCollector,
@@ -83,12 +89,17 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
         non_timeline_collector = MatchDataNonTimelineCollector(riot_api=riot_api)
         timeline_collector = MatchDataTimelineCollector(riot_api=riot_api)
 
+        non_timeline_parser = MatchDataNonTimelineParsingOrchestrator()
+        timeline_parser = MatchDataTimelineParsingOrchestrator()
+
         saver = MatchDataSaver()
 
         orchestrator = MatchDataOrchestrator(
             loader=loader,
             non_timeline_collector=non_timeline_collector,
             timeline_collector=timeline_collector,
+            non_timeline_parser=non_timeline_parser,
+            timeline_parser=timeline_parser,
             saver=saver,
         )
         await orchestrator.run()

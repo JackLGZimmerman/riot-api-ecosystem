@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
-from pydantic import (
-    NonNegativeInt,
-    PositiveInt,
-    ValidationError,
-)
+from pydantic import NonNegativeInt, PositiveInt, Sequence, ValidationError
 
 from app.services.riot_api_client.parsers.base_parsers import (
-    EventParser,
+    InfoParser,
+    ParticipantLike,
     ParticipantParser,
 )
 from app.services.riot_api_client.parsers.models.non_timeline import (
@@ -336,7 +331,7 @@ class TabulatedParticipantStats(TypedDict):
 class ParticipantStatsParser:
     def parse(
         self,
-        participants: list[Participant],
+        participants: Sequence[ParticipantLike],
         gameId: NonNegativeInt,
     ) -> list[TabulatedParticipantStats]:
         rows: list[TabulatedParticipantStats] = []
@@ -394,7 +389,7 @@ class TabulatedParticipantChallenges(TypedDict):
 
 class ParticipantChallengesParser:
     def parse(
-        self, participants: list[Participant], gameId: NonNegativeInt
+        self, participants: Sequence[ParticipantLike], gameId: NonNegativeInt
     ) -> list[TabulatedParticipantChallenges]:
         rows: list[TabulatedParticipantChallenges] = []
         for p in participants:
@@ -451,7 +446,7 @@ class TabulatedParticipantPerks(TypedDict):
 
 class ParticipantPerksParser:
     def parse(
-        self, participants: list[Participant], gameId: NonNegativeInt
+        self, participants: Sequence[ParticipantLike], gameId: NonNegativeInt
     ) -> list[TabulatedParticipantPerks]:
         rows: list[TabulatedParticipantPerks] = []
 
@@ -505,14 +500,24 @@ class NonTimelineTables:
 
 @dataclass(frozen=True)
 class MatchDataNonTimelineParsingOrchestrator:
-    metadata: EventParser[Metadata, TabulatedMetadata]
-    gameInfo: EventParser[Info, TabulatedInfo]
-    bans: EventParser[Info, list[TabulatedBan]]
-    feats: EventParser[Info, list[TabulatedFeat]]
-    objectives: EventParser[Info, list[TabulatedObjective]]
-    participantStats: ParticipantParser[list[TabulatedParticipantStats]]
-    participantChallenges: ParticipantParser[list[TabulatedParticipantChallenges]]
-    participantPerks: ParticipantParser[list[TabulatedParticipantPerks]]
+    metadata: InfoParser[Metadata, TabulatedMetadata] = field(
+        default_factory=MetadataParser
+    )
+    gameInfo: InfoParser[Info, TabulatedInfo] = field(default_factory=GameInfoParser)
+    bans: InfoParser[Info, list[TabulatedBan]] = field(default_factory=BansParser)
+    feats: InfoParser[Info, list[TabulatedFeat]] = field(default_factory=FeatsParser)
+    objectives: InfoParser[Info, list[TabulatedObjective]] = field(
+        default_factory=ObjectivesParser
+    )
+    participantStats: ParticipantParser[list[TabulatedParticipantStats]] = field(
+        default_factory=ParticipantStatsParser
+    )
+    participantChallenges: ParticipantParser[list[TabulatedParticipantChallenges]] = (
+        field(default_factory=ParticipantChallengesParser)
+    )
+    participantPerks: ParticipantParser[list[TabulatedParticipantPerks]] = field(
+        default_factory=ParticipantPerksParser
+    )
 
     def run(self, raw: dict[str, Any]) -> NonTimelineTables:
         try:
@@ -539,14 +544,8 @@ class MatchDataNonTimelineParsingOrchestrator:
         )
 
 
-if __name__ == "__main__":
-    path = Path("non-timeline.example.json")
+_NON_TIMELINE_ORCH = MatchDataNonTimelineParsingOrchestrator()
 
-    def load_dummy_non_timeline():
-        with path.open("r") as f:
-            data = json.load(f)
 
-        return data
-
-    data = load_dummy_non_timeline()
-    validated_data = NonTimeline.model_validate(data)
+def parse_non_timeline(raw: dict[str, Any]) -> NonTimelineTables:
+    return _NON_TIMELINE_ORCH.run(raw)

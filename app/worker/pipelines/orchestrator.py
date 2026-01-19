@@ -1,13 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import (
-    Any,
-    AsyncIterator,
-    Awaitable,
-    Callable,
-    Protocol,
-)
+from typing import Any, AsyncIterator, Callable, Coroutine, Protocol
 
 
 @dataclass(frozen=True)
@@ -17,7 +11,7 @@ class OrchestrationContext:
 
 @dataclass(frozen=True)
 class SaveSpec:
-    save: Callable[[], Awaitable[None]]
+    save: Callable[[], Coroutine[Any, Any, None]]
 
 
 class Loader(Protocol):

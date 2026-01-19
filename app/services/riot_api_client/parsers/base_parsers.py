@@ -8,20 +8,32 @@ InT = TypeVar("InT", contravariant=True)
 OutT = TypeVar("OutT", covariant=True)
 
 
-class EventParser(Protocol[InT, OutT]):
-    def parse(self, validated: InT) -> OutT: ...
+class ParticipantLike(Protocol):
+    puuid: str
+    participantId: int
+    teamId: int
+    championId: int
+    championName: str
+
+    kills: int
+    deaths: int
+    assists: int
+
+    challenges: Any
+    perks: Any
 
 
-POutT = TypeVar("POutT", covariant=True)
+class InfoParser(Protocol[InT, OutT]):
+    def parse(self, validated: InT, /) -> OutT: ...
 
 
-class ParticipantParser(Protocol[POutT]):
+class ParticipantParser(Protocol[OutT]):
     def parse(
         self,
-        participants: Sequence[Any],
-        gameId: NonNegativeInt,
-    ) -> POutT: ...
+        participants: Sequence[ParticipantLike],
+        gameId: int,
+    ) -> OutT: ...
 
 
-RawT = TypeVar("RawT", contravariant=True)
-RunOutT = TypeVar("RunOutT", covariant=True)
+class EventParser(Protocol[InT, OutT]):
+    def parse(self, validated: InT, gameId: int, /) -> OutT: ...
