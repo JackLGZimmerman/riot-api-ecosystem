@@ -1,23 +1,4 @@
 services:
-  player_data_collection:
-    build: .
-    container_name: player_data_collection
-    env_file:
-      - .env
-    working_dir: /app
-    environment:
-      PYTHONPATH: /app
-    volumes:
-      - ./:/app
-      - player_data_collection_venv:/app/.venv
-    command: ["/app/.venv/bin/python", "-m", "app.worker.pipelines.recurring_runner"]
-    ports:
-      - "8001:8001"
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-
-
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse
@@ -32,7 +13,7 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - ./database/clickhouse/schema:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8123/ping" ]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -81,8 +62,49 @@ services:
       - /var/lib/docker:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
 
+  prefect-postgres:
+    image: postgres:16
+    container_name: prefect-postgres
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect
+      POSTGRES_DB: prefect
+    volumes:
+      - prefect_pgdata:/var/lib/postgresql/data
+
+  prefect-server:
+    image: prefecthq/prefect:3-python3.11
+    container_name: prefect-server
+    depends_on:
+      prefect-postgres:
+        condition: service_healthy
+    environment:
+      PREFECT_SERVER_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-postgres:5432/prefect
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    ports:
+      - "4200:4200"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "prefect-postgres", "-U", "prefect", "-d", "prefect"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  prefect-worker:
+    image: prefecthq/prefect:3-python3.11
+    container_name: prefect-worker
+    depends_on:
+      - prefect-server
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: [ "prefect", "worker", "start", "--pool", "docker-pool", "--type", "docker" ]
+    restart: unless-stopped
+
 volumes:
   player_data_collection_venv:
   clickhouse_data:
   prometheus_data:
   grafana_data:
+  prefect_pgdata:

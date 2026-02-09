@@ -1,6 +1,9 @@
+import time
 import asyncio
 import logging
 from typing import AsyncIterator
+from uuid import UUID
+from app.core.config import settings
 
 from app.models.riot.league import MinifiedLeagueEntryDTO
 from app.worker.pipelines.matchids_orchestrator import PlayerKeyRow
@@ -8,55 +11,81 @@ from database.clickhouse.client import get_client
 
 logger = logging.getLogger(__name__)
 
+_CH_EXECUTOR = settings.threadpool_executor_clickhouse
 
-def _insert_rows(rows: list[dict[str, object]]) -> None:
+PLAYERS_STAGED_TABLE = "game_data.players_staged"
+
+PLAYERS_STAGED_COLS = [
+    "run_id",
+    "puuid",
+    "queue_type",
+    "tier",
+    "division",
+    "wins",
+    "losses",
+    "region",
+    "updated_at",
+]
+
+
+def _insert_rows(rows: list[tuple]) -> None:
     if not rows:
         return
-
-    columns = list(rows[0].keys())
-    data = [tuple(row[col] for col in columns) for row in rows]
-
     get_client().insert(
-        table="players",
-        data=data,
-        column_names=columns,
+        table=PLAYERS_STAGED_TABLE,
+        data=rows,
+        column_names=PLAYERS_STAGED_COLS,
     )
-
-    logger.info(f"Inserted {len(rows)} rows into ClickHouse")
+    logger.info("Inserted %d rows into %s", len(rows), PLAYERS_STAGED_TABLE)
 
 
 async def insert_players_stream_in_batches(
     players: AsyncIterator[MinifiedLeagueEntryDTO],
-    ts,
+    ts: int,
     *,
-    batch_size: int = 20000,
+    run_id: UUID,
+    batch_size: int = 20_000,
     flush_interval_s: float = 1.0,
 ) -> None:
-    batch: list[dict] = []
-    last_flush = asyncio.get_running_loop().time()
+    loop = asyncio.get_running_loop()
+    batch: list[tuple] = []
+    last_flush = time.monotonic()
 
     async for p in players:
         batch.append(
-            {
-                "puuid": p.puuid,
-                "queue_type": p.queueType,
-                "tier": p.tier,
-                "division": p.division,
-                "wins": int(p.wins),
-                "losses": int(p.losses),
-                "region": p.region,
-                "updated_at": ts,
-            }
+            (
+                run_id,
+                p.puuid,
+                p.queueType,
+                p.tier,
+                p.division,
+                int(p.wins),
+                int(p.losses),
+                p.region,
+                ts,
+            )
         )
 
-        now = asyncio.get_running_loop().time()
-        if len(batch) >= batch_size or (now - last_flush) >= flush_interval_s:
-            await asyncio.to_thread(_insert_rows, batch)
-            batch.clear()
-            last_flush = now
+        if (
+            len(batch) >= batch_size
+            or (time.monotonic() - last_flush) >= flush_interval_s
+        ):
+            rows = batch
+            batch = []
+            await loop.run_in_executor(_CH_EXECUTOR, _insert_rows, rows)
+            last_flush = time.monotonic()
 
     if batch:
-        await asyncio.to_thread(_insert_rows, batch)
+        await loop.run_in_executor(_CH_EXECUTOR, _insert_rows, batch)
+
+
+def delete_partial_players_run(run_id: UUID) -> None:
+    query = """
+        ALTER TABLE game_data.players_staged
+        DELETE WHERE run_id = %(run_id)s
+    """
+
+    get_client().command(query, parameters={"run_id": run_id})
 
 
 def load_players() -> list[PlayerKeyRow]:
@@ -66,7 +95,6 @@ def load_players() -> list[PlayerKeyRow]:
         queue_type,
         region
     FROM game_data.players
-    LIMIT 1 BY puuid, queue_type
     """
 
     result = get_client().query(query)

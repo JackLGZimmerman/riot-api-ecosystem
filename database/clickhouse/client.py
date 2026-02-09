@@ -19,9 +19,8 @@ def get_client():
             port=settings.clickhouse_port,
             username=settings.clickhouse_user,
             password=settings.clickhouse_password.get_secret_value(),
-            database=settings.clickhouse_database,
         )
 
-        _client.command("SELECT 1")
+        _client.command("SELECT 1") # Forces network connection, authentication and protocol negotiation
 
     return _client

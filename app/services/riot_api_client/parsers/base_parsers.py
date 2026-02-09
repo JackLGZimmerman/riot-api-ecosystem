@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Protocol, Sequence, TypeVar
 
-from pydantic import NonNegativeInt
 
 InT = TypeVar("InT", contravariant=True)
 OutT = TypeVar("OutT", covariant=True)

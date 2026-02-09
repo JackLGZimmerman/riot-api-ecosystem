@@ -1,33 +1,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Coroutine, Protocol
+from typing import Any, AsyncIterator, Protocol
+from uuid import UUID
 
 
 @dataclass(frozen=True)
 class OrchestrationContext:
-    orchestration_start_time: int
-
-
-@dataclass(frozen=True)
-class SaveSpec:
-    save: Callable[[], Coroutine[Any, Any, None]]
+    ts: int
+    run_id: UUID
+    pipeline: str
 
 
 class Loader(Protocol):
-    def load(self, ts: int) -> Any: ...
+    def load(self, ctx: OrchestrationContext) -> Any: ...
 
 
 class Collector(Protocol):
-    def collect(self, state: Any) -> AsyncIterator[Any]: ...
+    def collect(self, state: Any, ctx: OrchestrationContext) -> AsyncIterator[Any]: ...
 
 
 class Saver(Protocol):
-    async def save(self, *specs: SaveSpec) -> None: ...
+    async def save(
+        self, items: AsyncIterator[Any], state: Any, ctx: OrchestrationContext
+    ) -> None: ...
 
 
 class Orchestrator:
-    def __init__(self, loader: Loader, collector: Collector, saver: Saver):
+    def __init__(
+        self, pipeline: str, loader: Loader, collector: Collector, saver: Saver
+    ):
+        self.pipeline = pipeline
         self.loader = loader
         self.collector = collector
         self.saver = saver

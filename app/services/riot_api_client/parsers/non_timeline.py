@@ -542,10 +542,3 @@ class MatchDataNonTimelineParsingOrchestrator:
             ),
             participant_perks=self.participantPerks.parse(participants, gameId),
         )
-
-
-_NON_TIMELINE_ORCH = MatchDataNonTimelineParsingOrchestrator()
-
-
-def parse_non_timeline(raw: dict[str, Any]) -> NonTimelineTables:
-    return _NON_TIMELINE_ORCH.run(raw)

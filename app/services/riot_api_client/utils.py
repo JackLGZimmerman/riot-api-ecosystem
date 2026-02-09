@@ -55,9 +55,7 @@ class PlayerCrawlState(NamedTuple):
     puuid: str
     queue_type: Queues
     continent: Continent
-    start_time: int
     next_page_start: int
-    end_time: int
     base_url: str
 
 
@@ -169,4 +167,3 @@ def spreading_region(
         items,
         key_fn=lambda ur: REGION_TO_CONTINENT[ur[1]],
     )
-

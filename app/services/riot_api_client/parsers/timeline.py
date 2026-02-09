@@ -666,10 +666,3 @@ class MatchDataTimelineParsingOrchestrator:
                 frames, gameId
             ),
         )
-
-
-_TIMELINE_ORCH = MatchDataTimelineParsingOrchestrator()
-
-
-def parse_non_timeline(raw: dict[str, Any]) -> TimelineTables:
-    return _TIMELINE_ORCH.run(raw)

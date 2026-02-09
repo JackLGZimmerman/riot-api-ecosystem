@@ -19,7 +19,6 @@ async def stream_match_ids(
     riot_api: RiotAPI,
     *,
     initial_states: Iterable[PlayerCrawlState],
-    ts: int,
     max_in_flight: int = MAX_IN_FLIGHT,
 ) -> AsyncIterator[list[str]]:
     work_q: asyncio.Queue[PlayerCrawlState | None] = asyncio.Queue()
@@ -36,10 +35,7 @@ async def stream_match_ids(
                     if state is None:
                         return
 
-                    url = state.base_url.format(
-                        start=state.next_page_start,
-                        endTime=ts,
-                    )
+                    url = state.base_url.format(start=state.next_page_start)
 
                     new_state, match_ids = await fetch_json_with_carry_over(
                         carry_over=(state,),

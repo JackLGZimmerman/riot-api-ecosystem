@@ -1,8 +1,8 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import AsyncGenerator, AsyncIterator
-
+import time
+from typing import AsyncIterator, Any
+from uuid import uuid4
 from app.models import MinifiedLeagueEntryDTO
 from app.models.riot.league import (
     BASIC_BOUNDS,
@@ -18,9 +18,12 @@ from app.worker.pipelines.orchestrator import (
     Loader,
     Orchestrator,
     Saver,
-    SaveSpec,
+    OrchestrationContext,
 )
-from database.clickhouse.operations.players import insert_players_stream_in_batches
+from database.clickhouse.operations.players import (
+    insert_players_stream_in_batches,
+    delete_partial_players_run,
+)
 
 
 @dataclass(frozen=True)
@@ -31,31 +34,29 @@ class PlayerCollectorState:
 
 class PlayersOrchestrator(Orchestrator):
     def __init__(
-        self,
-        loader: Loader,
-        collector: Collector,
-        saver: Saver,
+        self, pipeline: str, loader: Loader, collector: Collector, saver: Saver
     ):
-        super().__init__(loader, collector, saver)
-        self.ts = datetime.now(timezone.utc)
+        super().__init__(
+            pipeline=self.pipeline, loader=loader, collector=collector, saver=saver
+        )
 
     async def run(self) -> None:
-        state: PlayerCollectorState = self.loader.load(-1)
-        
+        ctx = OrchestrationContext(
+            ts=int(time.time()),
+            run_id=uuid4(),
+            pipeline=self.pipeline,
+        )
+
+        state: PlayerCollectorState = self.loader.load(ctx)
         players_stream: AsyncIterator[MinifiedLeagueEntryDTO] = self.collector.collect(
-            state
+            state, ctx
         )
 
-        async def save_players() -> None:
-            await insert_players_stream_in_batches(players_stream, self.ts)
-
-        await self.saver.save(
-            SaveSpec(save=save_players),
-        )
+        await self.saver.save(players_stream, state, ctx)
 
 
 class PlayerLoader(Loader):
-    def load(self, ts: int) -> PlayerCollectorState:
+    def load(self, ctx: OrchestrationContext) -> PlayerCollectorState:
         return PlayerCollectorState(
             elite_bounds=ELITE_BOUNDS,
             subelite_bounds=BASIC_BOUNDS,
@@ -67,8 +68,10 @@ class PlayerCollector(Collector):
         self.riot_api = riot_api
 
     async def collect(
-        self, state: PlayerCollectorState
-    ) -> AsyncGenerator[MinifiedLeagueEntryDTO, None]:
+        self,
+        state: PlayerCollectorState,
+        ctx: OrchestrationContext,
+    ) -> AsyncIterator[MinifiedLeagueEntryDTO]:
         async for player in stream_elite_players(
             state.elite_bounds, riot_api=self.riot_api
         ):
@@ -81,9 +84,23 @@ class PlayerCollector(Collector):
 
 
 class PlayerSaver(Saver):
-    async def save(self, *specs: SaveSpec):
-        for spec in specs:
-            await spec.save()
+    async def save(
+        self,
+        items: AsyncIterator[MinifiedLeagueEntryDTO],
+        state: Any,
+        ctx: OrchestrationContext,
+    ) -> None:
+        try:
+            await insert_players_stream_in_batches(
+                items,
+                ts=ctx.ts,
+                run_id=ctx.run_id,
+            )
+        except Exception:
+            delete_partial_players_run(ctx.run_id)
+            raise Exception(
+                "Failure inserting data in player pipeline, removing partial data..."
+            )
 
 
 if __name__ == "__main__":
@@ -93,6 +110,11 @@ if __name__ == "__main__":
     collector = PlayerCollector(riot_api)
     saver = PlayerSaver()
 
-    orchestrator = PlayersOrchestrator(loader=loader, collector=collector, saver=saver)
+    orchestrator = PlayersOrchestrator(
+        pipeline="players",
+        loader=loader,
+        collector=collector,
+        saver=saver,
+    )
 
     asyncio.run(orchestrator.run())
