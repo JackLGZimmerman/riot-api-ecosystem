@@ -1,12 +1,11 @@
 import time
 import asyncio
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, NamedTuple
 from uuid import UUID
 from app.core.config import settings
 
 from app.models.riot.league import MinifiedLeagueEntryDTO
-from app.worker.pipelines.matchids_orchestrator import PlayerKeyRow
 from database.clickhouse.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -26,6 +25,12 @@ PLAYERS_STAGED_COLS = [
     "region",
     "updated_at",
 ]
+
+
+class PlayerKeyRow(NamedTuple):
+    puuid: str
+    queue_type: str
+    region: str
 
 
 def _insert_rows(rows: list[tuple]) -> None:

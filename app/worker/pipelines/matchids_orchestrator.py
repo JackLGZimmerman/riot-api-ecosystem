@@ -4,7 +4,7 @@ import asyncio
 from uuid import uuid4
 
 from dataclasses import dataclass
-from typing import AsyncIterator, NamedTuple
+from typing import AsyncIterator
 import time
 from app.core.config.constants import (
     ENDPOINTS,
@@ -36,16 +36,9 @@ from database.clickhouse.operations.matchids import (
     delete_matchid_puuids,
     delete_matchids,
 )
-from database.clickhouse.operations.players import load_players
+from database.clickhouse.operations.players import PlayerKeyRow, load_players
 
 MATCHID_BUFFER = 200_000
-
-
-class PlayerKeyRow(NamedTuple):
-    puuid: str
-    queue_type: str
-    region: str
-
 
 def build_initial_player_states(
     players: list[PlayerKeyRow],
@@ -109,9 +102,7 @@ class MatchIDOrchestrator(Orchestrator):
         collector: Collector,
         saver: Saver,
     ):
-        super().__init__(
-            pipeline=self.pipeline, loader=loader, collector=collector, saver=saver
-        )
+        super().__init__(pipeline=pipeline, loader=loader, collector=collector, saver=saver)
 
     async def _dedupe_async(
         self, batches: AsyncIterator[list[str]]

@@ -1,0 +1,29 @@
+name: riot-api-ecosystem
+prefect-version: 3.5.0
+
+# Declarative deployment actions (no interactive build/push/pull prompts).
+build: []
+push: []
+
+# Your code is baked into the Docker image; just set in-container working dir.
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+  - name: riot-pipeline
+    version: null
+    tags: []
+    description: null
+    schedule: null
+    entrypoint: app/worker/pipelines/prefect_flow.py:riot_pipeline
+    parameters: {}
+    enforce_parameter_schema: true
+    work_pool:
+      name: docker-pool
+      work_queue_name: default
+      job_variables:
+        image: riot-pipeline:latest
+        image_pull_policy: Never
+        networks:
+          - riot-api-ecosystem_default

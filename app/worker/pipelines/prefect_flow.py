@@ -68,9 +68,10 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
             loader=MatchDataLoader(),
             non_timeline_collector=MatchDataNonTimelineCollector(riot_api=riot_api),
             timeline_collector=MatchDataTimelineCollector(riot_api=riot_api),
-            non_timeline_parser=MatchDataNonTimelineParsingOrchestrator(),
-            timeline_parser=MatchDataTimelineParsingOrchestrator(),
-            saver=MatchDataSaver(),
+            saver=MatchDataSaver(
+                non_timeline_parser=MatchDataNonTimelineParsingOrchestrator(),
+                timeline_parser=MatchDataTimelineParsingOrchestrator(),
+            ),
         )
         await orchestrator.run()
 

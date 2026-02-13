@@ -17,7 +17,7 @@ class EventBase(TypedDict):
 
 
 class UnknownEvent(EventBase):
-    type: str
+    type: Literal["UNKNOWN"]
 
 
 class EventItemPurchased(EventBase):
@@ -69,6 +69,7 @@ class DamageInstance(TypedDict):
     spellSlot: int
     trueDamage: NonNegativeInt
     type: str
+
 
 
 class EventChampionKill(EventBase):

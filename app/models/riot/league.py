@@ -176,13 +176,13 @@ BASIC_BOUNDS: BasicBoundsConfig = {
         upper_tier=Tiers.DIAMOND,
         upper_division=Divisions.I,
         lower_tier=Tiers.DIAMOND,
-        lower_division=Divisions.IV,
+        lower_division=Divisions.I,
     ),
     Queues.RANKED_FLEX_SR: BasicBoundConfig(
         collect=False,
         upper_tier=Tiers.DIAMOND,
         upper_division=Divisions.I,
         lower_tier=Tiers.DIAMOND,
-        lower_division=Divisions.IV,
+        lower_division=Divisions.I,
     ),
 }

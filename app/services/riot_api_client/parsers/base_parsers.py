@@ -1,25 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Protocol, Sequence, TypeVar
+from typing import Protocol, Sequence, TypeVar
 
+from app.services.riot_api_client.parsers.models.non_timeline import (
+    Participant,
+)
 
 InT = TypeVar("InT", contravariant=True)
 OutT = TypeVar("OutT", covariant=True)
-
-
-class ParticipantLike(Protocol):
-    puuid: str
-    participantId: int
-    teamId: int
-    championId: int
-    championName: str
-
-    kills: int
-    deaths: int
-    assists: int
-
-    challenges: Any
-    perks: Any
 
 
 class InfoParser(Protocol[InT, OutT]):
@@ -29,7 +17,7 @@ class InfoParser(Protocol[InT, OutT]):
 class ParticipantParser(Protocol[OutT]):
     def parse(
         self,
-        participants: Sequence[ParticipantLike],
+        participants: Sequence[Participant],
         gameId: int,
     ) -> OutT: ...
 

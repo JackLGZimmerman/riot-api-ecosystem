@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TypedDict, cast
+from typing import Any, Sequence, TypedDict, cast
 
-from pydantic import NonNegativeInt, PositiveInt, Sequence, ValidationError
+from pydantic import NonNegativeInt, PositiveInt, ValidationError
 
 from app.services.riot_api_client.parsers.base_parsers import (
     InfoParser,
-    ParticipantLike,
     ParticipantParser,
 )
 from app.services.riot_api_client.parsers.models.non_timeline import (
@@ -331,7 +330,7 @@ class TabulatedParticipantStats(TypedDict):
 class ParticipantStatsParser:
     def parse(
         self,
-        participants: Sequence[ParticipantLike],
+        participants: Sequence[Participant],
         gameId: NonNegativeInt,
     ) -> list[TabulatedParticipantStats]:
         rows: list[TabulatedParticipantStats] = []
@@ -389,7 +388,7 @@ class TabulatedParticipantChallenges(TypedDict):
 
 class ParticipantChallengesParser:
     def parse(
-        self, participants: Sequence[ParticipantLike], gameId: NonNegativeInt
+        self, participants: Sequence[Participant], gameId: NonNegativeInt
     ) -> list[TabulatedParticipantChallenges]:
         rows: list[TabulatedParticipantChallenges] = []
         for p in participants:
@@ -446,7 +445,7 @@ class TabulatedParticipantPerks(TypedDict):
 
 class ParticipantPerksParser:
     def parse(
-        self, participants: Sequence[ParticipantLike], gameId: NonNegativeInt
+        self, participants: Sequence[Participant], gameId: NonNegativeInt
     ) -> list[TabulatedParticipantPerks]:
         rows: list[TabulatedParticipantPerks] = []
 

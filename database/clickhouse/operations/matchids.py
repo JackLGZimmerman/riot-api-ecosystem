@@ -1,9 +1,10 @@
 import asyncio
-from typing import AsyncIterator, Iterable
 import time
-from database.clickhouse.client import get_client
-from app.core.config import settings
+from typing import AsyncIterator, Iterable
 from uuid import UUID
+
+from app.core.config import settings
+from database.clickhouse.client import get_client
 
 PUUID_DATA_TIMESTAMP_NAME = "matchids_puuids_ts"
 _CH_EXECUTOR = settings.threadpool_executor_clickhouse

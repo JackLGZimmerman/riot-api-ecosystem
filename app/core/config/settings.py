@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pydantic import PositiveInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from concurrent.futures import ThreadPoolExecutor
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     clickhouse_password: SecretStr
 
     threadpool_executor_clickhouse: ThreadPoolExecutor = ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="clickhouse"
+        max_workers=2, thread_name_prefix="clickhouse"
     )
 
     model_config = SettingsConfigDict(

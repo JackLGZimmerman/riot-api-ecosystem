@@ -36,7 +36,7 @@ def champion_kill_event_id(
     return f"{gameId}:{timestamp}:{killerId}:{victimId}"
 
 
-class TabulatedParticipantStats(TypedDict):
+class ParticipantStatsRow(TypedDict):
     frame_timestamp: NonNegativeInt
     participantId: NonNegativeInt
 
@@ -93,8 +93,8 @@ class TabulatedParticipantStats(TypedDict):
 
 
 class ParticipantStatsParser:
-    def parse(self, frames: list[Frame]) -> list[TabulatedParticipantStats]:
-        rows: list[TabulatedParticipantStats] = []
+    def parse(self, frames: list[Frame]) -> list[ParticipantStatsRow]:
+        rows: list[ParticipantStatsRow] = []
 
         for frame in frames:
             frame_timestamp: NonNegativeInt = frame.timestamp
@@ -117,12 +117,9 @@ class ParticipantStatsParser:
                     "xp": pf.xp,
                 }
 
-                rows.append(cast(TabulatedParticipantStats, row_dict))
+                rows.append(cast(ParticipantStatsRow, row_dict))
 
         return rows
-
-
-class BuildingKillPayload(TypedDict, total=False): ...
 
 
 class BuildingKillRow(TypedDict):
@@ -140,14 +137,12 @@ class BuildingKillRow(TypedDict):
     towerType: str
 
 
-class ChampionKillPayload(TypedDict, total=False): ...
-
-
 class ChampionKillRow(TypedDict):
     gameId: int
-    champion_kill_event_id: str
     frame_timestamp: int
+    type: Literal["CHAMPION_SPECIAL_KILL"]
     timestamp: int
+    champion_kill_event_id: str
     killerId: int
     victimId: int
     bounty: int
@@ -165,9 +160,6 @@ class ChampionKillDamageInstanceRow(DamageInstance):
     idx: NonNegativeInt
 
 
-class ChampionSpecialKillPayload(TypedDict, total=False): ...
-
-
 class ChampionSpecialKillRow(TypedDict):
     gameId: int
     frame_timestamp: NonNegativeInt
@@ -180,9 +172,6 @@ class ChampionSpecialKillRow(TypedDict):
     multiKillLength: int
 
 
-class DragonSoulGivenPayload(TypedDict, total=False): ...
-
-
 class DragonSoulGivenRow(TypedDict):
     gameId: int
     frame_timestamp: NonNegativeInt
@@ -190,9 +179,6 @@ class DragonSoulGivenRow(TypedDict):
     timestamp: int
     name: str
     teamId: int
-
-
-class EliteMonsterKillPayload(TypedDict, total=False): ...
 
 
 class EliteMonsterKillRow(TypedDict):
@@ -210,9 +196,6 @@ class EliteMonsterKillRow(TypedDict):
     position_y: int
 
 
-class GameEndPayload(TypedDict, total=False): ...
-
-
 class GameEndRow(TypedDict):
     gameId: int
     frame_timestamp: NonNegativeInt
@@ -221,9 +204,6 @@ class GameEndRow(TypedDict):
     gameId: int
     realTimestamp: int
     winningTeam: int
-
-
-class ItemDestroyedPayload(TypedDict, total=False): ...
 
 
 class ItemDestroyedRow(TypedDict):
@@ -235,9 +215,6 @@ class ItemDestroyedRow(TypedDict):
     participantId: int
 
 
-class ItemPurchasedPayload(TypedDict, total=False): ...
-
-
 class ItemPurchasedRow(TypedDict):
     gameId: int
     frame_timestamp: NonNegativeInt
@@ -247,9 +224,6 @@ class ItemPurchasedRow(TypedDict):
     participantId: int
 
 
-class ItemSoldPayload(TypedDict, total=False): ...
-
-
 class ItemSoldRow(TypedDict):
     gameId: int
     frame_timestamp: NonNegativeInt
@@ -257,9 +231,6 @@ class ItemSoldRow(TypedDict):
     timestamp: int
     itemId: int
     participantId: int
-
-
-class ItemUndoPayload(TypedDict, total=False): ...
 
 
 class ItemUndoRow(TypedDict):
@@ -273,9 +244,6 @@ class ItemUndoRow(TypedDict):
     participantId: int
 
 
-class LevelUpPayload(TypedDict, total=False): ...
-
-
 class LevelUpRow(TypedDict):
     gameId: int
     frame_timestamp: NonNegativeInt
@@ -283,9 +251,6 @@ class LevelUpRow(TypedDict):
     timestamp: int
     level: int
     participantId: int
-
-
-class PauseEndPayload(TypedDict, total=False): ...
 
 
 class PauseEndRow(TypedDict):
@@ -296,9 +261,6 @@ class PauseEndRow(TypedDict):
     realTimestamp: int
 
 
-class SkillLevelUpPayload(TypedDict, total=False): ...
-
-
 class SkillLevelUpRow(TypedDict):
     gameId: int
     frame_timestamp: NonNegativeInt
@@ -307,9 +269,6 @@ class SkillLevelUpRow(TypedDict):
     levelUpType: str
     participantId: int
     skillSlot: int
-
-
-class TurretPlateDestroyedPayload(TypedDict, total=False): ...
 
 
 class TurretPlateDestroyedRow(TypedDict):
@@ -324,9 +283,6 @@ class TurretPlateDestroyedRow(TypedDict):
     teamId: int
 
 
-class WardKillPayload(TypedDict, total=False): ...
-
-
 class WardKillRow(TypedDict):
     gameId: int
     frame_timestamp: NonNegativeInt
@@ -334,9 +290,6 @@ class WardKillRow(TypedDict):
     timestamp: int
     killerId: int
     wardType: str
-
-
-class WardPlacedPayload(TypedDict, total=False): ...
 
 
 class WardPlacedRow(TypedDict):
@@ -539,7 +492,7 @@ class WardPlacedParser(EventTypeParser[WardPlacedRow]):
 
 @dataclass
 class TimelineTables:
-    participantStats: list[TabulatedParticipantStats]
+    participantStats: list[ParticipantStatsRow]
 
     buildingKill: list[BuildingKillRow]
     championKill: list[ChampionKillRow]
@@ -567,7 +520,7 @@ class TimelineTables:
 
 @dataclass(frozen=True)
 class MatchDataTimelineParsingOrchestrator:
-    participantStats: InfoParser[list[Frame], list[TabulatedParticipantStats]] = field(
+    participantStats: InfoParser[list[Frame], list[ParticipantStatsRow]] = field(
         default_factory=ParticipantStatsParser
     )
 

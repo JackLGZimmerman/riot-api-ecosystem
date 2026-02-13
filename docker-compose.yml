@@ -71,6 +71,11 @@ services:
       POSTGRES_DB: prefect
     volumes:
       - prefect_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect -d prefect"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   prefect-server:
     image: prefecthq/prefect:3-python3.11
@@ -84,23 +89,36 @@ services:
     ports:
       - "4200:4200"
     healthcheck:
-      test: ["CMD", "pg_isready", "-h", "prefect-postgres", "-U", "prefect", "-d", "prefect"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health').read(); print('ok')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
 
   prefect-worker:
-    image: prefecthq/prefect:3-python3.11
+    build:
+      context: .
+      dockerfile: Dockerfile.prefect-worker
     container_name: prefect-worker
     depends_on:
       - prefect-server
     environment:
       PREFECT_API_URL: http://prefect-server:4200/api
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     command: [ "prefect", "worker", "start", "--pool", "docker-pool", "--type", "docker" ]
     restart: unless-stopped
+
+  prefect-prometheus-exporter:
+    image: prefecthq/prometheus-prefect-exporter:3.0.0
+    container_name: prefect-prometheus-exporter
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+    ports:
+      - "8000:8000"
 
 volumes:
   player_data_collection_venv:

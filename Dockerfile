@@ -2,8 +2,10 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-
 RUN pip install --no-cache-dir uv \
- && uv sync --frozen
+ && uv sync --frozen --no-dev
 
-CMD ["/app/.venv/bin/python", "-m", "app.worker.pipelines.recurring_runner"]
+# Prefect executes `python` inside this container; point PATH at uv's env.
+ENV PATH="/app/.venv/bin:${PATH}"
+
+COPY . .

@@ -10,7 +10,6 @@ scrape_configs:
     static_configs:
       - targets: ["cadvisor:8080"]
 
-  - job_name: "player_data_collection"
-    metrics_path: /metrics
+  - job_name: "prefect_exporter"
     static_configs:
-      - targets: ["player_data_collection:8001"]
+      - targets: ["prefect-prometheus-exporter:8000"]
