@@ -404,7 +404,33 @@ class ParticipantChallengesParser:
         return rows
 
 
-class TabulatedParticipantPerks(TypedDict):
+class TabulatedParticipantPerkValues(TypedDict):
+    gameId: NonNegativeInt
+    teamId: PositiveInt
+    puuid: str
+
+    primary_var1_1: int
+    primary_var2_1: int
+    primary_var3_1: int
+    primary_var1_2: int
+    primary_var2_2: int
+    primary_var3_2: int
+    primary_var1_3: int
+    primary_var2_3: int
+    primary_var3_3: int
+    primary_var1_4: int
+    primary_var2_4: int
+    primary_var3_4: int
+
+    sub_var1_1: int
+    sub_var2_1: int
+    sub_var3_1: int
+    sub_var1_2: int
+    sub_var2_2: int
+    sub_var3_2: int
+
+
+class TabulatedParticipantPerkIds(TypedDict):
     gameId: NonNegativeInt
     teamId: PositiveInt
     puuid: str
@@ -417,70 +443,106 @@ class TabulatedParticipantPerks(TypedDict):
     sub_style: int
 
     primary_perk_1: int
-    primary_var1_1: int
-    primary_var2_1: int
-    primary_var3_1: int
     primary_perk_2: int
-    primary_var1_2: int
-    primary_var2_2: int
-    primary_var3_2: int
     primary_perk_3: int
-    primary_var1_3: int
-    primary_var2_3: int
-    primary_var3_3: int
     primary_perk_4: int
-    primary_var1_4: int
-    primary_var2_4: int
-    primary_var3_4: int
 
     sub_perk_1: int
-    sub_var1_1: int
-    sub_var2_1: int
-    sub_var3_1: int
     sub_perk_2: int
-    sub_var1_2: int
-    sub_var2_2: int
-    sub_var3_2: int
+    perk_combo_key: int
 
 
-class ParticipantPerksParser:
+class ParticipantPerkValuesParser:
     def parse(
         self, participants: Sequence[Participant], gameId: NonNegativeInt
-    ) -> list[TabulatedParticipantPerks]:
-        rows: list[TabulatedParticipantPerks] = []
+    ) -> list[TabulatedParticipantPerkValues]:
+        rows: list[TabulatedParticipantPerkValues] = []
 
         for p in participants:
-            perks = p.perks
-            stat = perks.statPerks
-
-            style_by_desc = {s.description: s for s in perks.styles}
-            primary = style_by_desc["primaryStyle"]
-            sub = style_by_desc["subStyle"]
-
-            payload: dict[str, Any] = {
+            base_payload = {
                 "gameId": gameId,
                 "teamId": p.teamId,
                 "puuid": p.puuid,
-                "stat_defense": stat.defense,
-                "stat_flex": stat.flex,
-                "stat_offense": stat.offense,
-                "primary_style": primary.style,
-                "sub_style": sub.style,
+            }
+            style_by_desc = {s.description: s for s in p.perks.styles}
+            primary = style_by_desc["primaryStyle"]
+            sub = style_by_desc["subStyle"]
+            
+            primary_payload = {
+                f"primary_var{var_idx}_{sel_idx}": getattr(sel, f"var{var_idx}")
+                for sel_idx, sel in enumerate(primary.selections, start=1)
+                for var_idx in (1, 2, 3)
+            }
+            sub_payload = {
+                f"sub_var{var_idx}_{sel_idx}": getattr(sel, f"var{var_idx}")
+                for sel_idx, sel in enumerate(sub.selections, start=1)
+                for var_idx in (1, 2, 3)
             }
 
-            def add_selections(prefix: str, selections: list[Any], count: int) -> None:
-                for i in range(count):
-                    sel = selections[i]
-                    n = i + 1
-                    payload[f"{prefix}_perk_{n}"] = sel.perk
-                    payload[f"{prefix}_var1_{n}"] = sel.var1
-                    payload[f"{prefix}_var2_{n}"] = sel.var2
-                    payload[f"{prefix}_var3_{n}"] = sel.var3
+            rows.append(
+                cast(
+                    TabulatedParticipantPerkValues,
+                    {
+                        **base_payload,
+                        **primary_payload,
+                        **sub_payload,
+                    },
+                )
+            )
 
-            add_selections("primary", primary.selections, 4)
-            add_selections("sub", sub.selections, 2)
+        return rows
 
-            rows.append(cast(TabulatedParticipantPerks, payload))
+
+class ParticipantPerkIdsParser:
+    def parse(
+        self, participants: Sequence[Participant], gameId: NonNegativeInt
+    ) -> list[TabulatedParticipantPerkIds]:
+        rows: list[TabulatedParticipantPerkIds] = []
+        perk_bit_width = 14
+
+        for p in participants:
+            base_payload = {
+                "gameId": gameId,
+                "teamId": p.teamId,
+                "puuid": p.puuid,
+            }
+            stat = p.perks.statPerks
+            style_by_desc = {s.description: s for s in p.perks.styles}
+            primary = style_by_desc["primaryStyle"]
+            sub = style_by_desc["subStyle"]
+            primary_perk_payload = {
+                f"primary_perk_{idx}": sel.perk
+                for idx, sel in enumerate(primary.selections, start=1)
+            }
+            sub_perk_payload = {
+                f"sub_perk_{idx}": sel.perk
+                for idx, sel in enumerate(sub.selections, start=1)
+            }
+            selected_perks = [
+                *(sel.perk for sel in primary.selections),
+                *(sel.perk for sel in sub.selections),
+            ]
+            combo_key = sum(
+                int(perk_id) << (perk_bit_width * idx)
+                for idx, perk_id in enumerate(selected_perks)
+            )
+
+            rows.append(
+                cast(
+                    TabulatedParticipantPerkIds,
+                    {
+                        **base_payload,
+                        "stat_defense": stat.defense,
+                        "stat_flex": stat.flex,
+                        "stat_offense": stat.offense,
+                        "primary_style": primary.style,
+                        "sub_style": sub.style,
+                        **primary_perk_payload,
+                        **sub_perk_payload,
+                        "perk_combo_key": combo_key,
+                    },
+                )
+            )
 
         return rows
 
@@ -494,7 +556,8 @@ class NonTimelineTables:
     objectives: list[TabulatedObjective]
     participant_stats: list[TabulatedParticipantStats]
     participant_challenges: list[TabulatedParticipantChallenges]
-    participant_perks: list[TabulatedParticipantPerks]
+    participant_perk_values: list[TabulatedParticipantPerkValues]
+    participant_perk_ids: list[TabulatedParticipantPerkIds]
 
 
 @dataclass(frozen=True)
@@ -514,8 +577,11 @@ class MatchDataNonTimelineParsingOrchestrator:
     participantChallenges: ParticipantParser[list[TabulatedParticipantChallenges]] = (
         field(default_factory=ParticipantChallengesParser)
     )
-    participantPerks: ParticipantParser[list[TabulatedParticipantPerks]] = field(
-        default_factory=ParticipantPerksParser
+    participantPerkValues: ParticipantParser[list[TabulatedParticipantPerkValues]] = (
+        field(default_factory=ParticipantPerkValuesParser)
+    )
+    participantPerkIds: ParticipantParser[list[TabulatedParticipantPerkIds]] = field(
+        default_factory=ParticipantPerkIdsParser
     )
 
     def run(self, raw: dict[str, Any]) -> NonTimelineTables:
@@ -539,5 +605,8 @@ class MatchDataNonTimelineParsingOrchestrator:
             participant_challenges=self.participantChallenges.parse(
                 participants, gameId
             ),
-            participant_perks=self.participantPerks.parse(participants, gameId),
+            participant_perk_values=self.participantPerkValues.parse(
+                participants, gameId
+            ),
+            participant_perk_ids=self.participantPerkIds.parse(participants, gameId),
         )

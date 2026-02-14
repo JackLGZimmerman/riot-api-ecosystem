@@ -10,7 +10,7 @@ from database.clickhouse.client import get_client
 logger = logging.getLogger(__name__)
 
 
-def _batched(iterable: Iterable[tuple], batch_size: int):
+def _batched(iterable: Iterable, batch_size: int):
     it = iter(iterable)
     while True:
         batch = list(islice(it, batch_size))
@@ -50,13 +50,9 @@ def persist_data(
     )
 
 
-def delete_by_run_id(table: str, run_id: UUID, *, limit: int | None = None) -> None:
-    limit_clause = f" LIMIT {limit}" if limit is not None else ""
-    command = f"""
-    ALTER TABLE {table}
-    DELETE WHERE run_id = %(run_id)s{limit_clause}
-    """
-    get_client().command(command, {"run_id": str(run_id)})
+def delete_by_run_id(table: str, run_id: UUID) -> None:
+    command = f"ALTER TABLE {table} DELETE WHERE run_id = %(run_id)s"
+    get_client().command(command, parameters={"run_id": str(run_id)})
 
 
 def insert_match_ids(
@@ -81,4 +77,4 @@ def insert_match_ids(
     reraise=True,
 )
 def delete_match_ids(run_id: UUID) -> None:
-    delete_by_run_id("game_data.matchdata_matchids", run_id, limit=50_000)
+    delete_by_run_id("game_data.matchdata_matchids", run_id)

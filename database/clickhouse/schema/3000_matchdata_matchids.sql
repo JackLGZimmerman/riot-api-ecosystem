@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS 'game_data.matchdata_matchids' (
+CREATE TABLE IF NOT EXISTS game_data.matchdata_matchids (
     run_id UUID,
     match_id String
 )

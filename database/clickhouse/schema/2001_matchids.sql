@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS game_data.matchids
 (
     run_id UUID,
-    matchid STRING CODEC (ZSTD(3))
+    matchid String CODEC (ZSTD(3))
 )
-ENGINE = MERGETREE
+ENGINE = MergeTree
 ORDER BY (run_id, matchid);

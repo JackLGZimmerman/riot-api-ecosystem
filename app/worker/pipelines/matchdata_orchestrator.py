@@ -32,7 +32,8 @@ from app.services.riot_api_client.parsers.non_timeline import (
     TabulatedMetadata,
     TabulatedObjective,
     TabulatedParticipantChallenges,
-    TabulatedParticipantPerks,
+    TabulatedParticipantPerkIds,
+    TabulatedParticipantPerkValues,
     TabulatedParticipantStats,
 )
 from app.services.riot_api_client.parsers.timeline import (
@@ -42,20 +43,11 @@ from app.services.riot_api_client.parsers.timeline import (
     ChampionSpecialKillRow,
     DragonSoulGivenRow,
     EliteMonsterKillRow,
-    GameEndRow,
-    ItemDestroyedRow,
-    ItemPurchasedRow,
-    ItemSoldRow,
-    ItemUndoRow,
-    LevelUpRow,
     MatchDataTimelineParsingOrchestrator,
     ParticipantStatsRow,
-    PauseEndRow,
-    SkillLevelUpRow,
+    RareEventRow,
     TimelineTables,
     TurretPlateDestroyedRow,
-    WardKillRow,
-    WardPlacedRow,
 )
 from app.worker.pipelines.orchestrator import (
     Collector,
@@ -76,26 +68,20 @@ logger = logging.getLogger(__name__)
 
 
 def columns_from_typed_dict(td: type) -> tuple[str, ...]:
-    return tuple(td.__annotations__)
+    annotations: dict[str, Any] = {}
+    for cls in reversed(td.__mro__):
+        annotations.update(getattr(cls, "__annotations__", {}))
+    return tuple(annotations)
 
 
-GAME_END_COLS = columns_from_typed_dict(GameEndRow)
-LEVEL_UP_COLS = columns_from_typed_dict(LevelUpRow)
-ITEM_SOLD_COLS = columns_from_typed_dict(ItemSoldRow)
-ITEM_UNDO_COLS = columns_from_typed_dict(ItemUndoRow)
-PAUSE_END_COLS = columns_from_typed_dict(PauseEndRow)
-WARD_KILL_COLS = columns_from_typed_dict(WardKillRow)
-WARD_PLACED_COLS = columns_from_typed_dict(WardPlacedRow)
 BUILDING_KILL_COLS = columns_from_typed_dict(BuildingKillRow)
 CHAMPION_KILL_COLS = columns_from_typed_dict(ChampionKillRow)
-SKILL_LEVEL_UP_COLS = columns_from_typed_dict(SkillLevelUpRow)
-ITEM_DESTROYED_COLS = columns_from_typed_dict(ItemDestroyedRow)
-ITEM_PURCHASED_COLS = columns_from_typed_dict(ItemPurchasedRow)
 DRAGON_SOUL_GIVEN_COLS = columns_from_typed_dict(DragonSoulGivenRow)
 ELITE_MONSTER_KILL_COLS = columns_from_typed_dict(EliteMonsterKillRow)
 PARTICIPANT_STATS_COLS = columns_from_typed_dict(ParticipantStatsRow)
 CHAMPION_SPECIAL_KILL_COLS = columns_from_typed_dict(ChampionSpecialKillRow)
 TURRET_PLATE_DESTROYED_COLS = columns_from_typed_dict(TurretPlateDestroyedRow)
+PAYLOAD_EVENT_COLS = columns_from_typed_dict(RareEventRow)
 CHAMPION_KILL_DAMAGE_INSTANCE_COLS = columns_from_typed_dict(
     ChampionKillDamageInstanceRow
 )
@@ -106,7 +92,12 @@ TABULATED_BAN_COLS = columns_from_typed_dict(TabulatedBan)
 TABULATED_FEAT_COLS = columns_from_typed_dict(TabulatedFeat)
 TABULATED_OBJECTIVE_COLS = columns_from_typed_dict(TabulatedObjective)
 TABULATED_PARTICIPANT_STATS_COLS = columns_from_typed_dict(TabulatedParticipantStats)
-TABULATED_PARTICIPANT_PERKS_COLS = columns_from_typed_dict(TabulatedParticipantPerks)
+TABULATED_PARTICIPANT_PERK_VALUES_COLS = columns_from_typed_dict(
+    TabulatedParticipantPerkValues
+)
+TABULATED_PARTICIPANT_PERK_IDS_COLS = columns_from_typed_dict(
+    TabulatedParticipantPerkIds
+)
 TABULATED_PARTICIPANT_CHALLENGES_COLS = columns_from_typed_dict(
     TabulatedParticipantChallenges
 )
@@ -119,7 +110,8 @@ NON_TIMELINE_DELETE_TABLES: tuple[str, ...] = (
     "game_data.objectives",
     "game_data.participant_stats",
     "game_data.participant_challenges",
-    "game_data.participant_perks",
+    "game_data.participant_perk_values",
+    "game_data.participant_perk_ids",
 )
 
 TIMELINE_DELETE_TABLES: tuple[str, ...] = (
@@ -129,17 +121,8 @@ TIMELINE_DELETE_TABLES: tuple[str, ...] = (
     "game_data.tl_champion_special_kill",
     "game_data.tl_dragon_soul_given",
     "game_data.tl_elite_monster_kill",
-    "game_data.tl_game_end",
-    "game_data.tl_item_destroyed",
-    "game_data.tl_item_purchased",
-    "game_data.tl_item_sold",
-    "game_data.tl_item_undo",
-    "game_data.tl_level_up",
-    "game_data.tl_pause_end",
-    "game_data.tl_skill_level_up",
+    "game_data.tl_payload_event",
     "game_data.tl_turret_plate_destroyed",
-    "game_data.tl_ward_kill",
-    "game_data.tl_ward_placed",
     "game_data.tl_ck_victim_damage_dealt",
     "game_data.tl_ck_victim_damage_received",
 )
@@ -162,9 +145,14 @@ NON_TIMELINE_INSERTS = (
         attrgetter("participant_challenges"),
     ),
     (
-        "game_data.participant_perks",
-        TABULATED_PARTICIPANT_PERKS_COLS,
-        attrgetter("participant_perks"),
+        "game_data.participant_perk_values",
+        TABULATED_PARTICIPANT_PERK_VALUES_COLS,
+        attrgetter("participant_perk_values"),
+    ),
+    (
+        "game_data.participant_perk_ids",
+        TABULATED_PARTICIPANT_PERK_IDS_COLS,
+        attrgetter("participant_perk_ids"),
     ),
 )
 
@@ -191,21 +179,12 @@ TIMELINE_INSERTS = (
         ELITE_MONSTER_KILL_COLS,
         attrgetter("eliteMonsterKill"),
     ),
-    ("game_data.tl_game_end", GAME_END_COLS, attrgetter("gameEnd")),
-    ("game_data.tl_item_destroyed", ITEM_DESTROYED_COLS, attrgetter("itemDestroyed")),
-    ("game_data.tl_item_purchased", ITEM_PURCHASED_COLS, attrgetter("itemPurchased")),
-    ("game_data.tl_item_sold", ITEM_SOLD_COLS, attrgetter("itemSold")),
-    ("game_data.tl_item_undo", ITEM_UNDO_COLS, attrgetter("itemUndo")),
-    ("game_data.tl_level_up", LEVEL_UP_COLS, attrgetter("levelUp")),
-    ("game_data.tl_pause_end", PAUSE_END_COLS, attrgetter("pauseEnd")),
-    ("game_data.tl_skill_level_up", SKILL_LEVEL_UP_COLS, attrgetter("skillLevelUp")),
+    ("game_data.tl_payload_event", PAYLOAD_EVENT_COLS, attrgetter("payloadEvents")),
     (
         "game_data.tl_turret_plate_destroyed",
         TURRET_PLATE_DESTROYED_COLS,
         attrgetter("turretPlateDestroyed"),
     ),
-    ("game_data.tl_ward_kill", WARD_KILL_COLS, attrgetter("wardKill")),
-    ("game_data.tl_ward_placed", WARD_PLACED_COLS, attrgetter("wardPlaced")),
     (
         "game_data.tl_ck_victim_damage_dealt",
         CHAMPION_KILL_DAMAGE_INSTANCE_COLS,
@@ -386,10 +365,10 @@ class MatchDataSaver(Saver):
         return await asyncio.to_thread(self.timeline_parser.run, raw_data)
 
     async def delete_failed_non_timeline(self, run_id: UUID) -> None:
-        await self._run_deletes(NON_TIMELINE_DELETE_TABLES, run_id, limit=self.nt_small)
+        await self._run_deletes(NON_TIMELINE_DELETE_TABLES, run_id)
 
     async def delete_failed_timeline(self, run_id: UUID) -> None:
-        await self._run_deletes(TIMELINE_DELETE_TABLES, run_id, limit=self.nt_medium)
+        await self._run_deletes(TIMELINE_DELETE_TABLES, run_id)
 
     @retry(
         stop=stop_never,
@@ -397,19 +376,16 @@ class MatchDataSaver(Saver):
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-    async def _delete_one(self, table: str, run_id: UUID, limit: int) -> None:
+    async def _delete_one(self, table: str, run_id: UUID) -> None:
         try:
-            await asyncio.to_thread(delete_by_run_id, table, run_id, limit=limit)
+            await asyncio.to_thread(delete_by_run_id, table, run_id)
         except Exception as e:
-            print(f"Error deleting from {table} run_id={run_id}: {e}")
+            logger.exception("Error deleting from %s run_id=%s: %s", table, run_id, e)
             raise
 
-    async def _run_deletes(
-        self, tables: tuple[str, ...], run_id: UUID, *, limit: int
-    ) -> None:
-        async with asyncio.TaskGroup() as tg:
-            for table in tables:
-                tg.create_task(self._delete_one(table, run_id, limit))
+    async def _run_deletes(self, tables: tuple[str, ...], run_id: UUID) -> None:
+        for table in tables:
+            await self._delete_one(table, run_id)
 
     async def _persist_non_timeline(self, t: NonTimelineTables, run_id: UUID) -> None:
         await self._run_inserts(
@@ -435,14 +411,13 @@ class MatchDataSaver(Saver):
                 persist_data, table, cols, items, run_id, batch_size
             )
         except Exception as e:
-            print(f"Error inserting into {table} run_id={run_id}: {e}")
+            logger.exception("Error inserting into %s run_id=%s: %s", table, run_id, e)
             raise
 
     async def _run_inserts(self, specs, t, run_id: UUID, *, batch_size: int) -> None:
-        async with asyncio.TaskGroup() as tg:
-            for table, cols, getter in specs:
-                items = getter(t)
-                tg.create_task(self._insert_one(table, cols, items, run_id, batch_size))
+        for table, cols, getter in specs:
+            items = getter(t)
+            await self._insert_one(table, cols, items, run_id, batch_size)
 
 
 if __name__ == "__main__":

@@ -12,9 +12,9 @@ logger = logging.getLogger(__name__)
 
 _CH_EXECUTOR = settings.threadpool_executor_clickhouse
 
-PLAYERS_STAGED_TABLE = "game_data.players_staged"
+PLAYERS_TABLE = "game_data.players"
 
-PLAYERS_STAGED_COLS = [
+PLAYERS_COLS = [
     "run_id",
     "puuid",
     "queue_type",
@@ -37,11 +37,11 @@ def _insert_rows(rows: list[tuple]) -> None:
     if not rows:
         return
     get_client().insert(
-        table=PLAYERS_STAGED_TABLE,
+        table=PLAYERS_TABLE,
         data=rows,
-        column_names=PLAYERS_STAGED_COLS,
+        column_names=PLAYERS_COLS,
     )
-    logger.info("Inserted %d rows into %s", len(rows), PLAYERS_STAGED_TABLE)
+    logger.info("Inserted %d rows into %s", len(rows), PLAYERS_TABLE)
 
 
 async def insert_players_stream_in_batches(
@@ -86,7 +86,7 @@ async def insert_players_stream_in_batches(
 
 def delete_partial_players_run(run_id: UUID) -> None:
     query = """
-        ALTER TABLE game_data.players_staged
+        ALTER TABLE game_data.players
         DELETE WHERE run_id = %(run_id)s
     """
 
@@ -96,6 +96,7 @@ def delete_partial_players_run(run_id: UUID) -> None:
 def load_players() -> list[PlayerKeyRow]:
     query = """
     SELECT
+        DISTINCT
         puuid,
         queue_type,
         region
@@ -105,6 +106,12 @@ def load_players() -> list[PlayerKeyRow]:
     result = get_client().query(query)
 
     return [
-        PlayerKeyRow(puuid=row[0], queue_type=row[1], region=row[2])
+        PlayerKeyRow(
+            puuid=row[0].decode("utf-8").rstrip("\x00")
+            if isinstance(row[0], (bytes, bytearray))
+            else row[0],
+            queue_type=row[1],
+            region=row[2],
+        )
         for row in result.result_rows
     ]

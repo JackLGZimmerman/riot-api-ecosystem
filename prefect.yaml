@@ -25,5 +25,7 @@ deployments:
       job_variables:
         image: riot-pipeline:latest
         image_pull_policy: Never
+        volumes:
+          - /home/jack/projects/riot-api-ecosystem/.env:/app/.env:ro
         networks:
           - riot-api-ecosystem_default

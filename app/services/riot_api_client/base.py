@@ -93,7 +93,7 @@ class RiotAPI:
     def api_key(self):
         return self._api_key
 
-    async def __aenter__(self) -> "RiotAPI":
+    async def __aenter__(self) -> RiotAPI:
         """
         Async context manager entry.
 

@@ -10,6 +10,16 @@ PUUID_DATA_TIMESTAMP_NAME = "matchids_puuids_ts"
 _CH_EXECUTOR = settings.threadpool_executor_clickhouse
 
 
+def _insert_matchids_rows(rows: list[tuple[UUID, str]]) -> None:
+    if not rows:
+        return
+    get_client().insert(
+        table="game_data.matchids",
+        data=rows,
+        column_names=["run_id", "matchid"],
+    )
+
+
 def load_matchid_puuid_ts() -> int:
     query = """
         SELECT stored_at
@@ -22,7 +32,7 @@ def load_matchid_puuid_ts() -> int:
 
 def load_matchids() -> list[str]:
     query = """
-        SELECT matchid FROM game_data.matchids;
+        SELECT matchid FROM game_data.matchids
     """
 
     rows = get_client().query(query).result_rows
@@ -149,10 +159,8 @@ async def insert_matchids_stream_in_batches(
 
             await loop.run_in_executor(
                 _CH_EXECUTOR,
-                get_client().insert,
-                "game_data.matchids",
+                _insert_matchids_rows,
                 rows,
-                ["run_id", "matchid"],
             )
             last_flush = time.monotonic()
 
@@ -160,8 +168,6 @@ async def insert_matchids_stream_in_batches(
         rows = [(run_id, mid) for mid in buf]
         await loop.run_in_executor(
             _CH_EXECUTOR,
-            get_client().insert,
-            "game_data.matchids",
+            _insert_matchids_rows,
             rows,
-            ["run_id", "matchid"],
         )

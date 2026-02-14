@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS game_data.matchid_puuids
 (
     run_id UUID,
-    puuid STRING CODEC (ZSTD(3))
+    puuid FixedString (78) CODEC (ZSTD(3))
 )
-ENGINE = REPLACINGMERGETREE(run_id)
+ENGINE = ReplacingMergeTree
 ORDER BY (run_id, puuid);
