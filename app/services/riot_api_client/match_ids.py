@@ -15,6 +15,10 @@ MAX_IN_FLIGHT: int = 128
 INITIAL_BACKFILL_DAYS = 30
 
 
+class _Done:
+    pass
+
+
 async def stream_match_ids(
     riot_api: RiotAPI,
     *,
@@ -22,7 +26,7 @@ async def stream_match_ids(
     max_in_flight: int = MAX_IN_FLIGHT,
 ) -> AsyncIterator[list[str]]:
     work_q: asyncio.Queue[PlayerCrawlState | None] = asyncio.Queue()
-    out_q: asyncio.Queue[list[str] | BaseException | None] = asyncio.Queue()
+    out_q: asyncio.Queue[list[str] | BaseException | _Done] = asyncio.Queue()
 
     for st in initial_states:
         work_q.put_nowait(st)
@@ -43,6 +47,9 @@ async def stream_match_ids(
                         location=state.continent,
                         riot_api=riot_api,
                     )
+
+                    if not isinstance(match_ids, list):
+                        continue
 
                     await out_q.put(match_ids)
 
@@ -68,7 +75,7 @@ async def stream_match_ids(
             work_q.put_nowait(None)
 
         await asyncio.gather(*workers, return_exceptions=True)
-        await out_q.put(None)
+        await out_q.put(_Done())
 
     workers = [asyncio.create_task(worker()) for _ in range(max_in_flight)]
     close_task = asyncio.create_task(closer(workers))
@@ -77,7 +84,7 @@ async def stream_match_ids(
         while True:
             item = await out_q.get()
 
-            if item is None:
+            if isinstance(item, _Done):
                 return
 
             if isinstance(item, BaseException):

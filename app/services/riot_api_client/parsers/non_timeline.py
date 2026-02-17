@@ -328,6 +328,26 @@ class TabulatedParticipantStats(TypedDict):
 
 
 class ParticipantStatsParser:
+    _UINT8_CLAMP_FIELDS = {
+        "visionScore",
+        "wardsPlaced",
+        "wardsKilled",
+        "allInPings",
+        "assistMePings",
+        "basicPings",
+        "commandPings",
+        "dangerPings",
+        "enemyMissingPings",
+        "enemyVisionPings",
+        "getBackPings",
+        "holdPings",
+        "needVisionPings",
+        "onMyWayPings",
+        "pushPings",
+        "retreatPings",
+        "unrealKills",
+    }
+
     def parse(
         self,
         participants: Sequence[Participant],
@@ -374,6 +394,10 @@ class ParticipantStatsParser:
                 exclude=exclude_fields,
             )
             data["gameId"] = gameId
+            for field in self._UINT8_CLAMP_FIELDS:
+                value = data.get(field)
+                if value is not None and value > 255:
+                    data[field] = 255
 
             rows.append(cast(TabulatedParticipantStats, data))
 

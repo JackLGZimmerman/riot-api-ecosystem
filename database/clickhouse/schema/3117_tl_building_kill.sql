@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS game_data.tl_building_kill
     lanetype LowCardinality (String),
     position_x Int16,
     position_y Int16,
-    teamid Enum8 ('100' = 1, '200' = 2),
+    teamid UInt8,
     towertype LowCardinality (String)
 )
 ENGINE = MergeTree

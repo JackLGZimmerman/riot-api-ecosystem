@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS game_data.participant_perk_values
 (
     run_id UUID,
     gameid UInt64,
-    teamid Enum8 ('100' = 1, '200' = 2),
+    teamid UInt8,
     puuid FixedString (78),
 
     primary_var1_1 UInt16,

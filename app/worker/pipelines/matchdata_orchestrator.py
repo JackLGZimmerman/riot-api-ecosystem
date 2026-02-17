@@ -352,7 +352,7 @@ class MatchDataSaver(Saver):
         except Exception:
             await self.delete_failed_non_timeline(ctx.run_id)
             await self.delete_failed_timeline(ctx.run_id)
-            await asyncio.to_thread(delete_match_ids, ctx.run_id)
+            await self._delete_match_ids(ctx.run_id)
             raise
 
         finally:
@@ -372,7 +372,7 @@ class MatchDataSaver(Saver):
 
     @retry(
         stop=stop_never,
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        wait=wait_exponential(multiplier=1, min=1, max=300),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
@@ -386,6 +386,23 @@ class MatchDataSaver(Saver):
     async def _run_deletes(self, tables: tuple[str, ...], run_id: UUID) -> None:
         for table in tables:
             await self._delete_one(table, run_id)
+
+    @retry(
+        stop=stop_never,
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def _delete_match_ids(self, run_id: UUID) -> None:
+        try:
+            await asyncio.to_thread(delete_match_ids, run_id)
+        except Exception as e:
+            logger.exception(
+                "Error deleting from game_data.matchdata_matchids run_id=%s: %s",
+                run_id,
+                e,
+            )
+            raise
 
     async def _persist_non_timeline(self, t: NonTimelineTables, run_id: UUID) -> None:
         await self._run_inserts(

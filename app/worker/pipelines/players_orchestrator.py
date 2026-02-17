@@ -1,8 +1,10 @@
 import asyncio
 from dataclasses import dataclass
+import logging
 import time
 from typing import AsyncIterator, Any
 from uuid import uuid4
+from tenacity import before_sleep_log, retry, stop_never, wait_exponential
 from app.models import MinifiedLeagueEntryDTO
 from app.models.riot.league import (
     BASIC_BOUNDS,
@@ -24,6 +26,8 @@ from database.clickhouse.operations.players import (
     insert_players_stream_in_batches,
     delete_partial_players_run,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,15 @@ class PlayerCollector(Collector):
 
 
 class PlayerSaver(Saver):
+    @retry(
+        stop=stop_never,
+        wait=wait_exponential(multiplier=1, min=2, max=300),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def _delete_partial_run(self, run_id) -> None:
+        await asyncio.to_thread(delete_partial_players_run, run_id)
+
     async def save(
         self,
         items: AsyncIterator[MinifiedLeagueEntryDTO],
@@ -95,10 +108,8 @@ class PlayerSaver(Saver):
                 run_id=ctx.run_id,
             )
         except Exception:
-            delete_partial_players_run(ctx.run_id)
-            raise Exception(
-                "Failure inserting data in player pipeline, removing partial data..."
-            )
+            await self._delete_partial_run(ctx.run_id)
+            raise
 
 
 if __name__ == "__main__":

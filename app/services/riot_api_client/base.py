@@ -153,36 +153,45 @@ class RiotAPI:
 
         async with limiter:
             headers = {"X-Riot-Token": self.api_key}
-            async with session.get(url, headers=headers) as resp:
-                status: int = resp.status
+            try:
+                async with session.get(url, headers=headers) as resp:
+                    status: int = resp.status
 
-                if not 200 <= status < 300:
-                    export_http_error_code_counter(status)
+                    if not 200 <= status < 300:
+                        export_http_error_code_counter(status)
 
-                    if status in RETRYABLE:
-                        resp.raise_for_status()
+                        if status in RETRYABLE:
+                            resp.raise_for_status()
 
-                    logger.warning(
-                        "NonRetryableHTTP status=%s url=%s location=%s",
-                        status,
-                        mask_api_key(str(resp.url)),
-                        location,
-                    )
-                    return None
-                try:
-                    return await resp.json()
-                except (aiohttp.ContentTypeError, Exception):
-                    body = await resp.text()
-                    preview = body.replace("\n", " ")[:MAX_BODY_PREVIEW]
-                    logger.warning(
-                        "NonJSONResponse status=%s url=%s location=%s len=%d preview=%r",
-                        status,
-                        mask_api_key(str(resp.url)),
-                        location,
-                        len(body),
-                        preview,
-                    )
-                    return None
+                        logger.warning(
+                            "NonRetryableHTTP status=%s url=%s location=%s",
+                            status,
+                            mask_api_key(str(resp.url)),
+                            location,
+                        )
+                        return None
+                    try:
+                        return await resp.json()
+                    except (aiohttp.ContentTypeError, Exception):
+                        body = await resp.text()
+                        preview = body.replace("\n", " ")[:MAX_BODY_PREVIEW]
+                        logger.warning(
+                            "NonJSONResponse status=%s url=%s location=%s len=%d preview=%r",
+                            status,
+                            mask_api_key(str(resp.url)),
+                            location,
+                            len(body),
+                            preview,
+                        )
+                        return None
+            except aiohttp.ClientConnectorError as e:
+                logger.warning(
+                    "ConnectionError url=%s location=%s error=%s",
+                    mask_api_key(url),
+                    location,
+                    e,
+                )
+                return None
 
 
 def get_riot_api(

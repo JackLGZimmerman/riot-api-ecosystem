@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS game_data.bans
 (
     run_id UUID,
     gameid UInt64,
-    teamid Enum8 ('100' = 1, '200' = 2),
+    teamid UInt8,
     pickturn Enum8 (
         '1' = 1,
         '2' = 2,

@@ -80,11 +80,20 @@ async def discover_page_bounds(
 
     results: list[tuple[PageKey, int]] = []
     for batch in chunked(spread_work, MAX_IN_FLIGHT):
-        async with asyncio.TaskGroup() as tg:
-            tasks = [tg.create_task(probe(*args)) for args in batch]
-
-        for t in tasks:
-            results.append(t.result())
+        probed = await asyncio.gather(*(probe(*args) for args in batch), return_exceptions=True)
+        for args, item in zip(batch, probed, strict=True):
+            if isinstance(item, Exception):
+                region, queue, tier, div = args
+                logger.warning(
+                    "LeagueBoundProbeFailed region=%s queue=%s tier=%s division=%s error=%s",
+                    region.value,
+                    queue.value,
+                    tier.value,
+                    div.value,
+                    type(item).__name__,
+                )
+                continue
+            results.append(item)
 
     return results
 
@@ -116,22 +125,28 @@ async def stream_sub_elite_players(
     del jobs
     del page_bounds
 
-    for batch in chunked(spread_jobs, MAX_IN_FLIGHT):
-        async with asyncio.TaskGroup() as tg:
-            tasks = [
-                tg.create_task(
-                    fetch_json_with_carry_over(
-                        carry_over=(region,),
-                        url=url,
-                        location=region,
-                        riot_api=riot_api,
-                    )
-                )
-                for url, region in batch
-            ]
+    async def fetch_one(url: str, region: Region) -> tuple[Region, JSONList | None]:
+        try:
+            _, data = await fetch_json_with_carry_over(
+                carry_over=(region,),
+                url=url,
+                location=region,
+                riot_api=riot_api,
+            )
+            if not isinstance(data, list):
+                return region, None
+            return region, data
+        except Exception as e:
+            logger.warning(
+                "LeagueFetchFailed region=%s error=%s",
+                region.value,
+                type(e).__name__,
+            )
+            return region, None
 
-        for t in tasks:
-            region, records = t.result()
+    for batch in chunked(spread_jobs, MAX_IN_FLIGHT):
+        tasks = [fetch_one(url, region) for url, region in batch]
+        for region, records in await asyncio.gather(*tasks):
 
             if not records:
                 continue

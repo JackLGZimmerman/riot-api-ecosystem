@@ -7,6 +7,7 @@ from typing import Awaitable, Callable, Sequence
 
 from prefect import flow
 
+from app.core.logging import setup_logging_config
 from app.services.riot_api_client.base import RiotAPI, get_riot_api
 from app.services.riot_api_client.parsers.non_timeline import (
     MatchDataNonTimelineParsingOrchestrator,
@@ -34,6 +35,7 @@ from app.worker.pipelines.players_orchestrator import (
     PlayersOrchestrator,
 )
 
+setup_logging_config()
 logger = logging.getLogger(__name__)
 
 

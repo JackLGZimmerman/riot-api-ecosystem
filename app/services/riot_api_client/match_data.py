@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, AsyncIterator, NamedTuple
 
 from app.core.config.constants import (
@@ -14,6 +15,7 @@ SENTINEL: object = object()
 MAX_PAGE_START = 900
 MAX_PAGE_COUNT = 100
 MAX_IN_FLIGHT = 16
+logger = logging.getLogger(__name__)
 
 
 class MatchWork(NamedTuple):
@@ -30,7 +32,19 @@ async def yield_match_data(
 
     work_items: list[MatchWork] = []
     for match_id in matchids:
-        region = Region(match_id.split("_", 1)[0].lower())
+        shard = match_id.split("_", 1)[0].lower()
+        try:
+            region = Region(shard)
+        except ValueError:
+            logger.error(
+                "Unknown region shard encountered: shard=%s match_id=%s",
+                shard,
+                match_id,
+            )
+            raise ValueError(
+                f"Unknown region shard '{shard}' in match_id '{match_id}'"
+            )
+
         continent = REGION_TO_CONTINENT[region]
         work_items.append(MatchWork(match_id, continent))
 

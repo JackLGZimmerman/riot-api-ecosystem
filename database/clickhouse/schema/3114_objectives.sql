@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS game_data.objectives (
         'riftHerald' = 7,
         'tower' = 8
     ),
-    first Bool,
+    first UInt8,
     kills UInt8
 ) ENGINE = MergeTree
 ORDER BY (gameId, teamId, objectiveType, run_id);

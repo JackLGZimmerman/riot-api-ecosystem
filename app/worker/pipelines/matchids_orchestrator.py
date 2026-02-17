@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from uuid import uuid4
 
 from dataclasses import dataclass
 from typing import AsyncIterator
 import time
+from tenacity import before_sleep_log, retry, stop_never, wait_exponential
 from app.core.config.constants import (
     ENDPOINTS,
     QUEUE_TYPE_TO_QUEUE_CODE,
@@ -39,6 +41,7 @@ from database.clickhouse.operations.matchids import (
 from database.clickhouse.operations.players import PlayerKeyRow, load_players
 
 MATCHID_BUFFER = 200_000
+logger = logging.getLogger(__name__)
 
 def build_initial_player_states(
     players: list[PlayerKeyRow],
@@ -170,6 +173,19 @@ class MatchIDCollector(Collector):
 
 
 class MatchIDSaver:
+    @retry(
+        stop=stop_never,
+        wait=wait_exponential(multiplier=1, min=2, max=300),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def _delete_with_retry(self, op_name: str, fn, *args) -> None:
+        try:
+            await asyncio.to_thread(fn, *args)
+        except Exception as e:
+            logger.exception("Error during %s: %s", op_name, e)
+            raise
+
     async def save(
         self,
         items: AsyncIterator[list[str]],
@@ -183,11 +199,18 @@ class MatchIDSaver:
             await insert_matchids_stream_in_batches(items, ctx.run_id)
             await asyncio.to_thread(upsert_puuid_timestamp, state.ts, ctx.run_id)
         except Exception:
-            await asyncio.to_thread(delete_failed_puuid_timestamp, ctx.run_id)
-            await asyncio.to_thread(delete_matchid_puuids, ctx.run_id)
-            await asyncio.to_thread(delete_matchids, ctx.run_id)
+            await self._delete_with_retry(
+                "delete_failed_puuid_timestamp", delete_failed_puuid_timestamp, ctx.run_id
+            )
+            await self._delete_with_retry(
+                "delete_matchid_puuids", delete_matchid_puuids, ctx.run_id
+            )
+            await self._delete_with_retry("delete_matchids", delete_matchids, ctx.run_id)
+            raise
         finally:
-            await asyncio.to_thread(delete_old_puuid_timestamps, ctx.run_id)
+            await self._delete_with_retry(
+                "delete_old_puuid_timestamps", delete_old_puuid_timestamps, ctx.run_id
+            )
 
 
 if __name__ == "__main__":

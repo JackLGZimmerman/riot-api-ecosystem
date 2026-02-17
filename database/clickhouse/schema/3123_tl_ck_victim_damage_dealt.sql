@@ -1,21 +1,10 @@
 CREATE TABLE IF NOT EXISTS game_data.tl_ck_victim_damage_dealt
 (
     run_id UUID,
-    basic Bool,
+    basic UInt8,
     magicdamage UInt16,
     name LowCardinality (String),
-    participantid Enum8 (
-        '1' = 1,
-        '2' = 2,
-        '3' = 3,
-        '4' = 4,
-        '5' = 5,
-        '6' = 6,
-        '7' = 7,
-        '8' = 8,
-        '9' = 9,
-        '10' = 10
-    ),
+    participantid UInt8,
     physicaldamage UInt16,
     spellname LowCardinality (String),
     spellslot Int8,

@@ -72,7 +72,7 @@ def insert_match_ids(
 
 @retry(
     stop=stop_never,
-    wait=wait_exponential(multiplier=1, min=1, max=10),
+    wait=wait_exponential(multiplier=1, min=2, max=300),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )

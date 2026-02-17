@@ -51,22 +51,26 @@ async def stream_elite_players(
 
     spread_urls = spreading_region(urls)
 
-    for batch in chunked(spread_urls, MAX_IN_FLIGHT):
-        async with asyncio.TaskGroup() as tg:
-            tasks = [
-                tg.create_task(
-                    fetch_json_with_carry_over(
-                        url=url,
-                        location=region,
-                        riot_api=riot_api,
-                        carry_over=(region,),
-                    )
-                )
-                for url, region in batch
-            ]
+    async def fetch_one(url: str, region: Region) -> tuple[Region, object | None]:
+        try:
+            _, data = await fetch_json_with_carry_over(
+                url=url,
+                location=region,
+                riot_api=riot_api,
+                carry_over=(region,),
+            )
+            return region, data
+        except Exception as e:
+            logger.warning(
+                "LeagueFetchFailed region=%s error=%s",
+                region.value,
+                type(e).__name__,
+            )
+            return region, None
 
-        for t in tasks:
-            region, resp = t.result()
+    for batch in chunked(spread_urls, MAX_IN_FLIGHT):
+        tasks = [fetch_one(url, region) for url, region in batch]
+        for region, resp in await asyncio.gather(*tasks):
 
             try:
                 dto = LeagueListDTO.model_validate(resp)
