@@ -25,7 +25,9 @@ deployments:
       job_variables:
         image: riot-pipeline:latest
         image_pull_policy: Never
+        user: "1000:1000"
         volumes:
           - /home/jack/projects/riot-api-ecosystem/.env:/app/.env:ro
+          - /home/jack/projects/riot-api-ecosystem/app/core/logging/logs/schema_drift:/app/app/core/logging/logs/schema_drift
         networks:
           - riot-api-ecosystem_default

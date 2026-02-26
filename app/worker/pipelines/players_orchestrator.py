@@ -37,11 +37,6 @@ class PlayerCollectorState:
 
 
 class PlayersOrchestrator(Orchestrator):
-    def __init__(
-        self, pipeline: str, loader: Loader, collector: Collector, saver: Saver
-    ):
-        super().__init__(pipeline=pipeline, loader=loader, collector=collector, saver=saver)
-
     async def run(self) -> None:
         ctx = OrchestrationContext(
             ts=int(time.time()),

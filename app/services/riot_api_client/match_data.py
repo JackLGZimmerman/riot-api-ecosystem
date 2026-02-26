@@ -11,9 +11,6 @@ from app.core.config.constants.geography import REGION_TO_CONTINENT, Continent, 
 from app.services.riot_api_client.base import RiotAPI
 from app.services.riot_api_client.utils import chunked, spreading
 
-SENTINEL: object = object()
-MAX_PAGE_START = 900
-MAX_PAGE_COUNT = 100
 MAX_IN_FLIGHT = 16
 logger = logging.getLogger(__name__)
 
@@ -55,7 +52,10 @@ async def yield_match_data(
             tasks = [
                 tg.create_task(
                     riot_api.fetch_json(
-                        url=endpoint.format(match_id=w.match_id),
+                        url=endpoint.format(
+                            continent=w.continent,
+                            matchId=w.match_id,
+                        ),
                         location=w.continent,
                     )
                 )
@@ -92,12 +92,3 @@ async def stream_timeline_data(
         riot_api=riot_api,
     ):
         yield data
-
-
-"""
-Stream ids with regular order based on continent
-Batch the matchids and extract the data (Different batch sizing for timeline vs non-timeline)
-Return a full batch list, to be parsed
-
-Parser needs to be comprehensive, probably a builder
-"""

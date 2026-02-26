@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS game_data.tl_building_kill
 (
     run_id UUID,
-    gameid UInt64,
+    matchid UInt64,
     frame_timestamp UInt32,
     timestamp UInt64,
     type LowCardinality (String),
@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS game_data.tl_building_kill
     position_x Int16,
     position_y Int16,
     teamid UInt8,
-    towertype LowCardinality (String)
+    towertype LowCardinality (Nullable (String))
 )
 ENGINE = MergeTree
-ORDER BY (gameid, frame_timestamp, timestamp, run_id);
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);

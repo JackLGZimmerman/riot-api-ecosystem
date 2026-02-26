@@ -1,8 +1,8 @@
 CREATE TABLE IF NOT EXISTS game_data.objectives (
     run_id UUID,
-    gameId UInt64,
-    teamId Enum8('100' = 1, '200' = 2),
-    objectiveType Enum(
+    matchid UInt64,
+    teamid UInt8,
+    objectivetype ENUM8 (
         'atakhan' = 1,
         'baron' = 2,
         'champion' = 3,
@@ -15,4 +15,4 @@ CREATE TABLE IF NOT EXISTS game_data.objectives (
     first UInt8,
     kills UInt8
 ) ENGINE = MergeTree
-ORDER BY (gameId, teamId, objectiveType, run_id);
+ORDER BY (matchid, teamid, objectivetype, run_id);

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Sequence, TypedDict, cast
 
 from pydantic import NonNegativeInt, PositiveInt, ValidationError
@@ -10,12 +12,17 @@ from app.services.riot_api_client.parsers.base_parsers import (
     ParticipantParser,
 )
 from app.services.riot_api_client.parsers.models.non_timeline import (
-    Feats,
+    ChallengeValue,
     Info,
     Metadata,
     NonTimeline,
     Participant,
 )
+from app.services.riot_api_client.parsers.schema_drift import (
+    non_timeline,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class TabulatedMetadata(TypedDict):
@@ -25,12 +32,14 @@ class TabulatedMetadata(TypedDict):
 
 
 class MetadataParser:
-    def parse(self, validated: Metadata) -> TabulatedMetadata:
-        return {
-            "matchId": validated.matchId,
-            "dataVersion": validated.dataVersion,
-            "participants": validated.participants,
-        }
+    def parse(self, validated: Metadata) -> list[TabulatedMetadata]:
+        return [
+            {
+                "matchId": validated.matchId,
+                "dataVersion": validated.dataVersion,
+                "participants": validated.participants,
+            }
+        ]
 
 
 class TabulatedInfo(TypedDict):
@@ -38,7 +47,7 @@ class TabulatedInfo(TypedDict):
     gameCreation: NonNegativeInt
     gameDuration: NonNegativeInt
     gameEndTimestamp: NonNegativeInt
-    gameId: NonNegativeInt
+    matchId: NonNegativeInt
     gameStartTimestamp: NonNegativeInt
     gameType: str
     gameVersion: str
@@ -51,30 +60,32 @@ class TabulatedInfo(TypedDict):
 
 
 class GameInfoParser:
-    def parse(self, validated: Info) -> TabulatedInfo:
+    def parse(self, validated: Info) -> list[TabulatedInfo]:
         gameVersion = validated.gameVersion
         season, patch, subVersion = gameVersion.split(".", 2)
 
-        return {
-            "endOfGameResult": validated.endOfGameResult,
-            "gameCreation": validated.gameCreation,
-            "gameDuration": validated.gameDuration,
-            "gameEndTimestamp": validated.gameEndTimestamp,
-            "gameId": validated.gameId,
-            "gameStartTimestamp": validated.gameStartTimestamp,
-            "gameType": validated.gameType,
-            "gameVersion": gameVersion,
-            "season": season,
-            "patch": patch,
-            "subVersion": subVersion,
-            "mapId": validated.mapId,
-            "platformId": validated.platformId,
-            "queueId": validated.queueId,
-        }
+        return [
+            {
+                "endOfGameResult": validated.endOfGameResult,
+                "gameCreation": validated.gameCreation,
+                "gameDuration": validated.gameDuration,
+                "gameEndTimestamp": validated.gameEndTimestamp,
+                "matchId": validated.gameId,
+                "gameStartTimestamp": validated.gameStartTimestamp,
+                "gameType": validated.gameType,
+                "gameVersion": gameVersion,
+                "season": season,
+                "patch": patch,
+                "subVersion": subVersion,
+                "mapId": validated.mapId,
+                "platformId": validated.platformId,
+                "queueId": validated.queueId,
+            }
+        ]
 
 
 class TabulatedBan(TypedDict):
-    gameId: NonNegativeInt
+    matchId: NonNegativeInt
     teamId: PositiveInt
     pickTurn: PositiveInt
     championId: int
@@ -82,7 +93,7 @@ class TabulatedBan(TypedDict):
 
 class BansParser:
     def parse(self, validated: Info) -> list[TabulatedBan]:
-        gameId: NonNegativeInt = validated.gameId
+        matchId: NonNegativeInt = validated.gameId
         rows: list[TabulatedBan] = []
 
         for team in validated.teams:
@@ -90,7 +101,7 @@ class BansParser:
             for ban in team.bans:
                 rows.append(
                     {
-                        "gameId": gameId,
+                        "matchId": matchId,
                         "teamId": teamId,
                         "pickTurn": ban.pickTurn,
                         "championId": ban.championId,
@@ -101,7 +112,7 @@ class BansParser:
 
 
 class TabulatedFeat(TypedDict):
-    gameId: NonNegativeInt
+    matchId: NonNegativeInt
     teamId: PositiveInt
     featType: str
     featState: int
@@ -109,12 +120,14 @@ class TabulatedFeat(TypedDict):
 
 class FeatsParser:
     def parse(self, validated: Info) -> list[TabulatedFeat]:
-        gameId: NonNegativeInt = validated.gameId
+        matchId: NonNegativeInt = validated.gameId
         rows: list[TabulatedFeat] = []
 
         for team in validated.teams:
             teamId: PositiveInt = team.teamId
-            feats: Feats = team.feats
+            feats = team.feats
+            if feats is None:
+                continue
 
             dumped: dict[str, Any] = feats.model_dump()
             for feat_type, feat_state in dumped.items():
@@ -122,7 +135,7 @@ class FeatsParser:
                     cast(
                         TabulatedFeat,
                         {
-                            "gameId": gameId,
+                            "matchId": matchId,
                             "teamId": teamId,
                             "featType": feat_type,
                             "featState": feat_state["featState"],
@@ -134,7 +147,7 @@ class FeatsParser:
 
 
 class TabulatedObjective(TypedDict):
-    gameId: NonNegativeInt
+    matchId: NonNegativeInt
     teamId: PositiveInt
     objectiveType: str
     first: bool
@@ -144,7 +157,7 @@ class TabulatedObjective(TypedDict):
 class ObjectivesParser:
     def parse(self, validated: Info) -> list[TabulatedObjective]:
         rows: list[TabulatedObjective] = []
-        gameId: NonNegativeInt = validated.gameId
+        matchId: NonNegativeInt = validated.gameId
 
         for team in validated.teams:
             teamId: PositiveInt = team.teamId
@@ -166,7 +179,7 @@ class ObjectivesParser:
                     continue
 
                 row = {
-                    "gameId": gameId,
+                    "matchId": matchId,
                     "teamId": teamId,
                     "objectiveType": objectiveType,
                     "first": obj.first,
@@ -178,7 +191,7 @@ class ObjectivesParser:
 
 
 class TabulatedParticipantStats(TypedDict):
-    gameId: NonNegativeInt
+    matchId: NonNegativeInt
     participantId: NonNegativeInt
     puuid: str
     teamId: NonNegativeInt
@@ -249,7 +262,7 @@ class TabulatedParticipantStats(TypedDict):
     damageDealtToBuildings: NonNegativeInt
     damageDealtToTurrets: NonNegativeInt
     damageDealtToObjectives: NonNegativeInt
-    damageDealtToEpicMonsters: NonNegativeInt
+    damageDealtToEpicMonsters: int | None
 
     totalDamageTaken: NonNegativeInt
     physicalDamageTaken: NonNegativeInt
@@ -304,7 +317,8 @@ class TabulatedParticipantStats(TypedDict):
     spell3Casts: NonNegativeInt
     spell4Casts: NonNegativeInt
 
-    roleBoundItem: NonNegativeInt
+    roleBoundItem: int | None
+    bountyLevel: int | None
 
     timePlayed: NonNegativeInt
     totalTimeSpentDead: NonNegativeInt
@@ -322,7 +336,7 @@ class TabulatedParticipantStats(TypedDict):
     needVisionPings: NonNegativeInt
     onMyWayPings: NonNegativeInt
     pushPings: NonNegativeInt
-    retreatPings: NonNegativeInt
+    retreatPings: NonNegativeInt | None
 
     unrealKills: NonNegativeInt
 
@@ -351,7 +365,7 @@ class ParticipantStatsParser:
     def parse(
         self,
         participants: Sequence[Participant],
-        gameId: NonNegativeInt,
+        matchId: NonNegativeInt,
     ) -> list[TabulatedParticipantStats]:
         rows: list[TabulatedParticipantStats] = []
 
@@ -377,7 +391,6 @@ class ParticipantStatsParser:
             "playerAugment5",
             "playerAugment6",
             "playerSubteamId",
-            "summonerId",
             "subteamPlacement",
             "nexusKills",
             "nexusTakedowns",
@@ -393,11 +406,11 @@ class ParticipantStatsParser:
             data = p.model_dump(
                 exclude=exclude_fields,
             )
-            data["gameId"] = gameId
-            for field in self._UINT8_CLAMP_FIELDS:
-                value = data.get(field)
+            data["matchId"] = matchId
+            for field_name in self._UINT8_CLAMP_FIELDS:
+                value = data.get(field_name)
                 if value is not None and value > 255:
-                    data[field] = 255
+                    data[field_name] = 255
 
             rows.append(cast(TabulatedParticipantStats, data))
 
@@ -405,31 +418,42 @@ class ParticipantStatsParser:
 
 
 class TabulatedParticipantChallenges(TypedDict):
-    gameId: NonNegativeInt
+    matchId: NonNegativeInt
     teamId: PositiveInt
     puuid: str
+    payload: dict[str, ChallengeValue]
 
 
 class ParticipantChallengesParser:
     def parse(
-        self, participants: Sequence[Participant], gameId: NonNegativeInt
+        self, participants: Sequence[Participant], matchId: NonNegativeInt
     ) -> list[TabulatedParticipantChallenges]:
         rows: list[TabulatedParticipantChallenges] = []
         for p in participants:
             teamId: PositiveInt = p.teamId
             puuid: str = p.puuid
+            payload = {
+                k: v
+                for k, v in p.challenges.model_dump(
+                    by_alias=True,
+                    exclude_none=True,
+                ).items()
+                if not k.startswith("SWARM")
+            }
 
-            data = p.challenges.model_dump()
-            data["gameId"] = gameId
-            data["teamId"] = teamId
-            data["puuid"] = puuid
-
-            rows.append(data)
+            rows.append(
+                {
+                    "matchId": matchId,
+                    "teamId": teamId,
+                    "puuid": puuid,
+                    "payload": payload,
+                }
+            )
         return rows
 
 
 class TabulatedParticipantPerkValues(TypedDict):
-    gameId: NonNegativeInt
+    matchId: NonNegativeInt
     teamId: PositiveInt
     puuid: str
 
@@ -455,7 +479,7 @@ class TabulatedParticipantPerkValues(TypedDict):
 
 
 class TabulatedParticipantPerkIds(TypedDict):
-    gameId: NonNegativeInt
+    matchId: NonNegativeInt
     teamId: PositiveInt
     puuid: str
 
@@ -478,20 +502,20 @@ class TabulatedParticipantPerkIds(TypedDict):
 
 class ParticipantPerkValuesParser:
     def parse(
-        self, participants: Sequence[Participant], gameId: NonNegativeInt
+        self, participants: Sequence[Participant], matchId: NonNegativeInt
     ) -> list[TabulatedParticipantPerkValues]:
         rows: list[TabulatedParticipantPerkValues] = []
 
         for p in participants:
             base_payload = {
-                "gameId": gameId,
+                "matchId": matchId,
                 "teamId": p.teamId,
                 "puuid": p.puuid,
             }
             style_by_desc = {s.description: s for s in p.perks.styles}
             primary = style_by_desc["primaryStyle"]
             sub = style_by_desc["subStyle"]
-            
+
             primary_payload = {
                 f"primary_var{var_idx}_{sel_idx}": getattr(sel, f"var{var_idx}")
                 for sel_idx, sel in enumerate(primary.selections, start=1)
@@ -519,14 +543,14 @@ class ParticipantPerkValuesParser:
 
 class ParticipantPerkIdsParser:
     def parse(
-        self, participants: Sequence[Participant], gameId: NonNegativeInt
+        self, participants: Sequence[Participant], matchId: NonNegativeInt
     ) -> list[TabulatedParticipantPerkIds]:
         rows: list[TabulatedParticipantPerkIds] = []
         perk_bit_width = 14
 
         for p in participants:
             base_payload = {
-                "gameId": gameId,
+                "matchId": matchId,
                 "teamId": p.teamId,
                 "puuid": p.puuid,
             }
@@ -573,8 +597,8 @@ class ParticipantPerkIdsParser:
 
 @dataclass
 class NonTimelineTables:
-    metadata: TabulatedMetadata
-    game_info: TabulatedInfo
+    metadata: list[TabulatedMetadata]
+    game_info: list[TabulatedInfo]
     bans: list[TabulatedBan]
     feats: list[TabulatedFeat]
     objectives: list[TabulatedObjective]
@@ -586,10 +610,12 @@ class NonTimelineTables:
 
 @dataclass(frozen=True)
 class MatchDataNonTimelineParsingOrchestrator:
-    metadata: InfoParser[Metadata, TabulatedMetadata] = field(
+    metadata: InfoParser[Metadata, list[TabulatedMetadata]] = field(
         default_factory=MetadataParser
     )
-    gameInfo: InfoParser[Info, TabulatedInfo] = field(default_factory=GameInfoParser)
+    gameInfo: InfoParser[Info, list[TabulatedInfo]] = field(
+        default_factory=GameInfoParser
+    )
     bans: InfoParser[Info, list[TabulatedBan]] = field(default_factory=BansParser)
     feats: InfoParser[Info, list[TabulatedFeat]] = field(default_factory=FeatsParser)
     objectives: InfoParser[Info, list[TabulatedObjective]] = field(
@@ -608,29 +634,73 @@ class MatchDataNonTimelineParsingOrchestrator:
         default_factory=ParticipantPerkIdsParser
     )
 
+    @staticmethod
+    def _drift_date(raw: dict[str, Any]) -> str:
+        try:
+            game_creation = raw["info"]["gameCreation"]
+        except (KeyError, IndexError, TypeError):
+            game_creation = 0
+
+        if isinstance(game_creation, int) and game_creation > 0:
+            return datetime.fromtimestamp(game_creation / 1000, tz=UTC).date().isoformat()
+
+        return datetime.now(tz=UTC).date().isoformat()
+
     def run(self, raw: dict[str, Any]) -> NonTimelineTables:
+        metadata_raw = raw.get("metadata", {})
+        match_id = (
+            metadata_raw.get("matchId", "unknown")
+            if isinstance(metadata_raw, dict)
+            else "unknown"
+        )
+        drift_date = self._drift_date(raw)
+        non_timeline(raw, match_id=match_id, drift_date=drift_date)
+
         try:
             nt = NonTimeline.model_validate(raw)
+            metadata: Metadata = nt.metadata
+            info: Info = nt.info
+            participants: list[Participant] = info.participants
+            matchId: NonNegativeInt = info.gameId
+
+            tables = NonTimelineTables(
+                metadata=self.metadata.parse(metadata),
+                game_info=self.gameInfo.parse(info),
+                bans=self.bans.parse(info),
+                feats=self.feats.parse(info),
+                objectives=self.objectives.parse(info),
+                participant_stats=self.participantStats.parse(participants, matchId),
+                participant_challenges=self.participantChallenges.parse(
+                    participants, matchId
+                ),
+                participant_perk_values=self.participantPerkValues.parse(
+                    participants, matchId
+                ),
+                participant_perk_ids=self.participantPerkIds.parse(participants, matchId),
+            )
         except ValidationError as e:
-            raise ValueError(f"raw did not match NonTimeline schema: {e}") from e
-
-        metadata: Metadata = nt.metadata
-        info: Info = nt.info
-        participants: list[Participant] = info.participants
-        gameId: NonNegativeInt = info.gameId
-
-        return NonTimelineTables(
-            metadata=self.metadata.parse(metadata),
-            game_info=self.gameInfo.parse(info),
-            bans=self.bans.parse(info),
-            feats=self.feats.parse(info),
-            objectives=self.objectives.parse(info),
-            participant_stats=self.participantStats.parse(participants, gameId),
-            participant_challenges=self.participantChallenges.parse(
-                participants, gameId
-            ),
-            participant_perk_values=self.participantPerkValues.parse(
-                participants, gameId
-            ),
-            participant_perk_ids=self.participantPerkIds.parse(participants, gameId),
-        )
+            logger.warning(
+                "SchemaValidation non_timeline match_id=%s date=%s errors=%s",
+                match_id,
+                drift_date,
+                e.errors(),
+            )
+            logger.warning(
+                "Skipping non_timeline payload for match_id=%s due to validation errors "
+                "during initial schema tuning.",
+                match_id,
+            )
+            # TODO: Re-enable hard failure (raise ValueError) after initial schema
+            # tuning is complete and drift has stabilized.
+            return NonTimelineTables(
+                metadata=[],
+                game_info=[],
+                bans=[],
+                feats=[],
+                objectives=[],
+                participant_stats=[],
+                participant_challenges=[],
+                participant_perk_values=[],
+                participant_perk_ids=[],
+            )
+        return tables

@@ -2,15 +2,16 @@
 dialect = clickhouse
 templater = raw
 max_line_length = 88
+exclude_rules = AM04,CP03,CP05,RF04
 
 [sqlfluff:rules:capitalisation.keywords]
 capitalisation_policy = upper
-
-[sqlfluff:rules:capitalisation.functions]
-capitalisation_policy = upper
+ignore_words_regex = (?i)^[A-Za-z]*MergeTree$
 
 [sqlfluff:rules:capitalisation.identifiers]
 capitalisation_policy = lower
+extended_capitalisation_policy = lower
+ignore_words_regex = (?i)^[A-Za-z]*MergeTree$
 
 [sqlfluff:rules:layout.indent]
 indent_unit = space

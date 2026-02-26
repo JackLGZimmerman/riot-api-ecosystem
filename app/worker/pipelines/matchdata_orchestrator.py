@@ -237,8 +237,6 @@ class MatchDataOrchestrator(Orchestrator):
         saver: Saver,
     ) -> None:
         super().__init__(pipeline, loader, non_timeline_collector, saver)
-        self.pipeline = "match_data"
-        self.non_timeline_collector = non_timeline_collector
         self.timeline_collector = timeline_collector
 
     async def combine_streams(
@@ -278,7 +276,7 @@ class MatchDataOrchestrator(Orchestrator):
 
         state: MatchDataCollectorState = self.loader.load(ctx)
 
-        non_timeline_raw = self.non_timeline_collector.collect(state, ctx)
+        non_timeline_raw = self.collector.collect(state, ctx)
         timeline_raw = self.timeline_collector.collect(state, ctx)
 
         items = self.combine_streams(non_timeline_raw, timeline_raw)
@@ -286,9 +284,6 @@ class MatchDataOrchestrator(Orchestrator):
 
 
 class MatchDataLoader(Loader):
-    def __init__(self, max_workers: int = 16) -> None:
-        self.max_workers = max_workers
-
     def load(self, ctx: OrchestrationContext) -> MatchDataCollectorState:
         matchids: list[str] = load_matchids()
         return MatchDataCollectorState(matchids=matchids)
@@ -325,8 +320,6 @@ class MatchDataSaver(Saver):
 
         self.nt_small = 5_000
         self.nt_medium = 20_000
-        self.tl_events = 80_000
-        self.tl_damage = 150_000
 
     async def save(
         self,
@@ -337,26 +330,26 @@ class MatchDataSaver(Saver):
         try:
             async for item_any in items:
                 item: StreamItem = item_any
+                match_id = self._extract_match_id(item.raw)
 
                 if item.stream == "non_timeline":
                     nt: NonTimelineTables = await self._parse_non_timeline(item.raw)
-                    await self._persist_non_timeline(nt, ctx.run_id)
+                    await self._persist_non_timeline(nt, ctx.run_id, match_id=match_id)
 
                 elif item.stream == "timeline":
                     tl: TimelineTables = await self._parse_timeline(item.raw)
-                    await self._persist_timeline(tl, ctx.run_id)
+                    await self._persist_timeline(tl, ctx.run_id, match_id=match_id)
 
                 else:
                     raise ValueError(f"Unknown stream: {item.stream!r}")
+
+            await asyncio.to_thread(insert_match_ids, state.matchids, ctx.run_id)
 
         except Exception:
             await self.delete_failed_non_timeline(ctx.run_id)
             await self.delete_failed_timeline(ctx.run_id)
             await self._delete_match_ids(ctx.run_id)
             raise
-
-        finally:
-            await asyncio.to_thread(insert_match_ids, state.matchids, ctx.run_id)
 
     async def _parse_non_timeline(self, raw_data) -> NonTimelineTables:
         return await asyncio.to_thread(self.non_timeline_parser.run, raw_data)
@@ -404,13 +397,29 @@ class MatchDataSaver(Saver):
             )
             raise
 
-    async def _persist_non_timeline(self, t: NonTimelineTables, run_id: UUID) -> None:
+    @staticmethod
+    def _extract_match_id(raw: Any) -> str:
+        if not isinstance(raw, dict):
+            return "unknown"
+        metadata = raw.get("metadata")
+        if not isinstance(metadata, dict):
+            return "unknown"
+        match_id = metadata.get("matchId")
+        return match_id if isinstance(match_id, str) else "unknown"
+
+    async def _persist_non_timeline(
+        self, t: NonTimelineTables, run_id: UUID, *, match_id: str
+    ) -> None:
         await self._run_inserts(
-            NON_TIMELINE_INSERTS, t, run_id, batch_size=self.nt_small
+            NON_TIMELINE_INSERTS, t, run_id, match_id=match_id, batch_size=self.nt_small
         )
 
-    async def _persist_timeline(self, t: TimelineTables, run_id: UUID) -> None:
-        await self._run_inserts(TIMELINE_INSERTS, t, run_id, batch_size=self.nt_medium)
+    async def _persist_timeline(
+        self, t: TimelineTables, run_id: UUID, *, match_id: str
+    ) -> None:
+        await self._run_inserts(
+            TIMELINE_INSERTS, t, run_id, match_id=match_id, batch_size=self.nt_medium
+        )
 
     @retry(
         stop=stop_never,
@@ -419,7 +428,7 @@ class MatchDataSaver(Saver):
         reraise=True,
     )
     async def _insert_one(
-        self, table: str, cols, items, run_id: UUID, batch_size: int
+        self, table: str, cols, items, run_id: UUID, *, match_id: str, batch_size: int
     ) -> None:
         if not items:
             return
@@ -428,13 +437,23 @@ class MatchDataSaver(Saver):
                 persist_data, table, cols, items, run_id, batch_size
             )
         except Exception as e:
-            logger.exception("Error inserting into %s run_id=%s: %s", table, run_id, e)
+            logger.exception(
+                "Error inserting into %s run_id=%s match_id=%s: %s",
+                table,
+                run_id,
+                match_id,
+                e,
+            )
             raise
 
-    async def _run_inserts(self, specs, t, run_id: UUID, *, batch_size: int) -> None:
+    async def _run_inserts(
+        self, specs, t, run_id: UUID, *, match_id: str, batch_size: int
+    ) -> None:
         for table, cols, getter in specs:
             items = getter(t)
-            await self._insert_one(table, cols, items, run_id, batch_size)
+            await self._insert_one(
+                table, cols, items, run_id, match_id=match_id, batch_size=batch_size
+            )
 
 
 if __name__ == "__main__":

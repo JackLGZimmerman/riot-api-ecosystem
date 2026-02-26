@@ -1,17 +1,16 @@
 import itertools
+import logging
 from collections import defaultdict, deque
 from typing import (
     Any,
     Callable,
+    Hashable,
     Iterable,
     Iterator,
     NamedTuple,
     TypeAlias,
     TypeVar,
-    Hashable,
 )
-
-from typing_extensions import TypeVarTuple
 
 from app.core.config.constants import (
     JSON,
@@ -30,13 +29,9 @@ from app.models.riot.league import (
 )
 from app.services.riot_api_client.base import RiotAPI
 
-LEAGUE_PAGE_UPPER_BOUND: int = 1024
-MAX_IN_FLIGHT: int = 128
-
 _ELITE_ORDER = list(EliteTiers)
 _BASIC_RANKS = [(tier, div) for tier in Tiers for div in Divisions]
 
-R = TypeVar("R")
 T = TypeVar("T")
 P = TypeVar("P")
 
@@ -44,11 +39,6 @@ JSONLike = JSON | JSONList | None
 
 UrlRegion: TypeAlias = tuple[str, Region]
 UrlTuple: TypeAlias = list[UrlRegion]
-
-
-class PlayerQueueKey(NamedTuple):
-    puuid: str
-    queue_type: str
 
 
 class PlayerCrawlState(NamedTuple):
@@ -59,15 +49,8 @@ class PlayerCrawlState(NamedTuple):
     base_url: str
 
 
-class MatchFetchRequest(NamedTuple):
-    url: str
-    puuid: str
-    state: PlayerCrawlState
-
-
-Ts = TypeVarTuple("Ts")
-P = TypeVar("P")
 K = TypeVar("K", bound=Hashable)
+MAX_LOG_PREVIEW = 300
 
 
 async def fetch_json_with_carry_over(
@@ -86,6 +69,39 @@ async def fetch_json_with_carry_over(
         location=location,
     )
     return (*carry_over, data)
+
+
+def compact_preview(payload: Any, *, max_len: int = MAX_LOG_PREVIEW) -> str:
+    preview = repr(payload).replace("\n", " ")
+    if len(preview) <= max_len:
+        return preview
+    return preview[: max_len - 3] + "..."
+
+
+async def fetch_region_payload(
+    *,
+    url: str,
+    region: Region,
+    riot_api: RiotAPI,
+    logger: logging.Logger,
+    error_event: str = "LeagueFetchFailed",
+) -> tuple[Region, JSONLike]:
+    try:
+        _, data = await fetch_json_with_carry_over(
+            carry_over=(region,),
+            url=url,
+            location=region,
+            riot_api=riot_api,
+        )
+        return region, data
+    except Exception as exc:
+        logger.warning(
+            "%s region=%s error=%s",
+            error_event,
+            region.value,
+            type(exc).__name__,
+        )
+        return region, None
 
 
 def chunked(iterable: Iterable[T], n: int) -> Iterator[list[T]]:

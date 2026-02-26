@@ -1,21 +1,10 @@
 CREATE TABLE IF NOT EXISTS game_data.bans
 (
     run_id UUID,
-    gameid UInt64,
+    matchid UInt64,
     teamid UInt8,
-    pickturn Enum8 (
-        '1' = 1,
-        '2' = 2,
-        '3' = 3,
-        '4' = 4,
-        '5' = 5,
-        '6' = 6,
-        '7' = 7,
-        '8' = 8,
-        '9' = 9,
-        '10' = 10
-    ),
-    championid UInt16
+    pickturn UInt8,
+    championid Int16
 )
 ENGINE = MergeTree
-ORDER BY (gameid, teamid, pickturn, run_id);
+ORDER BY (matchid, teamid, pickturn, run_id);

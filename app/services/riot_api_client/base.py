@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache
 from typing import Final
 
@@ -24,18 +27,45 @@ from app.core.config.constants import JSON, Continent, JSONList, Region
 from app.core.config.constants.generic import RETRYABLE
 from app.core.config.settings import settings
 from app.services.riot_api_client.rate_limiter import (
-    DualWindowSpec,
+    RateLimitSpec,
     Limiter,
     TelemetryLimiter,
 )
 
 MAX_BODY_PREVIEW = 200
 
-logger = logging.getLogger("limiter")
+logger = logging.getLogger(__name__)
+
+
+class FetchOutcome(str, Enum):
+    OK = "ok"
+    HTTP_NON_RETRYABLE = "http_non_retryable"
+    NON_JSON = "non_json"
+    RETRY_EXHAUSTED = "retry_exhausted"
+
+
+@dataclass(frozen=True)
+class FetchJSONResult:
+    data: JSON | JSONList | None
+    outcome: FetchOutcome
+    status: int | None = None
 
 
 def mask_api_key(url: str) -> str:
     return re.sub(r"(api_key=)[^&]+", r"\1*", url)
+
+
+def _is_retryable_fetch_exception(e: BaseException) -> bool:
+    if isinstance(e, aiohttp.ClientResponseError):
+        return e.status in RETRYABLE
+    return isinstance(e, (aiohttp.ClientConnectionError, asyncio.TimeoutError))
+
+
+def _retry_exhausted_result(_) -> FetchJSONResult:
+    return FetchJSONResult(
+        data=None,
+        outcome=FetchOutcome.RETRY_EXHAUSTED,
+    )
 
 
 @lru_cache(maxsize=None)
@@ -44,12 +74,12 @@ def _limiter(location_key: Region | Continent, calls: int, time_period: float):
     sustained_period = float(time_period)
 
     core = Limiter(
-        DualWindowSpec(
+        RateLimitSpec(
             location=location_key,
-            long_calls=sustained_calls,
-            long_period_s=sustained_period,
+            calls=sustained_calls,
+            period_s=sustained_period,
         ),
-        debug=True,
+        debug=False,
     )
 
     return TelemetryLimiter(
@@ -118,18 +148,15 @@ class RiotAPI:
         reraise=False,
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception(
-            lambda e: isinstance(e, aiohttp.ClientResponseError)
-            and e.status in RETRYABLE
-        ),
-        retry_error_callback=lambda rs: None,
+        retry=retry_if_exception(_is_retryable_fetch_exception),
+        retry_error_callback=_retry_exhausted_result,
     )
-    async def fetch_json(
+    async def fetch_json_detailed(
         self,
         *,
         url: str,
         location: Region | Continent,
-    ) -> JSON | JSONList | None:
+    ) -> FetchJSONResult:
         """
         Fetch JSON from Riot API with:
         - per-(location, calls, period) rate limiter
@@ -169,9 +196,17 @@ class RiotAPI:
                             mask_api_key(str(resp.url)),
                             location,
                         )
-                        return None
+                        return FetchJSONResult(
+                            data=None,
+                            outcome=FetchOutcome.HTTP_NON_RETRYABLE,
+                            status=status,
+                        )
                     try:
-                        return await resp.json()
+                        return FetchJSONResult(
+                            data=await resp.json(),
+                            outcome=FetchOutcome.OK,
+                            status=status,
+                        )
                     except (aiohttp.ContentTypeError, Exception):
                         body = await resp.text()
                         preview = body.replace("\n", " ")[:MAX_BODY_PREVIEW]
@@ -183,15 +218,28 @@ class RiotAPI:
                             len(body),
                             preview,
                         )
-                        return None
-            except aiohttp.ClientConnectorError as e:
-                logger.warning(
-                    "ConnectionError url=%s location=%s error=%s",
-                    mask_api_key(url),
-                    location,
-                    e,
-                )
-                return None
+                        return FetchJSONResult(
+                            data=None,
+                            outcome=FetchOutcome.NON_JSON,
+                            status=status,
+                        )
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                raise
+
+    async def fetch_json(
+        self,
+        *,
+        url: str,
+        location: Region | Continent,
+    ) -> JSON | JSONList | None:
+        result = await self.fetch_json_detailed(url=url, location=location)
+        if result.outcome is FetchOutcome.RETRY_EXHAUSTED:
+            logger.warning(
+                "RetryExhaustedHTTP url=%s location=%s",
+                mask_api_key(url),
+                location,
+            )
+        return result.data
 
 
 def get_riot_api(

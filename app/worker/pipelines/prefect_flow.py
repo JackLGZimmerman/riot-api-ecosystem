@@ -66,7 +66,7 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
 
     async def run_match_data() -> None:
         orchestrator = MatchDataOrchestrator(
-            pipeline="match_ids",
+            pipeline="match_data",
             loader=MatchDataLoader(),
             non_timeline_collector=MatchDataNonTimelineCollector(riot_api=riot_api),
             timeline_collector=MatchDataTimelineCollector(riot_api=riot_api),
@@ -80,7 +80,7 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
     return (
         PipelineStep("players", run_players),
         PipelineStep("match_ids", run_match_ids),
-        PipelineStep("match_data", run_match_data),
+        # PipelineStep("match_data", run_match_data),
     )
 
 

@@ -11,10 +11,6 @@ MAX_PAGE_START = 900
 MAX_PAGE_COUNT = 100
 MAX_IN_FLIGHT: int = 128
 
-
-INITIAL_BACKFILL_DAYS = 30
-
-
 class _Done:
     pass
 
@@ -65,7 +61,7 @@ async def stream_match_ids(
                         )
                 finally:
                     work_q.task_done()
-        except BaseException as e:
+        except Exception as e:
             await out_q.put(e)
 
     async def closer(workers: list[asyncio.Task[None]]) -> None:
@@ -96,3 +92,4 @@ async def stream_match_ids(
             t.cancel()
         close_task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+        await asyncio.gather(close_task, return_exceptions=True)

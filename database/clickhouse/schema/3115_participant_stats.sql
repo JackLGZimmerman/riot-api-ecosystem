@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS game_data.participant_stats
 (
     run_id UUID,
-    gameid UInt64,
+    matchid UInt64,
     participantid UInt8,
     puuid FixedString (78),
     teamid UInt8,
@@ -11,12 +11,17 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
     riotidgamename String,
     riotidtagline String,
     profileicon UInt16,
-    championid UInt16,
+    championid Int16,
     championtransform UInt8,
     champlevel UInt8,
     champexperience UInt32,
     teamposition Enum8 (
-        'TOP' = 1, 'JUNGLE' = 2, 'MIDDLE' = 3, 'BOTTOM' = 4, 'UTILITY' = 5
+        'UNKNOWN' = 0,
+        'TOP' = 1,
+        'JUNGLE' = 2,
+        'MIDDLE' = 3,
+        'BOTTOM' = 4,
+        'UTILITY' = 5
     ),
     win UInt8,
     gameendedinearlysurrender UInt8,
@@ -59,7 +64,7 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
     damagedealttobuildings UInt32,
     damagedealttoturrets UInt32,
     damagedealttoobjectives UInt32,
-    damagedealttoepicmonsters UInt32,
+    damagedealttoepicmonsters Nullable (UInt32),
     totaldamagetaken UInt32,
     physicaldamagetaken UInt32,
     magicdamagetaken UInt32,
@@ -78,8 +83,8 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
     baronkills UInt8,
     dragonkills UInt8,
     inhibitorkills UInt8,
-    inhibitortakedowns Enum8 ('0' = 0, '1' = 1, '2' = 2, '3' = 3),
-    inhibitorslost Enum8 ('0' = 0, '1' = 1, '2' = 2, '3' = 3),
+    inhibitortakedowns UInt8,
+    inhibitorslost UInt8,
     turretkills UInt8,
     turrettakedowns UInt8,
     turretslost UInt8,
@@ -100,7 +105,8 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
     spell2casts UInt16,
     spell3casts UInt16,
     spell4casts UInt16,
-    rolebounditem UInt16,
+    rolebounditem Nullable (UInt16),
+    bountylevel Nullable (UInt8),
     timeplayed UInt16,
     totaltimespentdead UInt16,
     longesttimespentliving UInt16,
@@ -116,8 +122,8 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
     needvisionpings UInt8,
     onmywaypings UInt8,
     pushpings UInt8,
-    retreatpings UInt8,
+    retreatpings Nullable (UInt8),
     unrealkills UInt8
 )
 ENGINE = MergeTree
-ORDER BY (gameid, participantid, puuid, run_id);
+ORDER BY (matchid, participantid, puuid, run_id);

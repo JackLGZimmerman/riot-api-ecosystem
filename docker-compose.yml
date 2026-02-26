@@ -2,6 +2,9 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse
+    mem_limit: 5g
+    memswap_limit: 5g
+    cpus: 2
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
@@ -17,50 +20,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=14d"
-      - "--web.enable-lifecycle"
-    ports:
-      - "9090:9090"
-    depends_on:
-      - cadvisor
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    ports:
-      - "3000:3000"
-    depends_on:
-      - prometheus
-
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.47.2
-    container_name: cadvisor
-    privileged: true
-    ports:
-      - "8080:8080"
-    volumes:
-      - /:/rootfs:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /sys:/sys:ro
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
-      - /var/lib/docker:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
 
   prefect-postgres:
     image: postgres:16
@@ -109,20 +68,8 @@ services:
     command: [ "prefect", "worker", "start", "--pool", "docker-pool", "--type", "docker" ]
     restart: unless-stopped
 
-  prefect-prometheus-exporter:
-    image: prefecthq/prometheus-prefect-exporter:3.0.0
-    container_name: prefect-prometheus-exporter
-    depends_on:
-      prefect-server:
-        condition: service_healthy
-    environment:
-      PREFECT_API_URL: http://prefect-server:4200/api
-    ports:
-      - "8000:8000"
 
 volumes:
   player_data_collection_venv:
   clickhouse_data:
-  prometheus_data:
-  grafana_data:
   prefect_pgdata:

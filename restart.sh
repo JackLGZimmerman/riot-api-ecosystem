@@ -3,9 +3,14 @@
 set -euo pipefail
 
 echo "========================================"
-echo "Stopping and removing containers..."
+echo "Restart: stopping containers (preserving volumes)..."
 echo "========================================"
-docker compose down -v
+docker compose down --remove-orphans
+
+echo "========================================"
+echo "Cleaning old Prefect flow-run containers..."
+echo "========================================"
+docker ps -aq --filter label=io.prefect.flow-run-id | xargs -r docker rm -f || true
 
 echo "========================================"
 echo "Starting containers with rebuild and waiting for health..."
@@ -13,9 +18,9 @@ echo "========================================"
 docker compose up -d --build --wait
 
 echo "========================================"
-echo "Building riot-pipeline image (no cache)..."
+echo "Building riot-pipeline image..."
 echo "========================================"
-docker build --no-cache -t riot-pipeline:latest .
+docker build -t riot-pipeline:latest .
 
 echo "========================================"
 echo "Deploying Prefect flow..."
@@ -28,5 +33,5 @@ echo "========================================"
 prefect deployment run 'riot-pipeline/riot-pipeline'
 
 echo "========================================"
-echo "Deployment complete ✅"
+echo "Restart complete"
 echo "========================================"

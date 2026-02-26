@@ -15,14 +15,14 @@ from app.services.riot_api_client.utils import (
     UrlTuple,
     bounded_elite_tiers,
     chunked,
-    fetch_json_with_carry_over,
+    compact_preview,
+    fetch_region_payload,
     spreading_region,
 )
 
 logger = logging.getLogger(__name__)
 
 MAX_IN_FLIGHT: int = 128
-MAX_PREVIEW: int = 200
 
 
 async def stream_elite_players(
@@ -51,36 +51,29 @@ async def stream_elite_players(
 
     spread_urls = spreading_region(urls)
 
-    async def fetch_one(url: str, region: Region) -> tuple[Region, object | None]:
-        try:
-            _, data = await fetch_json_with_carry_over(
-                url=url,
-                location=region,
-                riot_api=riot_api,
-                carry_over=(region,),
-            )
-            return region, data
-        except Exception as e:
-            logger.warning(
-                "LeagueFetchFailed region=%s error=%s",
-                region.value,
-                type(e).__name__,
-            )
-            return region, None
-
     for batch in chunked(spread_urls, MAX_IN_FLIGHT):
-        tasks = [fetch_one(url, region) for url, region in batch]
+        tasks = [
+            fetch_region_payload(
+                url=url,
+                region=region,
+                riot_api=riot_api,
+                logger=logger,
+            )
+            for url, region in batch
+        ]
         for region, resp in await asyncio.gather(*tasks):
+            if resp is None:
+                continue
 
             try:
                 dto = LeagueListDTO.model_validate(resp)
                 entries = MinifiedLeagueEntryDTO.from_list(dto, region=region)
-            except Exception as e:
+            except Exception as exc:
                 logger.info(
                     "LeagueUnexpectedFailed region=%s error=%s preview=%r",
                     region.value,
-                    type(e).__name__,
-                    str(resp),
+                    type(exc).__name__,
+                    compact_preview(resp),
                 )
                 continue
 

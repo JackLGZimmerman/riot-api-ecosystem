@@ -1,9 +1,10 @@
 CREATE TABLE IF NOT EXISTS game_data.participant_challenges
 (
     run_id UUID,
-    gameid UInt64,
+    matchid UInt64,
     teamid UInt8,
-    puuid FixedString (78)
+    puuid FixedString (78),
+    payload JSON
 )
 ENGINE = MergeTree
-ORDER BY (gameid, teamid, puuid, run_id);
+ORDER BY (matchid, teamid, puuid, run_id);

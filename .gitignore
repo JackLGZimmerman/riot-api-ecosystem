@@ -91,6 +91,7 @@ tmp/
 temp/
 
 app/core/logging/logs/
+output.json
 
 lake/*
 !lake/.gitkeep

@@ -18,9 +18,9 @@ class ParticipantParser(Protocol[OutT]):
     def parse(
         self,
         participants: Sequence[Participant],
-        gameId: int,
+        matchId: int,
     ) -> OutT: ...
 
 
 class EventParser(Protocol[InT, OutT]):
-    def parse(self, validated: InT, gameId: int, /) -> OutT: ...
+    def parse(self, validated: InT, matchId: int, /) -> OutT: ...

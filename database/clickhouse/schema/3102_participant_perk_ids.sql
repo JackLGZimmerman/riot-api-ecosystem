@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS game_data.participant_perk_ids
 (
     run_id UUID,
-    gameid UInt64,
+    matchid UInt64,
     teamid UInt8,
     puuid FixedString (78),
 
@@ -22,4 +22,4 @@ CREATE TABLE IF NOT EXISTS game_data.participant_perk_ids
     perk_combo_key UInt128
 )
 ENGINE = MergeTree
-ORDER BY (gameid, teamid, puuid, run_id);
+ORDER BY (matchid, teamid, puuid, run_id);

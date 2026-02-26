@@ -21,6 +21,8 @@ class Region(StrEnum):
     ME1 = "me1"
     JP1 = "jp1"
     KR = "kr"
+    PH2 = "ph2"
+    TH2 = "th2"
     TW2 = "tw2"
     OC1 = "oc1"
     VN2 = "vn2"
@@ -39,6 +41,8 @@ REGION_TO_CONTINENT: Final[Mapping[Region, Continent]] = {
     Region.ME1: Continent.EUROPE,
     Region.JP1: Continent.ASIA,
     Region.KR: Continent.ASIA,
+    Region.PH2: Continent.SEA,
+    Region.TH2: Continent.SEA,
     Region.TW2: Continent.SEA,
     Region.OC1: Continent.SEA,
     Region.VN2: Continent.SEA,

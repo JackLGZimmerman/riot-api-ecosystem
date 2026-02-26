@@ -6,6 +6,11 @@
             "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
             "format": "%(asctime) %(levelname) %(name) %(message)",
             "ensure_ascii": false
+        },
+        "schema_drift_json": {
+            "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            "format": "%(asctime) %(levelname) %(match_id) %(keys)",
+            "ensure_ascii": false
         }
     },  
     "handlers": {
@@ -29,6 +34,24 @@
             "when": "midnight",
             "backupCount": 7,
             "encoding": "utf-8"
+        },
+        "schema_drift_timeline_json_file": {
+            "class": "logging.handlers.TimedRotatingFileHandler",
+            "level": "INFO",
+            "formatter": "schema_drift_json",
+            "filename": "app/core/logging/logs/schema_drift/timeline.log.jsonl",
+            "when": "midnight",
+            "backupCount": 14,
+            "encoding": "utf-8"
+        },
+        "schema_drift_non_timeline_json_file": {
+            "class": "logging.handlers.TimedRotatingFileHandler",
+            "level": "INFO",
+            "formatter": "schema_drift_json",
+            "filename": "app/core/logging/logs/schema_drift/non_timeline.log.jsonl",
+            "when": "midnight",
+            "backupCount": 14,
+            "encoding": "utf-8"
         }
     },
     "root": {
@@ -40,10 +63,6 @@
         ]
     },
     "loggers": {
-        "celery": {
-            "level": "INFO",
-            "propagate": true
-        },
         "tasks": {
             "level": "INFO",
             "propagate": true
@@ -51,6 +70,20 @@
         "tasks.player_collection": {
             "level": "DEBUG",
             "propagate": true
+        },
+        "schema_drift.timeline": {
+            "level": "INFO",
+            "handlers": [
+                "schema_drift_timeline_json_file"
+            ],
+            "propagate": false
+        },
+        "schema_drift.non_timeline": {
+            "level": "INFO",
+            "handlers": [
+                "schema_drift_non_timeline_json_file"
+            ],
+            "propagate": false
         }
     }
 }

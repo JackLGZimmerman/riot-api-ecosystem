@@ -14,17 +14,30 @@ game_data.participant_stats
 - `database/clickhouse/schema/4000_filter_game_validity.sql`
 - `database/clickhouse/schema/4001_mv_filter_game_validity.sql`
 
+## Filtered Dataset Pipeline
+- Single SQL file:
+  - `database/clickhouse/schema/5099_filtered_pipeline_all.sql`
+- Apply in one step:
+  - `docker exec -i clickhouse bash -lc "clickhouse-client --multiquery" < database/clickhouse/schema/5099_filtered_pipeline_all.sql`
+- Note:
+  - This creates target `game_data_filtered.*` tables (not materialized views).
+  - Populate them with explicit `INSERT ... SELECT` statements after table creation.
+
 ## Objects
 - `game_data.filter_game_validity`
   - Final persisted result table.
   - Columns:
     - `gameid UInt64`
+    - `teamid UInt8`
+    - `participantid UInt8`
+    - `player_rule_mask UInt32`
     - `rule_mask UInt32`
     - `is_valid UInt8`
 
 - `game_data.mv_filter_game_validity`
   - Computes all rules directly from `game_data.participant_stats`.
-  - Builds a per-player mask first, then rolls up to game-level with `groupBitOr`.
+  - Builds and persists a per-player mask.
+  - Also rolls up to game-level with `groupBitOr` and writes game-level validity alongside each player row.
 
 ## Why Bitmask (`rule_mask`)
 - Packs many rule outcomes into one field.
@@ -50,12 +63,13 @@ game_data.participant_stats
 - Bit `8`: `((team_kills + team_assists) / team_deaths) < 0.25`
 
 ### Game-level bits
-- Bit `16`: `gameendedinearlysurrender = 1`
+- Bit `16`: `timeplayed <= 15`
 
 ## Output Contract
-- `rule_mask`: aggregate failure bitset per game.
-- `is_valid`: `1` when `rule_mask = 0`, else `0`.
+- `player_rule_mask`: failure bitset for that player record.
+- `rule_mask`: aggregate failure bitset for the game.
+- `is_valid`: game-level validity (`1` when `rule_mask = 0`, else `0`) repeated per player row.
 
 ## Operational Notes
 - Intermediate participant/team/game filter artifacts are removed in this model.
-- Final table uses `MergeTree` ordered by `gameid`.
+- Final table uses `MergeTree` ordered by `(gameid, teamid, participantid)`.

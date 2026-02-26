@@ -1,10 +1,10 @@
 CREATE TABLE IF NOT EXISTS game_data.feats
 (
     run_id UUID,
-    gameId UInt64,
-    teamId Enum8('100' = 1, '200' = 2),
-    featType Enum('EPIC_MONSTER_KILL' = 1, 'FIRST_BLOOD' = 2, 'FIRST_TURRET' = 3),
-    featState UInt8
+    matchid UInt64,
+    teamid UInt8,
+    feattype ENUM8 ('EPIC_MONSTER_KILL' = 1, 'FIRST_BLOOD' = 2, 'FIRST_TURRET' = 3),
+    featstate UInt16
 )
 ENGINE = MergeTree
-ORDER BY (gameId, teamId, featType, run_id);
+ORDER BY (matchid, teamid, feattype, run_id);

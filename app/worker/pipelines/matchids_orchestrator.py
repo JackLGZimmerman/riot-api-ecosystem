@@ -22,10 +22,8 @@ from app.services.riot_api_client.match_ids import (
 from app.services.riot_api_client.utils import PlayerCrawlState
 from app.worker.pipelines.orchestrator import (
     Collector,
-    Loader,
     Orchestrator,
     OrchestrationContext,
-    Saver,
 )
 from database.clickhouse.operations.matchids import (
     load_matchid_puuid_ts,
@@ -40,12 +38,11 @@ from database.clickhouse.operations.matchids import (
 )
 from database.clickhouse.operations.players import PlayerKeyRow, load_players
 
-MATCHID_BUFFER = 200_000
 logger = logging.getLogger(__name__)
 
 def build_initial_player_states(
     players: list[PlayerKeyRow],
-    collected_puuids: list[str],
+    collected_puuids: set[str],
     collected_puuids_ts: int,
     *,
     ts: int,
@@ -92,21 +89,11 @@ def build_initial_player_states(
 @dataclass
 class MatchIDCollectorState:
     initial_states: list[PlayerCrawlState]
-    collected_puuids: list[str]
     full_player_puuids: list[str]
     ts: int
 
 
 class MatchIDOrchestrator(Orchestrator):
-    def __init__(
-        self,
-        pipeline: str,
-        loader: Loader,
-        collector: Collector,
-        saver: Saver,
-    ):
-        super().__init__(pipeline=pipeline, loader=loader, collector=collector, saver=saver)
-
     async def _dedupe_async(
         self, batches: AsyncIterator[list[str]]
     ) -> AsyncIterator[list[str]]:
@@ -139,7 +126,7 @@ class MatchIDOrchestrator(Orchestrator):
 class MatchIDLoader:
     def load(self, ctx: OrchestrationContext) -> MatchIDCollectorState:
         players: list[PlayerKeyRow] = load_players()
-        collected_puuids: list[str] = load_matchid_puuids()
+        collected_puuids: set[str] = set(load_matchid_puuids())
         collected_puuid_ts: int = load_matchid_puuid_ts()
 
         initial_states = build_initial_player_states(
@@ -151,7 +138,6 @@ class MatchIDLoader:
 
         return MatchIDCollectorState(
             initial_states=initial_states,
-            collected_puuids=collected_puuids,
             full_player_puuids=[p.puuid for p in players],
             ts=ctx.ts,
         )
@@ -192,12 +178,14 @@ class MatchIDSaver:
         state: MatchIDCollectorState,
         ctx: OrchestrationContext,
     ) -> None:
+        timestamp_upserted = False
         try:
             await asyncio.to_thread(
                 insert_puuids_in_batches, state.full_player_puuids, ctx.run_id
             )
             await insert_matchids_stream_in_batches(items, ctx.run_id)
             await asyncio.to_thread(upsert_puuid_timestamp, state.ts, ctx.run_id)
+            timestamp_upserted = True
         except Exception:
             await self._delete_with_retry(
                 "delete_failed_puuid_timestamp", delete_failed_puuid_timestamp, ctx.run_id
@@ -208,9 +196,15 @@ class MatchIDSaver:
             await self._delete_with_retry("delete_matchids", delete_matchids, ctx.run_id)
             raise
         finally:
-            await self._delete_with_retry(
-                "delete_old_puuid_timestamps", delete_old_puuid_timestamps, ctx.run_id
-            )
+            if timestamp_upserted:
+                await self._delete_with_retry(
+                    "delete_old_puuid_timestamps", delete_old_puuid_timestamps, ctx.run_id
+                )
+            else:
+                logger.warning(
+                    "Skipping delete_old_puuid_timestamps for run_id=%s because timestamp upsert did not complete.",
+                    ctx.run_id,
+                )
 
 
 if __name__ == "__main__":

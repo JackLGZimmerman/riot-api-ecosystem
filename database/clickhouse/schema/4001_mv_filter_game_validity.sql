@@ -1,96 +1,127 @@
 CREATE MATERIALIZED VIEW IF NOT EXISTS game_data.mv_filter_game_validity
 TO game_data.filter_game_validity
 AS
-SELECT
-    gameid,
-    rule_mask,
-    if(rule_mask = 0, 1, 0) AS is_valid
-FROM
-(
+WITH participant_base AS (
     SELECT
-        gameid,
-        (
-            groupBitOr(player_rule_mask) +
-            if(max(low_team_kda) = 1, 256, 0) +
-            if(max(gameendedinearlysurrender_game) = 1, 65536, 0)
-        ) AS rule_mask
-    FROM
-    (
-        SELECT
-            gameid,
-            teamid,
-            participantid,
-            teamposition,
-            kills,
-            assists,
-            deaths,
-            goldspent,
-            goldearned,
-            summoner1casts,
-            summoner2casts,
-            item0,
-            item1,
-            item2,
-            item3,
-            item4,
-            item5,
-            item6,
-            totalminionskilled,
-            totaldamagedealttochampions,
-            sum(kills) OVER (PARTITION BY gameid, teamid) AS team_kills,
-            sum(assists) OVER (PARTITION BY gameid, teamid) AS team_assists,
-            sum(deaths) OVER (PARTITION BY gameid, teamid) AS team_deaths,
-            sum(totaldamagedealttochampions) OVER (PARTITION BY gameid, teamid) AS team_totaldamagedealttochampions,
-            any(timeplayed) OVER (PARTITION BY gameid) AS timeplayed_game,
-            any(gameendedinearlysurrender) OVER (PARTITION BY gameid) AS gameendedinearlysurrender_game,
-            (
-                (sum(kills) OVER (PARTITION BY gameid, teamid) + sum(assists) OVER (PARTITION BY gameid, teamid))
-                / nullIf(toFloat32(sum(deaths) OVER (PARTITION BY gameid, teamid)), 0.0)
-            ) < 0.25 AS low_team_kda,
-            (
-                if(((kills + assists) / nullIf(toFloat32(deaths), 0.0)) < 0.2, 1, 0) +
-                if((goldspent / nullIf(toFloat32(goldearned), 0.0)) < 0.60, 2, 0) +
-                if((kills + assists = 0) AND (deaths > 4), 4, 0) +
-                if((summoner1casts = 0) OR (summoner2casts = 0), 8, 0) +
-                if((kills / nullIf(toFloat32(sum(kills) OVER (PARTITION BY gameid, teamid)), 0.0)) > 0.65, 512, 0) +
-                if(
-                    (totaldamagedealttochampions / nullIf(toFloat32(sum(totaldamagedealttochampions) OVER (PARTITION BY gameid, teamid)), 0.0)) < 0.075
-                    AND teamposition != 'UTILITY',
-                    1024,
-                    0
-                ) +
-                if(
-                    teamposition != 'UTILITY'
-                    AND (totalminionskilled / nullIf(toFloat32(max(timeplayed) OVER (PARTITION BY gameid)) / 60.0, 0.0)) < 4.5,
-                    2048,
-                    0
-                ) +
-                if(
-                    item0 = 0
-                    AND item1 = 0
-                    AND item2 = 0
-                    AND item3 = 0
-                    AND item4 = 0
-                    AND item5 = 0
-                    AND item6 = 0,
-                    4096,
-                    0
-                ) +
-                if(
-                    greatest(
-                        (item0 = item0) + (item1 = item0) + (item2 = item0) + (item3 = item0) + (item4 = item0) + (item5 = item0) + (item6 = item0),
-                        (item0 = item1) + (item1 = item1) + (item2 = item1) + (item3 = item1) + (item4 = item1) + (item5 = item1) + (item6 = item1),
-                        (item0 = item2) + (item1 = item2) + (item2 = item2) + (item3 = item2) + (item4 = item2) + (item5 = item2) + (item6 = item2),
-                        (item0 = item3) + (item1 = item3) + (item2 = item3) + (item3 = item3) + (item4 = item3) + (item5 = item3) + (item6 = item3),
-                        (item0 = item4) + (item1 = item4) + (item2 = item4) + (item3 = item4) + (item4 = item4) + (item5 = item4) + (item6 = item4),
-                        (item0 = item5) + (item1 = item5) + (item2 = item5) + (item3 = item5) + (item4 = item5) + (item5 = item5) + (item6 = item5),
-                        (item0 = item6) + (item1 = item6) + (item2 = item6) + (item3 = item6) + (item4 = item6) + (item5 = item6) + (item6 = item6)
-                    ) >= 5,
-                    8192,
-                    0
-                )
-            ) AS player_rule_mask
-        FROM game_data.participant_stats
-    ) AS participant_enriched
-    GROUP BY gameid
-) AS game_rules;
+        matchid,
+        teamid,
+        participantid,
+        kills,
+        assists,
+        deaths,
+        timeplayed,
+        goldspent,
+        goldearned,
+        summoner1casts,
+        summoner2casts,
+        teamposition,
+        totalminionskilled,
+        totaldamagedealttochampions,
+        item0,
+        item1,
+        item2,
+        item3,
+        item4,
+        item5
+    FROM game_data.participant_stats
+),
+
+team_stats AS (
+    SELECT
+        matchid,
+        teamid,
+        SUM(kills) AS team_kills,
+        SUM(assists) AS team_assists,
+        SUM(deaths) AS team_deaths,
+        SUM(totaldamagedealttochampions) AS team_damage,
+        toUInt32(
+            IF(
+                (
+                    (SUM(kills) + SUM(assists))
+                    / nullIf(toFloat32(SUM(deaths)), 0.0)
+                ) < 0.25,
+                256,
+                0
+            )
+        ) AS team_rule_mask
+    FROM participant_base
+    GROUP BY
+        matchid,
+        teamid
+),
+
+game_stats AS (
+    SELECT
+        matchid,
+        MAX(timeplayed) AS game_max_timeplayed,
+        toUInt32(IF(MAX(timeplayed) <= 15, 65536, 0)) AS game_rule_mask
+    FROM participant_base
+    GROUP BY matchid
+),
+
+participant_scored AS (
+    SELECT
+        p.matchid AS matchid_value,
+        p.teamid AS teamid_value,
+        p.participantid AS participantid_value,
+        t.team_rule_mask AS team_mask,
+        g.game_rule_mask AS game_mask,
+        toUInt32(
+            IF((p.deaths > 0) AND (p.kills + p.assists * 5 < p.deaths), 1, 0)
+            + IF((p.goldearned > 0) AND (p.goldspent * 100 < p.goldearned * 60), 2, 0)
+            + IF((p.kills + p.assists = 0) AND (p.deaths > 4), 4, 0)
+            + IF((p.summoner1casts = 0) OR (p.summoner2casts = 0), 8, 0)
+            + IF(
+                (t.team_kills > 0) AND (p.kills * 100 > t.team_kills * 65),
+                512,
+                0
+            )
+            + IF(
+                (p.teamposition != 'UTILITY')
+                AND (t.team_damage > 0)
+                AND (p.totaldamagedealttochampions * 1000 < t.team_damage * 75),
+                1024,
+                0
+            )
+            + IF(
+                (p.teamposition != 'UTILITY')
+                AND (g.game_max_timeplayed > 0)
+                AND (p.totalminionskilled * 10 < g.game_max_timeplayed * 45),
+                2048,
+                0
+            )
+            + IF(
+                p.item0 = 0
+                AND p.item1 = 0
+                AND p.item2 = 0
+                AND p.item3 = 0
+                AND p.item4 = 0
+                AND p.item5 = 0,
+                4096,
+                0
+            )
+            + IF(
+                p.item0 = p.item1
+                AND p.item1 = p.item2
+                AND p.item2 = p.item3
+                AND p.item3 = p.item4
+                AND p.item4 = p.item5,
+                8192,
+                0
+            )
+        ) AS player_mask
+    FROM participant_base AS p
+    INNER JOIN team_stats AS t USING (matchid, teamid)
+    INNER JOIN game_stats AS g USING (matchid)
+)
+
+SELECT
+    matchid_value AS matchid,
+    teamid_value AS teamid,
+    participantid_value AS participantid,
+    player_mask AS player_rule_mask,
+    team_mask AS team_rule_mask,
+    game_mask AS game_rule_mask,
+    toUInt32((player_mask + team_mask) + game_mask) AS rule_mask,
+    toUInt8(((player_mask + team_mask) + game_mask) = 0) AS is_valid
+FROM participant_scored;
