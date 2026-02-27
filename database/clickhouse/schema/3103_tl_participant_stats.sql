@@ -6,9 +6,9 @@ CREATE TABLE IF NOT EXISTS game_data.tl_participant_stats
     participantid UInt8,
 
     abilityhaste UInt16,
-    abilitypower UInt16,
+    abilitypower Int16,
     armor Int16,
-    attackdamage UInt16,
+    attackdamage Int16,
     attackspeed UInt16,
     ccreduction Int8,
     cooldownreduction UInt16,

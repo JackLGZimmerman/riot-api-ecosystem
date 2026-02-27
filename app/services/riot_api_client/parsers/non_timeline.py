@@ -62,7 +62,20 @@ class TabulatedInfo(TypedDict):
 class GameInfoParser:
     def parse(self, validated: Info) -> list[TabulatedInfo]:
         gameVersion = validated.gameVersion
-        season, patch, subVersion = gameVersion.split(".", 2)
+        parts = gameVersion.split(".")
+        if len(parts) >= 3:
+            season = parts[0]
+            patch = parts[1]
+            subVersion = ".".join(parts[2:])
+        else:
+            season = "unknown"
+            patch = "unknown"
+            subVersion = "unknown"
+            logger.warning(
+                "UnexpectedGameVersionFormat match_id=%s gameVersion=%r",
+                validated.gameId,
+                gameVersion,
+            )
 
         return [
             {

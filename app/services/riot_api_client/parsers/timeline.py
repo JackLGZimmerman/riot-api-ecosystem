@@ -50,7 +50,7 @@ class ParticipantStatsRow(TypedDict):
     abilityHaste: NonNegativeInt
     abilityPower: NonNegativeInt
     armor: int
-    attackDamage: NonNegativeInt
+    attackDamage: int
     attackSpeed: NonNegativeInt
     ccReduction: int
     cooldownReduction: NonNegativeInt

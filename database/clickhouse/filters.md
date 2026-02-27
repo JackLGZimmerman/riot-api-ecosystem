@@ -11,8 +11,7 @@ game_data.participant_stats
 ```
 
 ## Schema Files
-- `database/clickhouse/schema/4000_filter_game_validity.sql`
-- `database/clickhouse/schema/4001_mv_filter_game_validity.sql`
+- `database/clickhouse/schema/4000_filter_game_validity.sql` (table + MV)
 
 ## Filtered Dataset Pipeline
 - Single SQL file:

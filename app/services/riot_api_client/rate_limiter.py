@@ -71,7 +71,7 @@ class _LimiterDebugMetrics:
         )
         delta_rate_per_s = observed_rate_per_s - self.expected_rate_per_s
 
-        logger.info(
+        logger.debug(
             "LimiterStats",
             extra={
                 "location": self.location,

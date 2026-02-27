@@ -68,3 +68,16 @@ def insert_match_ids(
 
 def delete_match_ids(run_id: UUID) -> None:
     delete_by_run_id("game_data.matchdata_matchids", run_id)
+
+
+def load_pending_match_ids() -> list[str]:
+    query = """
+        SELECT m.matchid
+        FROM game_data.matchids AS m
+        WHERE m.matchid NOT IN (
+            SELECT matchid
+            FROM game_data.matchdata_matchids
+        )
+    """
+    rows = get_client().query(query).result_rows
+    return [row[0] for row in rows]

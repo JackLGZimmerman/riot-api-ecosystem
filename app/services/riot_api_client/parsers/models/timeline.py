@@ -267,11 +267,11 @@ Event = Annotated[
 class ChampionStats(BaseModel):
     model_config = ConfigDict(extra="ignore")
     abilityHaste: NonNegativeInt
-    abilityPower: NonNegativeInt
+    abilityPower: int
     armor: int
     armorPen: NonNegativeInt
     armorPenPercent: NonNegativeInt
-    attackDamage: NonNegativeInt
+    attackDamage: int
     attackSpeed: NonNegativeInt
     bonusArmorPenPercent: NonNegativeInt
     bonusMagicPenPercent: NonNegativeInt

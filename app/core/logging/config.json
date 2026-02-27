@@ -16,7 +16,7 @@
     "handlers": {
         "stdout": {
             "class": "logging.StreamHandler",
-            "level": "INFO",
+            "level": "DEBUG",
             "formatter": "json",
             "stream": "ext://sys.stdout"
         },
@@ -68,6 +68,10 @@
         },
         "tasks.player_collection": {
             "level": "DEBUG",
+            "propagate": true
+        },
+        "clickhouse_connect": {
+            "level": "WARNING",
             "propagate": true
         },
         "schema_drift.timeline": {

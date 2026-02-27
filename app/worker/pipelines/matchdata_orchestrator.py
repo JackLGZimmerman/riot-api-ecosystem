@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 import logging
 import time
 from dataclasses import dataclass
@@ -60,9 +61,9 @@ from database.clickhouse.operations.matchdata import (
     delete_by_run_id,
     delete_match_ids,
     insert_match_ids,
+    load_pending_match_ids,
     persist_data,
 )
-from database.clickhouse.operations.matchids import load_matchids
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +286,7 @@ class MatchDataOrchestrator(Orchestrator):
 
 class MatchDataLoader(Loader):
     def load(self, ctx: OrchestrationContext) -> MatchDataCollectorState:
-        matchids: list[str] = load_matchids()
+        matchids: list[str] = load_pending_match_ids()
         return MatchDataCollectorState(matchids=matchids)
 
 
@@ -327,6 +328,8 @@ class MatchDataSaver(Saver):
         state: MatchDataCollectorState,
         ctx: OrchestrationContext,
     ) -> None:
+        stream_successes: dict[str, set[StreamName]] = defaultdict(set)
+
         try:
             async for item_any in items:
                 item: StreamItem = item_any
@@ -334,16 +337,46 @@ class MatchDataSaver(Saver):
 
                 if item.stream == "non_timeline":
                     nt: NonTimelineTables = await self._parse_non_timeline(item.raw)
+                    if match_id != "unknown" and nt.metadata:
+                        stream_successes[match_id].add("non_timeline")
                     await self._persist_non_timeline(nt, ctx.run_id, match_id=match_id)
 
                 elif item.stream == "timeline":
                     tl: TimelineTables = await self._parse_timeline(item.raw)
+                    if match_id != "unknown" and tl.participantStats:
+                        stream_successes[match_id].add("timeline")
                     await self._persist_timeline(tl, ctx.run_id, match_id=match_id)
 
                 else:
                     raise ValueError(f"Unknown stream: {item.stream!r}")
 
-            await asyncio.to_thread(insert_match_ids, state.matchids, ctx.run_id)
+            successful_match_ids: list[str] = [
+                match_id
+                for match_id in state.matchids
+                if stream_successes.get(match_id) == {"non_timeline", "timeline"}
+            ]
+            failed_match_ids: list[str] = [
+                match_id
+                for match_id in state.matchids
+                if stream_successes.get(match_id) != {"non_timeline", "timeline"}
+            ]
+
+            await asyncio.to_thread(insert_match_ids, successful_match_ids, ctx.run_id)
+
+            logger.info(
+                "MatchData completion run_id=%s total=%d completed=%d pending_for_retry=%d",
+                ctx.run_id,
+                len(state.matchids),
+                len(successful_match_ids),
+                len(failed_match_ids),
+            )
+            if failed_match_ids:
+                logger.warning(
+                    "MatchData failed matchids run_id=%s count=%d sample=%s",
+                    ctx.run_id,
+                    len(failed_match_ids),
+                    failed_match_ids[:20],
+                )
 
         except Exception:
             await self.delete_failed_non_timeline(ctx.run_id)

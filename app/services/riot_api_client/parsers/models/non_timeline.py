@@ -425,10 +425,10 @@ class Info(BaseModel):
     gameStartTimestamp: NonNegativeInt
     gameType: str
     gameVersion: str
-    mapId: PositiveInt
+    mapId: NonNegativeInt
     participants: list[Participant]
     platformId: str
-    queueId: PositiveInt
+    queueId: NonNegativeInt
     teams: list[Team]
     tournamentCode: str
 
