@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS game_data.tl_elite_monster_kill
     assistingparticipantids Array (UInt8),
     bounty UInt16,
     killerid Int8,
-    killerteamid Int8,
+    killerteamid Int16,
     monstersubtype LowCardinality (Nullable (String)),
     monstertype LowCardinality (String),
     position_x Int16,

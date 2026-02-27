@@ -58,7 +58,6 @@
         "level": "DEBUG",
         "handlers": [
             "stdout",
-            "stderr",
             "json_file"
         ]
     },

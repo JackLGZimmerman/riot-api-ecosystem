@@ -78,9 +78,9 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
         await orchestrator.run()
 
     return (
-        PipelineStep("players", run_players),
-        PipelineStep("match_ids", run_match_ids),
-        # PipelineStep("match_data", run_match_data),
+        # PipelineStep("players", run_players),
+        # PipelineStep("match_ids", run_match_ids),
+        PipelineStep("match_data", run_match_data),
     )
 
 

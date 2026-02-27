@@ -105,7 +105,7 @@ async def discover_page_bounds(
             return_exceptions=True,
         )
         for args, item in zip(batch, probed, strict=True):
-            if isinstance(item, Exception):
+            if isinstance(item, BaseException):
                 region, queue, tier, div = args
                 logger.warning(
                     "LeagueBoundProbeFailed region=%s queue=%s tier=%s division=%s error=%s",

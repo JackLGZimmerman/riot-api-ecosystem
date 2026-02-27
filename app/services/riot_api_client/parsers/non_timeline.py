@@ -683,7 +683,7 @@ class MatchDataNonTimelineParsingOrchestrator:
                 "SchemaValidation non_timeline match_id=%s date=%s errors=%s",
                 match_id,
                 drift_date,
-                e.errors(),
+                e.errors(include_input=False),
             )
             logger.warning(
                 "Skipping non_timeline payload for match_id=%s due to validation errors "

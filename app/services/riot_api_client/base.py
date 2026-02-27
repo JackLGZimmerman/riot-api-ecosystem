@@ -79,7 +79,7 @@ def _limiter(location_key: Region | Continent, calls: int, time_period: float):
             calls=sustained_calls,
             period_s=sustained_period,
         ),
-        debug=False,
+        debug=True,
     )
 
     return TelemetryLimiter(

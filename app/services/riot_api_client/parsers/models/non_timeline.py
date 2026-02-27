@@ -187,9 +187,9 @@ class StatPerks(BaseModel):
 class PerkSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     perk: NonNegativeInt
-    var1: NonNegativeInt
-    var2: NonNegativeInt
-    var3: NonNegativeInt
+    var1: int
+    var2: int
+    var3: int
 
 
 class PerkStyle(BaseModel):
@@ -419,7 +419,7 @@ class Info(BaseModel):
     gameCreation: NonNegativeInt
     gameDuration: NonNegativeInt
     gameEndTimestamp: NonNegativeInt
-    gameId: NonNegativeInt = Field(alias="matchId")
+    gameId: NonNegativeInt
     gameMode: str
     gameName: str
     gameStartTimestamp: NonNegativeInt
