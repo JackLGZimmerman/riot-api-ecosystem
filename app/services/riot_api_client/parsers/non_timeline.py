@@ -51,8 +51,8 @@ class TabulatedInfo(TypedDict):
     gameStartTimestamp: NonNegativeInt
     gameType: str
     gameVersion: str
-    season: str
-    patch: str
+    season: int
+    patch: int
     subVersion: str
     mapId: PositiveInt
     platformId: str
@@ -63,14 +63,21 @@ class GameInfoParser:
     def parse(self, validated: Info) -> list[TabulatedInfo]:
         gameVersion = validated.gameVersion
         parts = gameVersion.split(".")
+        season = -1
+        patch = -1
+        subVersion = "unknown"
         if len(parts) >= 3:
-            season = parts[0]
-            patch = parts[1]
             subVersion = ".".join(parts[2:])
+            try:
+                season = int(parts[0])
+                patch = int(parts[1])
+            except ValueError:
+                logger.warning(
+                    "UnexpectedGameVersionNumericFormat match_id=%s gameVersion=%r",
+                    validated.gameId,
+                    gameVersion,
+                )
         else:
-            season = "unknown"
-            patch = "unknown"
-            subVersion = "unknown"
             logger.warning(
                 "UnexpectedGameVersionFormat match_id=%s gameVersion=%r",
                 validated.gameId,
@@ -692,11 +699,16 @@ class MatchDataNonTimelineParsingOrchestrator:
                 participant_perk_ids=self.participantPerkIds.parse(participants, matchId),
             )
         except ValidationError as e:
+            errs = e.errors(include_input=True)
             logger.warning(
                 "SchemaValidation non_timeline match_id=%s date=%s errors=%s",
                 match_id,
                 drift_date,
                 e.errors(include_input=False),
+            )
+            logger.warning(
+                "SchemaValidation non_timeline value=%r",
+                errs[-1].get("input") if errs else None,
             )
             logger.warning(
                 "Skipping non_timeline payload for match_id=%s due to validation errors "

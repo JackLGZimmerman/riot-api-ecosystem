@@ -62,7 +62,7 @@ game_data.participant_stats
 - Bit `8`: `((team_kills + team_assists) / team_deaths) < 0.25`
 
 ### Game-level bits
-- Bit `16`: `timeplayed <= 15`
+- Bit `16`: `timeplayed <= 15 * 60`
 
 ## Output Contract
 - `player_rule_mask`: failure bitset for that player record.

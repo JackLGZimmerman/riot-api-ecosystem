@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
     riotidgamename String,
     riotidtagline String,
     profileicon UInt16,
-    championid Int16,
+    championid Nullable (Int32),
     championtransform UInt8,
     champlevel UInt8,
     champexperience UInt32,

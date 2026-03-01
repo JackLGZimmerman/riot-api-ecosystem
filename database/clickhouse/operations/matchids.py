@@ -138,7 +138,7 @@ async def insert_matchids_stream_in_batches(
     run_id: UUID,
     *,
     buffer_size: int = 200_000,
-    flush_interval_s: float = 5.0,
+    flush_interval_s: float = 10.0,
 ) -> None:
     loop = asyncio.get_running_loop()
     buf: list[str] = []

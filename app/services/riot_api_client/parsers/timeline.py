@@ -636,11 +636,16 @@ class MatchDataTimelineParsingOrchestrator:
                 ),
             )
         except ValidationError as e:
+            errs = e.errors(include_input=True)
             logger.warning(
                 "SchemaValidation timeline match_id=%s date=%s errors=%s",
                 match_id,
                 drift_date,
                 e.errors(include_input=False),
+            )
+            logger.warning(
+                "SchemaValidation timeline value=%r",
+                errs[-1].get("input") if errs else None,
             )
             logger.warning(
                 "Skipping timeline payload for match_id=%s due to validation errors "

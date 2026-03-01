@@ -20,6 +20,7 @@ WITH participant_base AS (
         matchid,
         teamid,
         participantid,
+        puuid,
         kills,
         assists,
         deaths,
@@ -123,10 +124,16 @@ participant_scored AS (
                 8192,
                 0
             )
+            + IF(
+                coalesce(ps.wins, 0) * 100 > coalesce(ps.wins + ps.losses, 0) * 65,
+                16384,
+                0
+            )
         ) AS player_mask
     FROM participant_base AS p
     INNER JOIN team_stats AS t USING (matchid, teamid)
     INNER JOIN game_stats AS g USING (matchid)
+    LEFT JOIN game_data.players AS ps USING (puuid)
 )
 
 SELECT

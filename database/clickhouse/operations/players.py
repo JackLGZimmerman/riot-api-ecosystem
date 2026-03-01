@@ -50,7 +50,7 @@ async def insert_players_stream_in_batches(
     *,
     run_id: UUID,
     batch_size: int = 20_000,
-    flush_interval_s: float = 5.0,
+    flush_interval_s: float = 10.0,
 ) -> None:
     loop = asyncio.get_running_loop()
     batch: list[tuple] = []

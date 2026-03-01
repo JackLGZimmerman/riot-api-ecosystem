@@ -6,8 +6,8 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.matchup_windows_3v3
     right_teamid UInt8,
     left_key String,
     right_key String,
-    left_champions Array (Int16),
-    right_champions Array (Int16),
+    left_champions Array (Int32),
+    right_champions Array (Int32),
     left_team_positions Array (LowCardinality (String)),
     right_team_positions Array (LowCardinality (String)),
     left_metric_maps Array (Map (String, Int64)),
@@ -27,7 +27,7 @@ WITH team_top3 AS (
     SELECT
         matchid,
         teamid,
-        arrayMap(champion_row -> toInt16(tupleElement(champion_row, 1)), top3_aligned)
+        arrayMap(champion_row -> toInt32(tupleElement(champion_row, 1)), top3_aligned)
             AS champions,
         arrayMap(champion_row -> tupleElement(champion_row, 4), top3_aligned)
             AS team_positions,
