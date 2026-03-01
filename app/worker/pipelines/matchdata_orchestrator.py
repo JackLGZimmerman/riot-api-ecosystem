@@ -58,14 +58,21 @@ from app.worker.pipelines.orchestrator import (
     Saver,
 )
 from database.clickhouse.operations.matchdata import (
+    claim_pending_match_ids,
     delete_by_run_id,
-    delete_match_ids,
-    insert_match_ids,
-    load_pending_match_ids,
+    initialize_match_state_from_matchids,
+    mark_match_ids_after_attempt,
+    mark_match_ids_finished,
     persist_data,
+    recover_stale_processing_match_ids,
 )
 
 logger = logging.getLogger(__name__)
+
+MATCHDATA_BATCH_SIZE = 500
+MATCHDATA_STALE_PROCESSING_MINUTES = 30
+MATCHDATA_MAX_RETRIES = 3
+BATCH_FAILURE_ERROR = "match payload missing non_timeline or timeline rows"
 
 
 def columns_from_typed_dict(td: type) -> tuple[str, ...]:
@@ -225,6 +232,7 @@ class Parser(Protocol[TRaw, TParsed]):
 @dataclass(frozen=True)
 class MatchDataCollectorState:
     matchids: list[str]
+    retry_counts: dict[str, int]
 
 
 class MatchDataOrchestrator(Orchestrator):
@@ -271,23 +279,82 @@ class MatchDataOrchestrator(Orchestrator):
                 yield msg
 
     async def run(self) -> None:
-        ctx = OrchestrationContext(
-            ts=int(time.time()), run_id=uuid4(), pipeline=self.pipeline
-        )
+        ts = int(time.time())
+        batch_number = 0
 
-        state: MatchDataCollectorState = self.loader.load(ctx)
+        while True:
+            ctx = OrchestrationContext(ts=ts, run_id=uuid4(), pipeline=self.pipeline)
+            state: MatchDataCollectorState = self.loader.load(ctx)
+            if not state.matchids:
+                logger.info(
+                    "MatchData no pending matchids remain; exiting pipeline=%s",
+                    self.pipeline,
+                )
+                return
 
-        non_timeline_raw = self.collector.collect(state, ctx)
-        timeline_raw = self.timeline_collector.collect(state, ctx)
+            batch_number += 1
+            logger.info(
+                "MatchData batch start pipeline=%s batch=%d run_id=%s size=%d",
+                self.pipeline,
+                batch_number,
+                ctx.run_id,
+                len(state.matchids),
+            )
 
-        items = self.combine_streams(non_timeline_raw, timeline_raw)
-        await self.saver.save(items, state, ctx)
+            non_timeline_raw = self.collector.collect(state, ctx)
+            timeline_raw = self.timeline_collector.collect(state, ctx)
+            items = self.combine_streams(non_timeline_raw, timeline_raw)
+            await self.saver.save(items, state, ctx)
+
+            logger.info(
+                "MatchData batch complete pipeline=%s batch=%d run_id=%s",
+                self.pipeline,
+                batch_number,
+                ctx.run_id,
+            )
 
 
 class MatchDataLoader(Loader):
+    def __init__(
+        self,
+        *,
+        batch_size: int = MATCHDATA_BATCH_SIZE,
+        stale_after_minutes: int = MATCHDATA_STALE_PROCESSING_MINUTES,
+        max_retries: int = MATCHDATA_MAX_RETRIES,
+    ) -> None:
+        self.batch_size = batch_size
+        self.stale_after_minutes = stale_after_minutes
+        self.max_retries = max_retries
+
     def load(self, ctx: OrchestrationContext) -> MatchDataCollectorState:
-        matchids: list[str] = load_pending_match_ids()
-        return MatchDataCollectorState(matchids=matchids)
+        initialize_match_state_from_matchids()
+
+        stale_requeued, stale_failed, stale_run_ids = recover_stale_processing_match_ids(
+            stale_after_minutes=self.stale_after_minutes,
+            max_retries=self.max_retries,
+        )
+        if stale_run_ids:
+            self._cleanup_stale_run_ids(stale_run_ids)
+
+        if stale_requeued or stale_failed:
+            logger.warning(
+                "MatchData stale processing recovered runs=%d requeued=%d failed=%d sample_requeued=%s sample_failed=%s",
+                len(stale_run_ids),
+                len(stale_requeued),
+                len(stale_failed),
+                stale_requeued[:10],
+                stale_failed[:10],
+            )
+
+        claimed = claim_pending_match_ids(self.batch_size, run_id=ctx.run_id)
+        matchids = [m.matchid for m in claimed]
+        retry_counts = {m.matchid: m.retry_count for m in claimed}
+        return MatchDataCollectorState(matchids=matchids, retry_counts=retry_counts)
+
+    def _cleanup_stale_run_ids(self, stale_run_ids: set[UUID]) -> None:
+        for run_id in stale_run_ids:
+            for table in (*NON_TIMELINE_DELETE_TABLES, *TIMELINE_DELETE_TABLES):
+                delete_by_run_id(table, run_id)
 
 
 class MatchDataNonTimelineCollector(Collector):
@@ -315,9 +382,16 @@ class MatchDataTimelineCollector(Collector):
 
 
 class MatchDataSaver(Saver):
-    def __init__(self, *, non_timeline_parser: Parser, timeline_parser: Parser) -> None:
+    def __init__(
+        self,
+        *,
+        non_timeline_parser: Parser,
+        timeline_parser: Parser,
+        max_retries: int = MATCHDATA_MAX_RETRIES,
+    ) -> None:
         self.non_timeline_parser = non_timeline_parser
         self.timeline_parser = timeline_parser
+        self.max_retries = max_retries
 
         self.nt_small = 5_000
         self.nt_medium = 20_000
@@ -361,27 +435,55 @@ class MatchDataSaver(Saver):
                 if stream_successes.get(match_id) != {"non_timeline", "timeline"}
             ]
 
-            await asyncio.to_thread(insert_match_ids, successful_match_ids, ctx.run_id)
+            await asyncio.to_thread(
+                mark_match_ids_finished,
+                successful_match_ids,
+                state.retry_counts,
+                run_id=ctx.run_id,
+            )
+
+            requeued_match_ids, permanently_failed_match_ids = await asyncio.to_thread(
+                mark_match_ids_after_attempt,
+                failed_match_ids,
+                state.retry_counts,
+                max_retries=self.max_retries,
+                error_message=BATCH_FAILURE_ERROR,
+                run_id=ctx.run_id,
+            )
 
             logger.info(
-                "MatchData completion run_id=%s total=%d completed=%d pending_for_retry=%d",
+                "MatchData completion run_id=%s total=%d completed=%d requeued=%d failed=%d",
                 ctx.run_id,
                 len(state.matchids),
                 len(successful_match_ids),
-                len(failed_match_ids),
+                len(requeued_match_ids),
+                len(permanently_failed_match_ids),
             )
             if failed_match_ids:
                 logger.warning(
-                    "MatchData failed matchids run_id=%s count=%d sample=%s",
+                    "MatchData incomplete matchids run_id=%s count=%d sample=%s",
                     ctx.run_id,
                     len(failed_match_ids),
                     failed_match_ids[:20],
                 )
 
-        except Exception:
+        except Exception as exc:
+            try:
+                await asyncio.to_thread(
+                    mark_match_ids_after_attempt,
+                    state.matchids,
+                    state.retry_counts,
+                    max_retries=self.max_retries,
+                    error_message=f"batch exception: {exc.__class__.__name__}",
+                    run_id=ctx.run_id,
+                )
+            except Exception:
+                logger.exception(
+                    "MatchData state update failed after batch exception run_id=%s",
+                    ctx.run_id,
+                )
             await self.delete_failed_non_timeline(ctx.run_id)
             await self.delete_failed_timeline(ctx.run_id)
-            await self._delete_match_ids(ctx.run_id)
             raise
 
     async def _parse_non_timeline(self, raw_data) -> NonTimelineTables:
@@ -412,23 +514,6 @@ class MatchDataSaver(Saver):
     async def _run_deletes(self, tables: tuple[str, ...], run_id: UUID) -> None:
         for table in tables:
             await self._delete_one(table, run_id)
-
-    @retry(
-        stop=stop_never,
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        reraise=True,
-    )
-    async def _delete_match_ids(self, run_id: UUID) -> None:
-        try:
-            await asyncio.to_thread(delete_match_ids, run_id)
-        except Exception as e:
-            logger.exception(
-                "Error deleting from game_data.matchdata_matchids run_id=%s: %s",
-                run_id,
-                e,
-            )
-            raise
 
     @staticmethod
     def _extract_match_id(raw: Any) -> str:
@@ -492,13 +577,18 @@ class MatchDataSaver(Saver):
 if __name__ == "__main__":
     riot_api: RiotAPI = get_riot_api()
 
-    loader = MatchDataLoader()
+    loader = MatchDataLoader(
+        batch_size=MATCHDATA_BATCH_SIZE,
+        stale_after_minutes=MATCHDATA_STALE_PROCESSING_MINUTES,
+        max_retries=MATCHDATA_MAX_RETRIES,
+    )
     non_timeline_collector = MatchDataNonTimelineCollector(riot_api=riot_api)
     timeline_collector = MatchDataTimelineCollector(riot_api=riot_api)
 
     saver = MatchDataSaver(
         non_timeline_parser=MatchDataNonTimelineParsingOrchestrator(),
         timeline_parser=MatchDataTimelineParsingOrchestrator(),
+        max_retries=MATCHDATA_MAX_RETRIES,
     )
 
     orchestrator = MatchDataOrchestrator(
