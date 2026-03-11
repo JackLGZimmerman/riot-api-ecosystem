@@ -1,0 +1,19 @@
+# participant_perk_ids
+
+| id | name | category | data_source | description | calculation | version | fields |
+|---|---|---|---|---|---|---|---|
+| RAW_PARTICIPANT_PERK_IDS_001 | game_data.participant_perk_ids.matchid | raw_value | game_data.participant_perk_ids | Raw value for column `matchid` from `game_data.participant_perk_ids`. | identity(matchid) | 1.0.0 | matchid |
+| RAW_PARTICIPANT_PERK_IDS_002 | game_data.participant_perk_ids.teamid | raw_value | game_data.participant_perk_ids | Raw value for column `teamid` from `game_data.participant_perk_ids`. | identity(teamid) | 1.0.0 | teamid |
+| RAW_PARTICIPANT_PERK_IDS_003 | game_data.participant_perk_ids.puuid | raw_value | game_data.participant_perk_ids | Raw value for column `puuid` from `game_data.participant_perk_ids`. | identity(puuid) | 1.0.0 | puuid |
+| RAW_PARTICIPANT_PERK_IDS_004 | game_data.participant_perk_ids.stat_defense | raw_value | game_data.participant_perk_ids | Raw value for column `stat_defense` from `game_data.participant_perk_ids`. | identity(stat_defense) | 1.0.0 | stat_defense |
+| RAW_PARTICIPANT_PERK_IDS_005 | game_data.participant_perk_ids.stat_flex | raw_value | game_data.participant_perk_ids | Raw value for column `stat_flex` from `game_data.participant_perk_ids`. | identity(stat_flex) | 1.0.0 | stat_flex |
+| RAW_PARTICIPANT_PERK_IDS_006 | game_data.participant_perk_ids.stat_offense | raw_value | game_data.participant_perk_ids | Raw value for column `stat_offense` from `game_data.participant_perk_ids`. | identity(stat_offense) | 1.0.0 | stat_offense |
+| RAW_PARTICIPANT_PERK_IDS_007 | game_data.participant_perk_ids.primary_style | raw_value | game_data.participant_perk_ids | Raw value for column `primary_style` from `game_data.participant_perk_ids`. | identity(primary_style) | 1.0.0 | primary_style |
+| RAW_PARTICIPANT_PERK_IDS_008 | game_data.participant_perk_ids.sub_style | raw_value | game_data.participant_perk_ids | Raw value for column `sub_style` from `game_data.participant_perk_ids`. | identity(sub_style) | 1.0.0 | sub_style |
+| RAW_PARTICIPANT_PERK_IDS_009 | game_data.participant_perk_ids.primary_perk_1 | raw_value | game_data.participant_perk_ids | Raw value for column `primary_perk_1` from `game_data.participant_perk_ids`. | identity(primary_perk_1) | 1.0.0 | primary_perk_1 |
+| RAW_PARTICIPANT_PERK_IDS_010 | game_data.participant_perk_ids.primary_perk_2 | raw_value | game_data.participant_perk_ids | Raw value for column `primary_perk_2` from `game_data.participant_perk_ids`. | identity(primary_perk_2) | 1.0.0 | primary_perk_2 |
+| RAW_PARTICIPANT_PERK_IDS_011 | game_data.participant_perk_ids.primary_perk_3 | raw_value | game_data.participant_perk_ids | Raw value for column `primary_perk_3` from `game_data.participant_perk_ids`. | identity(primary_perk_3) | 1.0.0 | primary_perk_3 |
+| RAW_PARTICIPANT_PERK_IDS_012 | game_data.participant_perk_ids.primary_perk_4 | raw_value | game_data.participant_perk_ids | Raw value for column `primary_perk_4` from `game_data.participant_perk_ids`. | identity(primary_perk_4) | 1.0.0 | primary_perk_4 |
+| RAW_PARTICIPANT_PERK_IDS_013 | game_data.participant_perk_ids.sub_perk_1 | raw_value | game_data.participant_perk_ids | Raw value for column `sub_perk_1` from `game_data.participant_perk_ids`. | identity(sub_perk_1) | 1.0.0 | sub_perk_1 |
+| RAW_PARTICIPANT_PERK_IDS_014 | game_data.participant_perk_ids.sub_perk_2 | raw_value | game_data.participant_perk_ids | Raw value for column `sub_perk_2` from `game_data.participant_perk_ids`. | identity(sub_perk_2) | 1.0.0 | sub_perk_2 |
+| RAW_PARTICIPANT_PERK_IDS_015 | game_data.participant_perk_ids.perk_combo_key | raw_value | game_data.participant_perk_ids | Raw value for column `perk_combo_key` from `game_data.participant_perk_ids`. | identity(perk_combo_key) | 1.0.0 | perk_combo_key |

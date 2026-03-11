@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 _CH_EXECUTOR = settings.threadpool_executor_clickhouse
 
 PLAYERS_TABLE = "game_data.players"
+PLAYERS_SNAPSHOT_TIMESTAMP_NAME = "players_snapshot_ts"
 
 PLAYERS_COLS = [
     "run_id",
@@ -41,7 +42,7 @@ def _insert_rows(rows: list[tuple]) -> None:
         data=rows,
         column_names=PLAYERS_COLS,
     )
-    logger.info("Inserted %d rows into %s", len(rows), PLAYERS_TABLE)
+    logger.debug("Inserted %d rows into %s", len(rows), PLAYERS_TABLE)
 
 
 async def insert_players_stream_in_batches(
@@ -49,8 +50,8 @@ async def insert_players_stream_in_batches(
     ts: int,
     *,
     run_id: UUID,
-    batch_size: int = 20_000,
-    flush_interval_s: float = 10.0,
+    batch_size: int = 10_000,
+    flush_interval_s: float = 5.0,
 ) -> None:
     loop = asyncio.get_running_loop()
     batch: list[tuple] = []
@@ -91,6 +92,57 @@ def delete_partial_players_run(run_id: UUID) -> None:
     """
 
     get_client().command(query, parameters={"run_id": run_id})
+
+
+def load_players_snapshot_ts() -> int:
+    query = """
+        SELECT stored_at
+        FROM game_data.data_timestamps
+        WHERE name = %(name)s
+    """
+    rows = get_client().query(
+        query,
+        parameters={"name": PLAYERS_SNAPSHOT_TIMESTAMP_NAME},
+    ).result_rows
+    return int(rows[0][0]) if rows else 0
+
+
+def upsert_players_snapshot_ts(ts: int, run_id: UUID) -> None:
+    get_client().insert(
+        table="game_data.data_timestamps",
+        data=[(PLAYERS_SNAPSHOT_TIMESTAMP_NAME, run_id, ts)],
+        column_names=["name", "run_id", "stored_at"],
+    )
+
+
+def delete_failed_players_snapshot_ts(run_id: UUID) -> None:
+    get_client().command(
+        """
+        ALTER TABLE game_data.data_timestamps
+        DELETE
+        WHERE name = %(name)s
+          AND run_id = %(run_id)s
+        """,
+        parameters={
+            "name": PLAYERS_SNAPSHOT_TIMESTAMP_NAME,
+            "run_id": run_id,
+        },
+    )
+
+
+def delete_old_players_snapshot_ts(run_id: UUID) -> None:
+    get_client().command(
+        """
+        ALTER TABLE game_data.data_timestamps
+        DELETE
+        WHERE name = %(name)s
+          AND run_id != %(run_id)s
+        """,
+        parameters={
+            "name": PLAYERS_SNAPSHOT_TIMESTAMP_NAME,
+            "run_id": run_id,
+        },
+    )
 
 
 def load_players() -> list[PlayerKeyRow]:

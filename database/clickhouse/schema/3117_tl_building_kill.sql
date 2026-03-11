@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS game_data.tl_building_kill
     type LowCardinality (String),
     bounty UInt16,
     buildingtype LowCardinality (String),
+    assistingparticipantids Array (UInt8),
     killerid Int8,
     lanetype LowCardinality (String),
     position_x Int16,

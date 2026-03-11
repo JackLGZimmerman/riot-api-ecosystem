@@ -16,6 +16,7 @@ deployments:
     tags: []
     description: null
     schedule: null
+    concurrency_limit: 1
     entrypoint: app/worker/pipelines/prefect_flow.py:riot_pipeline
     parameters: {}
     enforce_parameter_schema: true

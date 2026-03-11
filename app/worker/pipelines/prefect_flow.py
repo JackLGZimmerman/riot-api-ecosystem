@@ -17,10 +17,9 @@ from app.services.riot_api_client.parsers.timeline import (
 )
 from app.worker.pipelines.matchdata_orchestrator import (
     MatchDataLoader,
-    MatchDataNonTimelineCollector,
     MatchDataOrchestrator,
     MatchDataSaver,
-    MatchDataTimelineCollector,
+    MatchDataStreamCollector,
 )
 from app.worker.pipelines.matchids_orchestrator import (
     MatchIDCollector,
@@ -34,6 +33,7 @@ from app.worker.pipelines.players_orchestrator import (
     PlayerSaver,
     PlayersOrchestrator,
 )
+from app.worker.pipelines.stop_flag import raise_if_stop_requested
 
 setup_logging_config()
 logger = logging.getLogger(__name__)
@@ -46,46 +46,45 @@ class PipelineStep:
 
 
 def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
-    async def run_players() -> None:
-        orchestrator = PlayersOrchestrator(
-            pipeline="players",
-            loader=PlayerLoader(),
-            collector=PlayerCollector(riot_api=riot_api),
-            saver=PlayerSaver(),
-        )
-        await orchestrator.run()
-
-    async def run_match_ids() -> None:
-        orchestrator = MatchIDOrchestrator(
-            pipeline="match_ids",
-            loader=MatchIDLoader(),
-            collector=MatchIDCollector(riot_api=riot_api),
-            saver=MatchIDSaver(),
-        )
-        await orchestrator.run()
-
-    async def run_match_data() -> None:
-        orchestrator = MatchDataOrchestrator(
-            pipeline="match_data",
-            loader=MatchDataLoader(),
-            non_timeline_collector=MatchDataNonTimelineCollector(riot_api=riot_api),
-            timeline_collector=MatchDataTimelineCollector(riot_api=riot_api),
-            saver=MatchDataSaver(
-                non_timeline_parser=MatchDataNonTimelineParsingOrchestrator(),
-                timeline_parser=MatchDataTimelineParsingOrchestrator(),
-            ),
-        )
-        await orchestrator.run()
+    players = PlayersOrchestrator(
+        pipeline="players",
+        loader=PlayerLoader(),
+        collector=PlayerCollector(riot_api=riot_api),
+        saver=PlayerSaver(),
+    )
+    match_ids = MatchIDOrchestrator(
+        pipeline="match_ids",
+        loader=MatchIDLoader(),
+        collector=MatchIDCollector(riot_api=riot_api),
+        saver=MatchIDSaver(),
+    )
+    match_data = MatchDataOrchestrator(
+        pipeline="match_data",
+        loader=MatchDataLoader(),
+        non_timeline_collector=MatchDataStreamCollector(
+            riot_api=riot_api,
+            stream="non_timeline",
+        ),
+        timeline_collector=MatchDataStreamCollector(
+            riot_api=riot_api,
+            stream="timeline",
+        ),
+        saver=MatchDataSaver(
+            non_timeline_parser=MatchDataNonTimelineParsingOrchestrator(),
+            timeline_parser=MatchDataTimelineParsingOrchestrator(),
+        ),
+    )
 
     return (
-        # PipelineStep("players", run_players),
-        # PipelineStep("match_ids", run_match_ids),
-        PipelineStep("match_data", run_match_data),
+        PipelineStep("players", players.run),
+        PipelineStep("match_ids", match_ids.run),
+        PipelineStep("match_data", match_data.run),
     )
 
 
 async def _run_cycle(steps: Sequence[PipelineStep]) -> None:
     for step in steps:
+        raise_if_stop_requested(stage=f"pipeline:{step.name}:start")
         logger.info("Step start: %s", step.name)
         start = time.monotonic()
         await step.run()

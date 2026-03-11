@@ -7,6 +7,7 @@ from typing import AsyncIterator, TypeAlias
 from app.core.config.constants import (
     ENDPOINTS,
     Divisions,
+    PLAYERS_REGIONS,
     Queues,
     Region,
     Tiers,
@@ -30,7 +31,7 @@ from app.services.riot_api_client.utils import (
 logger = logging.getLogger(__name__)
 
 LEAGUE_PAGE_UPPER_BOUND: int = 1024
-MAX_IN_FLIGHT: int = 128
+MAX_IN_FLIGHT: int = 64
 PAGE_NOT_FOUND_STATUS: int = 404
 
 PageKey: TypeAlias = tuple[Region, Queues, Tiers, Divisions]
@@ -89,7 +90,7 @@ async def discover_page_bounds(
         return (region, queue, tier, div), low
 
     work: list[tuple[Region, Queues, Tiers, Divisions]] = []
-    for region in Region:
+    for region in PLAYERS_REGIONS:
         for queue, bounds in queue_bounds.items():
             if not bounds.collect:
                 continue

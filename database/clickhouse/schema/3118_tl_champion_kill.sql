@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS game_data.tl_champion_kill
     timestamp UInt64,
     type LowCardinality (String),
     champion_kill_event_id String,
+    assistingparticipantids Array (UInt8),
     killerid Int8,
     victimid Int8,
     bounty UInt16,

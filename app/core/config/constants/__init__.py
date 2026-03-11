@@ -2,6 +2,8 @@ from .endpoints import ENDPOINTS, URLTemplate
 from .generic import JSON, JSONList
 from .geography import (
     CONTINENT_TO_REGIONS,
+    LEGACY_REGIONS,
+    PLAYERS_REGIONS,
     REGION_TO_CONTINENT,
     Continent,
     Region,
@@ -20,6 +22,8 @@ __all__ = [
     "Region",
     "REGION_TO_CONTINENT",
     "CONTINENT_TO_REGIONS",
+    "LEGACY_REGIONS",
+    "PLAYERS_REGIONS",
     # ranked parameters
     "Queues",
     "EliteTiers",

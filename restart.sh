@@ -3,6 +3,20 @@
 set -euo pipefail
 
 echo "========================================"
+echo "Ensuring local log files are writable..."
+echo "========================================"
+mkdir -p app/core/logging/logs/schema_drift
+[ ! -e app/core/logging/logs/app.log.jsonl ] || [ -w app/core/logging/logs/app.log.jsonl ] || rm -f app/core/logging/logs/app.log.jsonl
+touch app/core/logging/logs/app.log.jsonl
+chmod u+rw app/core/logging/logs/app.log.jsonl
+[ ! -e app/core/logging/logs/schema_drift/non_timeline.log.jsonl ] || [ -w app/core/logging/logs/schema_drift/non_timeline.log.jsonl ] || rm -f app/core/logging/logs/schema_drift/non_timeline.log.jsonl
+touch app/core/logging/logs/schema_drift/non_timeline.log.jsonl
+chmod u+rw app/core/logging/logs/schema_drift/non_timeline.log.jsonl
+[ ! -e app/core/logging/logs/schema_drift/timeline.log.jsonl ] || [ -w app/core/logging/logs/schema_drift/timeline.log.jsonl ] || rm -f app/core/logging/logs/schema_drift/timeline.log.jsonl
+touch app/core/logging/logs/schema_drift/timeline.log.jsonl
+chmod u+rw app/core/logging/logs/schema_drift/timeline.log.jsonl
+
+echo "========================================"
 echo "Restart: stopping containers (preserving volumes)..."
 echo "========================================"
 docker compose down --remove-orphans

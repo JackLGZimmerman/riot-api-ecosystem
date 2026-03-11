@@ -29,6 +29,15 @@ class Region(StrEnum):
     SG2 = "sg2"
 
 
+LEGACY_REGIONS: Final[tuple[Region, ...]] = (
+    Region.PH2,
+    Region.TH2,
+)
+
+PLAYERS_REGIONS: Final[tuple[Region, ...]] = tuple(
+    region for region in Region if region not in LEGACY_REGIONS
+)
+
 REGION_TO_CONTINENT: Final[Mapping[Region, Continent]] = {
     Region.BR1: Continent.AMERICAS,
     Region.LA1: Continent.AMERICAS,

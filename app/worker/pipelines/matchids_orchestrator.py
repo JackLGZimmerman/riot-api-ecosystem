@@ -4,7 +4,7 @@ import asyncio
 import logging
 from uuid import uuid4
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncIterator
 import time
 from tenacity import before_sleep_log, retry, stop_never, wait_exponential
@@ -25,6 +25,7 @@ from app.worker.pipelines.orchestrator import (
     Orchestrator,
     OrchestrationContext,
 )
+from app.worker.pipelines.stop_flag import raise_if_stop_requested
 from database.clickhouse.operations.matchids import (
     load_matchid_puuid_ts,
     load_matchid_puuids,
@@ -89,24 +90,26 @@ def build_initial_player_states(
 @dataclass
 class MatchIDCollectorState:
     initial_states: list[PlayerCrawlState]
-    full_player_puuids: list[str]
+    full_player_keys: list[tuple[str, str]]
     ts: int
+    failed_player_keys: set[tuple[str, str]] = field(default_factory=set)
 
 
 class MatchIDOrchestrator(Orchestrator):
     async def _dedupe_async(
-        self, batches: AsyncIterator[list[str]]
-    ) -> AsyncIterator[list[str]]:
+        self, batches: AsyncIterator[list[tuple[str, str]]]
+    ) -> AsyncIterator[list[tuple[str, str]]]:
         seen: set[str] = set()
         async for batch in batches:
+            raise_if_stop_requested(stage="match_ids:dedupe")
             if not batch:
                 continue
 
-            out: list[str] = []
-            for mid in batch:
+            out: list[tuple[str, str]] = []
+            for mid, queue_type in batch:
                 if mid not in seen:
                     seen.add(mid)
-                    out.append(mid)
+                    out.append((mid, queue_type))
 
             if out:
                 yield out
@@ -117,7 +120,10 @@ class MatchIDOrchestrator(Orchestrator):
         )
         state: MatchIDCollectorState = self.loader.load(ctx)
 
-        match_ids_stream: AsyncIterator[list[str]] = self.collector.collect(state, ctx)
+        match_ids_stream: AsyncIterator[list[tuple[str, str]]] = self.collector.collect(
+            state,
+            ctx,
+        )
         match_ids_stream = self._dedupe_async(match_ids_stream)
 
         await self.saver.save(match_ids_stream, state, ctx)
@@ -126,7 +132,8 @@ class MatchIDOrchestrator(Orchestrator):
 class MatchIDLoader:
     def load(self, ctx: OrchestrationContext) -> MatchIDCollectorState:
         players: list[PlayerKeyRow] = load_players()
-        collected_puuids: set[str] = set(load_matchid_puuids())
+        collected_player_keys = load_matchid_puuids()
+        collected_puuids: set[str] = {puuid for puuid, _ in collected_player_keys}
         collected_puuid_ts: int = load_matchid_puuid_ts()
 
         initial_states = build_initial_player_states(
@@ -138,7 +145,7 @@ class MatchIDLoader:
 
         return MatchIDCollectorState(
             initial_states=initial_states,
-            full_player_puuids=[p.puuid for p in players],
+            full_player_keys=[(p.puuid, p.queue_type) for p in players],
             ts=ctx.ts,
         )
 
@@ -149,13 +156,27 @@ class MatchIDCollector(Collector):
 
     async def collect(
         self, state: MatchIDCollectorState, ctx: OrchestrationContext
-    ) -> AsyncIterator[list[str]]:
-        async for match_ids in stream_match_ids(
+    ) -> AsyncIterator[list[tuple[str, str]]]:
+        _ = ctx
+        raise_if_stop_requested(stage="match_ids:start")
+        async for stream_item in stream_match_ids(
             self.riot_api,
             initial_states=state.initial_states,
         ):
+            raise_if_stop_requested(stage="match_ids:collect")
+            player_key, match_ids, error = stream_item
+            puuid, queue_type = player_key
+            if error is not None:
+                state.failed_player_keys.add(player_key)
+                logger.debug(
+                    "MatchIDCrawlFailed puuid=%s queue_type=%s error=%s",
+                    puuid,
+                    queue_type,
+                    error,
+                )
+                continue
             if match_ids:
-                yield match_ids
+                yield [(mid, queue_type) for mid in match_ids]
 
 
 class MatchIDSaver:
@@ -174,17 +195,34 @@ class MatchIDSaver:
 
     async def save(
         self,
-        items: AsyncIterator[list[str]],
+        items: AsyncIterator[list[tuple[str, str]]],
         state: MatchIDCollectorState,
         ctx: OrchestrationContext,
     ) -> None:
         timestamp_upserted = False
         try:
-            await asyncio.to_thread(
-                insert_puuids_in_batches, state.full_player_puuids, ctx.run_id
-            )
             await insert_matchids_stream_in_batches(items, ctx.run_id)
-            await asyncio.to_thread(upsert_puuid_timestamp, state.ts, ctx.run_id)
+            successful_player_keys = [
+                player_key
+                for player_key in state.full_player_keys
+                if player_key not in state.failed_player_keys
+            ]
+            if state.failed_player_keys:
+                logger.info(
+                    "MatchIDExcludingFailedPlayers failed=%d successful=%d",
+                    len(state.failed_player_keys),
+                    len(successful_player_keys),
+                )
+            await asyncio.to_thread(
+                insert_puuids_in_batches,
+                successful_player_keys,
+                ctx.run_id,
+            )
+            await asyncio.to_thread(
+                upsert_puuid_timestamp,
+                state.ts,
+                ctx.run_id,
+            )
             timestamp_upserted = True
         except Exception:
             await self._delete_with_retry(

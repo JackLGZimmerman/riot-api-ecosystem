@@ -31,6 +31,17 @@ from app.services.riot_api_client.parsers.schema_drift import (
 
 logger = logging.getLogger(__name__)
 
+FRAME_TIMESTAMP_BUCKET_MS = 60_000
+
+
+def nearest_frame_timestamp(timestamp_ms: int) -> int:
+    ts = int(timestamp_ms)
+    if ts <= 0:
+        return 0
+    return ((ts + (FRAME_TIMESTAMP_BUCKET_MS // 2)) // FRAME_TIMESTAMP_BUCKET_MS) * (
+        FRAME_TIMESTAMP_BUCKET_MS
+    )
+
 
 def champion_kill_event_id(
     *,
@@ -95,7 +106,9 @@ class ParticipantStatsParser:
         rows: list[ParticipantStatsRow] = []
 
         for frame in frames:
-            frame_timestamp: NonNegativeInt = (frame.timestamp // 10_000) * 10_000
+            frame_timestamp: NonNegativeInt = cast(
+                NonNegativeInt, nearest_frame_timestamp(frame.timestamp)
+            )
 
             for pf in frame.participantFrames.root.values():
                 champion_stats = pf.championStats.model_dump()
@@ -145,6 +158,7 @@ class BuildingKillRow(TimelineEventRowBase):
     type: Literal["BUILDING_KILL"]
     bounty: NonNegativeInt
     buildingType: str
+    assistingParticipantIds: list[int]
     killerId: int
     laneType: str
     position_x: int
@@ -156,6 +170,7 @@ class BuildingKillRow(TimelineEventRowBase):
 class ChampionKillRow(TimelineEventRowBase):
     type: Literal["CHAMPION_KILL"]
     champion_kill_event_id: str
+    assistingParticipantIds: list[int]
     killerId: int
     victimId: int
     bounty: int
@@ -191,7 +206,7 @@ class DragonSoulGivenRow(TimelineEventRowBase):
 
 class EliteMonsterKillRow(TimelineEventRowBase):
     type: Literal["ELITE_MONSTER_KILL"]
-    assistingParticipantIds: list[int] | None
+    assistingParticipantIds: list[int]
     bounty: int
     killerId: int
     killerTeamId: int
@@ -241,7 +256,7 @@ class EventTypeParser(Generic[RowT]):
         rows: list[RowT] = []
 
         for frame in frames:
-            frame_timestamp = (frame.timestamp // 10_000) * 10_000
+            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
 
             for e in frame.events:
                 if e["type"] != self.EVENT_TYPE:
@@ -276,7 +291,7 @@ class EventPayloadParser(Generic[RowT]):
         rows: list[RowT] = []
 
         for frame in frames:
-            frame_timestamp = (frame.timestamp // 10_000) * 10_000
+            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
 
             for e in frame.events:
                 event_type = e["type"]
@@ -311,7 +326,7 @@ class ChampionKillParser(EventTypeParser[ChampionKillRow]):
         rows: list[ChampionKillRow] = []
 
         for frame in frames:
-            frame_ts = (frame.timestamp // 10_000) * 10_000
+            frame_ts = nearest_frame_timestamp(frame.timestamp)
 
             for e in frame.events:
                 if e["type"] != self.EVENT_TYPE:
@@ -334,6 +349,8 @@ class ChampionKillParser(EventTypeParser[ChampionKillRow]):
                         victimId=int(e2["victimId"]),
                     ),
                 }
+                assisting_ids = e2.get("assistingParticipantIds")
+                row["assistingParticipantIds"] = assisting_ids if assisting_ids else []
 
                 pos = e2.get("position")
                 if pos is not None:
@@ -364,7 +381,7 @@ class ChampionKillDamageInstanceParser:
         rows: list[ChampionKillDamageInstanceRow] = []
 
         for frame in frames:
-            frame_ts = int((frame.timestamp // 10_000) * 10_000)
+            frame_ts = nearest_frame_timestamp(frame.timestamp)
 
             for e in frame.events:
                 if e["type"] != "CHAMPION_KILL":
@@ -418,7 +435,7 @@ class ChampionSpecialKillParser(EventTypeParser[ChampionSpecialKillRow]):
         rows: list[ChampionSpecialKillRow] = []
 
         for frame in frames:
-            frame_timestamp = (frame.timestamp // 10_000) * 10_000
+            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
 
             for e in frame.events:
                 if e["type"] != self.EVENT_TYPE:
@@ -457,7 +474,7 @@ class EliteMonsterKillParser(EventTypeParser[EliteMonsterKillRow]):
         rows: list[EliteMonsterKillRow] = []
 
         for frame in frames:
-            frame_timestamp = (frame.timestamp // 10_000) * 10_000
+            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
 
             for e in frame.events:
                 if e["type"] != self.EVENT_TYPE:
@@ -470,6 +487,8 @@ class EliteMonsterKillParser(EventTypeParser[EliteMonsterKillRow]):
                     "frame_timestamp": frame_timestamp,
                     "matchId": matchId,
                 }
+                if not row["assistingParticipantIds"]:
+                    row["assistingParticipantIds"] = []
 
                 pos = e.get("position")
                 if pos is not None:
@@ -517,7 +536,7 @@ class BuildingKillParser(EventTypeParser[BuildingKillRow]):
         rows: list[BuildingKillRow] = []
 
         for frame in frames:
-            frame_timestamp = (frame.timestamp // 10_000) * 10_000
+            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
 
             for e in frame.events:
                 if e["type"] != self.EVENT_TYPE:
@@ -526,9 +545,12 @@ class BuildingKillParser(EventTypeParser[BuildingKillRow]):
                 row: dict[str, Any] = {
                     **e,
                     "towerType": e.get("towerType"),
+                    "assistingParticipantIds": e.get("assistingParticipantIds", []),
                     "frame_timestamp": frame_timestamp,
                     "matchId": matchId,
                 }
+                if not row["assistingParticipantIds"]:
+                    row["assistingParticipantIds"] = []
 
                 pos = e.get("position")
                 if pos is not None:

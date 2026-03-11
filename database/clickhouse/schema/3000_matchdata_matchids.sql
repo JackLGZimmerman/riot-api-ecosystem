@@ -1,6 +1,8 @@
 CREATE TABLE IF NOT EXISTS game_data.matchdata_matchids (
     run_id UUID,
-    matchid String
+    matchid String,
+    status LowCardinality(String) DEFAULT 'pending',
+    last_error String DEFAULT ''
 )
 ENGINE = MergeTree
-ORDER BY run_id
+ORDER BY (status, matchid, run_id)

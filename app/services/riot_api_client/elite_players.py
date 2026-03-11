@@ -6,7 +6,7 @@ from typing import AsyncIterator
 
 from app.core.config.constants import (
     ENDPOINTS,
-    Region,
+    PLAYERS_REGIONS,
     URLTemplate,
 )
 from app.models import EliteBoundsConfig, LeagueListDTO, MinifiedLeagueEntryDTO
@@ -22,7 +22,7 @@ from app.services.riot_api_client.utils import (
 
 logger = logging.getLogger(__name__)
 
-MAX_IN_FLIGHT: int = 128
+MAX_IN_FLIGHT: int = 64
 
 
 async def stream_elite_players(
@@ -46,7 +46,7 @@ async def stream_elite_players(
                     ),
                     region,
                 )
-                for region in Region
+                for region in PLAYERS_REGIONS
             )
 
     spread_urls = spreading_region(urls)

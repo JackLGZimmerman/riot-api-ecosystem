@@ -11,7 +11,7 @@ from app.core.config.constants.geography import REGION_TO_CONTINENT, Continent, 
 from app.services.riot_api_client.base import RiotAPI
 from app.services.riot_api_client.utils import chunked, spreading
 
-MAX_IN_FLIGHT = 16
+MAX_IN_FLIGHT = 64
 logger = logging.getLogger(__name__)
 
 
