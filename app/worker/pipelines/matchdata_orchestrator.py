@@ -66,7 +66,6 @@ from database.clickhouse.operations.work_state import (
     claim_pending_matchids,
     ensure_matchdata_state_schema,
     mark_matchids_finished,
-    mark_matchids_pending,
     seed_from_latest_matchids,
 )
 
@@ -422,7 +421,7 @@ class MatchDataSaver(Saver):
                     nt: NonTimelineTables = await asyncio.to_thread(
                         self.non_timeline_parser.run, item.raw
                     )
-                    if match_id != "unknown" and nt.metadata:
+                    if match_id != "unknown":
                         stream_successes[match_id].add("non_timeline")
                     await self._buffer_inserts(
                         NON_TIMELINE_INSERTS,
@@ -435,7 +434,7 @@ class MatchDataSaver(Saver):
                     tl: TimelineTables = await asyncio.to_thread(
                         self.timeline_parser.run, item.raw
                     )
-                    if match_id != "unknown" and tl.participantStats:
+                    if match_id != "unknown":
                         stream_successes[match_id].add("timeline")
                     await self._buffer_inserts(
                         TIMELINE_INSERTS,
@@ -473,10 +472,6 @@ class MatchDataSaver(Saver):
                     failed_match_ids[:20],
                 )
                 await self.delete_failed_matchids(ctx.run_id, failed_match_ids)
-                await self.mark_pending_matchids(
-                    failed_match_ids=failed_match_ids,
-                    error="partial failure: missing non_timeline or timeline rows",
-                )
 
             await self.mark_finished_matchids(successful_match_ids)
 
@@ -490,9 +485,10 @@ class MatchDataSaver(Saver):
 
         except Exception as exc:
             await self.rollback_run(ctx.run_id)
-            await self.mark_pending_matchids(
-                failed_match_ids=state.matchids,
-                error=f"batch exception: {exc.__class__.__name__}",
+            logger.exception(
+                "MatchData batch exception run_id=%s: %s",
+                ctx.run_id,
+                exc,
             )
             raise
 
@@ -526,23 +522,6 @@ class MatchDataSaver(Saver):
                 func=delete_by_run_id_and_matchids,
                 args=(table, run_id, match_ids),
             )
-
-    async def mark_pending_matchids(
-        self,
-        *,
-        failed_match_ids: list[str],
-        error: str,
-    ) -> None:
-        await run_sync_with_retry(
-            logger=logger,
-            component="MatchData",
-            op_name="mark_matchids_pending",
-            func=mark_matchids_pending,
-            kwargs={
-                "match_ids": failed_match_ids,
-                "error": error,
-            },
-        )
 
     async def mark_finished_matchids(self, match_ids: list[str]) -> None:
         await run_sync_with_retry(

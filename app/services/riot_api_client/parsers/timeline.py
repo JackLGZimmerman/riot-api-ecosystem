@@ -58,22 +58,22 @@ class ParticipantStatsRow(TypedDict):
     frame_timestamp: NonNegativeInt
     participantId: NonNegativeInt
 
-    abilityHaste: NonNegativeInt
-    abilityPower: NonNegativeInt
+    abilityHaste: int
+    abilityPower: int
     armor: int
     attackDamage: int
-    attackSpeed: NonNegativeInt
+    attackSpeed: int
     ccReduction: int
-    cooldownReduction: NonNegativeInt
-    health: NonNegativeInt
-    healthMax: NonNegativeInt
-    healthRegen: NonNegativeInt
+    cooldownReduction: int
+    health: int
+    healthMax: int
+    healthRegen: int
     magicResist: int
-    movementSpeed: NonNegativeInt
-    power: NonNegativeInt
-    powerMax: NonNegativeInt
-    powerRegen: NonNegativeInt
-    payload: dict[str, NonNegativeInt]
+    movementSpeed: int
+    power: int
+    powerMax: int
+    powerRegen: int
+    payload: dict[str, int]
 
     currentGold: NonNegativeInt
 
@@ -625,6 +625,21 @@ class MatchDataTimelineParsingOrchestrator:
     def _drift_date() -> str:
         return datetime.now(tz=UTC).date().isoformat()
 
+    @staticmethod
+    def _is_abort_unexpected_payload(raw: dict[str, Any]) -> bool:
+        info = raw.get("info")
+        if not isinstance(info, dict):
+            return False
+        if info.get("endOfGameResult") != "Abort_Unexpected":
+            return False
+        frames = info.get("frames")
+        if not isinstance(frames, list) or not frames:
+            return True
+        first_frame = frames[0]
+        return isinstance(first_frame, dict) and (
+            first_frame.get("participantFrames") is None
+        )
+
     def run(self, raw: dict[str, Any]) -> TimelineTables:
         metadata_raw = raw.get("metadata", {})
         match_id = (
@@ -634,6 +649,25 @@ class MatchDataTimelineParsingOrchestrator:
         )
         drift_date = self._drift_date()
         timeline_drift(raw, match_id=match_id, drift_date=drift_date)
+
+        if self._is_abort_unexpected_payload(raw):
+            logger.warning(
+                "TimelineAbortUnexpected match_id=%s date=%s; skipping timeline rows.",
+                match_id,
+                drift_date,
+            )
+            return TimelineTables(
+                participantStats=[],
+                buildingKill=[],
+                championKill=[],
+                championSpecialKill=[],
+                dragonSoulGiven=[],
+                eliteMonsterKill=[],
+                payloadEvents=[],
+                turretPlateDestroyed=[],
+                championKillVictimDamageDealt=[],
+                championKillVictimDamageReceived=[],
+            )
 
         try:
             tl = Timeline.model_validate(raw)
@@ -670,22 +704,10 @@ class MatchDataTimelineParsingOrchestrator:
                 errs[-1].get("input") if errs else None,
             )
             logger.warning(
-                "Skipping timeline payload for match_id=%s due to validation errors "
-                "during initial schema tuning.",
+                "Aborting timeline payload for match_id=%s due to validation errors.",
                 match_id,
             )
-            # TODO: Re-enable hard failure (raise ValueError) after initial schema
-            # tuning is complete and drift has stabilized.
-            return TimelineTables(
-                participantStats=[],
-                buildingKill=[],
-                championKill=[],
-                championSpecialKill=[],
-                dragonSoulGiven=[],
-                eliteMonsterKill=[],
-                payloadEvents=[],
-                turretPlateDestroyed=[],
-                championKillVictimDamageDealt=[],
-                championKillVictimDamageReceived=[],
-            )
+            raise ValueError(
+                f"Schema validation failed for timeline payload match_id={match_id}"
+            ) from e
         return tables

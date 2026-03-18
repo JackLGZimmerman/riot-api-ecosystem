@@ -1,0 +1,63 @@
+groups:
+  - group_id: grp_support
+    group_name: Support
+    parent_group_id: null
+    is_active: true
+  - group_id: grp_support_engage
+    group_name: Support Engage
+    parent_group_id: grp_support
+    is_active: true
+  - group_id: grp_support_leona
+    group_name: Leona Support
+    parent_group_id: grp_support_engage
+    is_active: true
+
+members:
+  - member_id: mem_support_any
+    team_position: UTILITY
+    champion_id: null
+    build_scope: null
+    is_active: true
+  - member_id: mem_leona_support
+    team_position: UTILITY
+    champion_id: 89
+    build_scope: null
+    is_active: true
+
+group_members:
+  - group_id: grp_support
+    member_id: mem_support_any
+    is_active: true
+  - group_id: grp_support_leona
+    member_id: mem_leona_support
+    is_active: true
+
+metrics:
+  - metric_id: m_pick_rate
+    metric_name: Pick Rate
+    metric_kind: existing
+    default_aggregation: avg
+    is_active: true
+  - metric_id: m_engage_share
+    metric_name: Engage Share
+    metric_kind: derived
+    default_aggregation: avg
+    is_active: true
+  - metric_id: m_leona_combo_rate
+    metric_name: Leona Combo Rate
+    metric_kind: derived
+    default_aggregation: avg
+    is_active: true
+
+group_metrics:
+  - group_id: grp_support
+    metric_id: m_pick_rate
+    is_active: true
+  - group_id: grp_support_engage
+    metric_id: m_engage_share
+    is_active: true
+  - group_id: grp_support_leona
+    metric_id: m_leona_combo_rate
+    is_active: true
+
+metric_dependencies: []

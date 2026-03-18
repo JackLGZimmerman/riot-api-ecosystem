@@ -14,8 +14,9 @@ from pydantic import (
 
 class Position(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    x: NonNegativeInt
-    y: NonNegativeInt
+    # Riot occasionally emits negative coordinates in timeline payloads.
+    x: int
+    y: int
 
 
 class EventBase(TypedDict):
@@ -266,31 +267,31 @@ Event = Annotated[
 
 class ChampionStats(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    abilityHaste: NonNegativeInt
+    abilityHaste: int
     abilityPower: int
     armor: int
-    armorPen: NonNegativeInt
-    armorPenPercent: NonNegativeInt
+    armorPen: int
+    armorPenPercent: int
     attackDamage: int
-    attackSpeed: NonNegativeInt
-    bonusArmorPenPercent: NonNegativeInt
-    bonusMagicPenPercent: NonNegativeInt
+    attackSpeed: int
+    bonusArmorPenPercent: int
+    bonusMagicPenPercent: int
     ccReduction: int
-    cooldownReduction: NonNegativeInt
-    health: NonNegativeInt
-    healthMax: NonNegativeInt
-    healthRegen: NonNegativeInt
-    lifesteal: NonNegativeInt
-    magicPen: NonNegativeInt
-    magicPenPercent: NonNegativeInt
+    cooldownReduction: int
+    health: int
+    healthMax: int
+    healthRegen: int
+    lifesteal: int
+    magicPen: int
+    magicPenPercent: int
     magicResist: int
-    movementSpeed: NonNegativeInt
-    omnivamp: NonNegativeInt
-    physicalVamp: NonNegativeInt
-    power: NonNegativeInt
-    powerMax: NonNegativeInt
-    powerRegen: NonNegativeInt
-    spellVamp: NonNegativeInt
+    movementSpeed: int
+    omnivamp: int
+    physicalVamp: int
+    power: int
+    powerMax: int
+    powerRegen: int
+    spellVamp: int
 
 
 class DamageStats(BaseModel):

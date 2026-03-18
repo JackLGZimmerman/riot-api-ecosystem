@@ -168,7 +168,7 @@ class MatchIDCollector(Collector):
             puuid, queue_type = player_key
             if error is not None:
                 state.failed_player_keys.add(player_key)
-                logger.debug(
+                logger.warning(
                     "MatchIDCrawlFailed puuid=%s queue_type=%s error=%s",
                     puuid,
                     queue_type,

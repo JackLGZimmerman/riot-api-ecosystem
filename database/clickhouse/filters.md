@@ -16,6 +16,10 @@ game_data.participant_stats
 ## Filtered Dataset Pipeline
 - Single SQL file:
   - `database/clickhouse/schema/5099_filtered_pipeline_all.sql`
+- Consolidation note:
+  - Legacy per-table filtered schema files `5101`-`5124` were removed.
+  - `5099_filtered_pipeline_all.sql` is the canonical schema entrypoint for filtered base tables.
+  - `5125_matchup_windows_3v3.sql` is still separate and should be applied only when that derived dataset is needed.
 - Apply in one step:
   - `docker exec -i clickhouse bash -lc "clickhouse-client --multiquery" < database/clickhouse/schema/5099_filtered_pipeline_all.sql`
 - Note:

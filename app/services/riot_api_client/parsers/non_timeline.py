@@ -339,6 +339,7 @@ class TabulatedParticipantStats(TypedDict):
 
     roleBoundItem: int | None
     bountyLevel: int | None
+    playerBehaviorIsHeroInCombat: NonNegativeInt | None
 
     timePlayed: NonNegativeInt
     totalTimeSpentDead: NonNegativeInt
@@ -389,7 +390,7 @@ class ParticipantStatsParser:
     ) -> list[TabulatedParticipantStats]:
         rows: list[TabulatedParticipantStats] = []
 
-        complex = {"missions", "challenges", "perks"}
+        complex = {"missions", "challenges", "perks", "PlayerBehavior"}
         simple = {
             "PlayerScore0",
             "PlayerScore1",
@@ -425,6 +426,12 @@ class ParticipantStatsParser:
         for p in participants:
             data = p.model_dump(
                 exclude=exclude_fields,
+            )
+            player_behavior = p.PlayerBehavior
+            data["playerBehaviorIsHeroInCombat"] = (
+                player_behavior.PlayerBehavior_IsHeroInCombat
+                if player_behavior is not None
+                else None
             )
             data["matchId"] = matchId
             for field_name in self._UINT8_CLAMP_FIELDS:
@@ -666,6 +673,13 @@ class MatchDataNonTimelineParsingOrchestrator:
 
         return datetime.now(tz=UTC).date().isoformat()
 
+    @staticmethod
+    def _is_abort_unexpected_payload(raw: dict[str, Any]) -> bool:
+        info = raw.get("info")
+        return isinstance(info, dict) and (
+            info.get("endOfGameResult") == "Abort_Unexpected"
+        )
+
     def run(self, raw: dict[str, Any]) -> NonTimelineTables:
         metadata_raw = raw.get("metadata", {})
         match_id = (
@@ -675,6 +689,24 @@ class MatchDataNonTimelineParsingOrchestrator:
         )
         drift_date = self._drift_date(raw)
         non_timeline(raw, match_id=match_id, drift_date=drift_date)
+
+        if self._is_abort_unexpected_payload(raw):
+            logger.warning(
+                "NonTimelineAbortUnexpected match_id=%s date=%s; skipping non-timeline rows.",
+                match_id,
+                drift_date,
+            )
+            return NonTimelineTables(
+                metadata=[],
+                game_info=[],
+                bans=[],
+                feats=[],
+                objectives=[],
+                participant_stats=[],
+                participant_challenges=[],
+                participant_perk_values=[],
+                participant_perk_ids=[],
+            )
 
         try:
             nt = NonTimeline.model_validate(raw)
@@ -711,21 +743,10 @@ class MatchDataNonTimelineParsingOrchestrator:
                 errs[-1].get("input") if errs else None,
             )
             logger.warning(
-                "Skipping non_timeline payload for match_id=%s due to validation errors "
-                "during initial schema tuning.",
+                "Aborting non_timeline payload for match_id=%s due to validation errors.",
                 match_id,
             )
-            # TODO: Re-enable hard failure (raise ValueError) after initial schema
-            # tuning is complete and drift has stabilized.
-            return NonTimelineTables(
-                metadata=[],
-                game_info=[],
-                bans=[],
-                feats=[],
-                objectives=[],
-                participant_stats=[],
-                participant_challenges=[],
-                participant_perk_values=[],
-                participant_perk_ids=[],
-            )
+            raise ValueError(
+                f"Schema validation failed for non_timeline payload match_id={match_id}"
+            ) from e
         return tables

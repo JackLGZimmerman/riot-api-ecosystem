@@ -205,6 +205,11 @@ class Perks(BaseModel):
     styles: list[PerkStyle]
 
 
+class PlayerBehaviorData(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    PlayerBehavior_IsHeroInCombat: NonNegativeInt | None = None
+
+
 class Participant(BaseModel):
     model_config = ConfigDict(extra="ignore")
     PlayerScore0: NonNegativeInt | None = None
@@ -311,6 +316,7 @@ class Participant(BaseModel):
     playerAugment4: NonNegativeInt | None = None
     playerAugment5: NonNegativeInt | None = None
     playerAugment6: NonNegativeInt | None = None
+    PlayerBehavior: PlayerBehaviorData | None = None  # Schema drift, nullable nested participant behavior payload.
     playerSubteamId: NonNegativeInt
     profileIcon: NonNegativeInt
     pushPings: NonNegativeInt

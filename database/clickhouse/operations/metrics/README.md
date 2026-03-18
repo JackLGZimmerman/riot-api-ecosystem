@@ -10,6 +10,9 @@ Registry files:
 - `registry/individuals.md` 
 
 Assignment templates:
+- `scripts/resolve_group_metric_table.sql`
+
+Planned helper scripts:
 - `scripts/assign_metric_to_group.sql`
 - `scripts/assign_metric_to_individual.sql`
 - `scripts/resolve_effective_metrics.sql`
