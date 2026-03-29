@@ -16,7 +16,9 @@ deployments:
     tags: []
     description: null
     schedule: null
-    concurrency_limit: 1
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
     entrypoint: app/worker/pipelines/prefect_flow.py:riot_pipeline
     parameters: {}
     enforce_parameter_schema: true

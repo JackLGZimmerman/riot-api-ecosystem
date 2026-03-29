@@ -2,8 +2,17 @@
 
 set -euo pipefail
 
+WORK_POOL_NAME="${WORK_POOL_NAME:-docker-pool}"
+WORK_QUEUE_NAME="${WORK_QUEUE_NAME:-default}"
+AUTOMATION_NAME="${AUTOMATION_NAME:-}"
+
 PREFECT_API_URL="http://localhost:4200/api" \
-  timeout 20s .venv/bin/prefect deployment schedule pause --all || true
+  timeout 20s .venv/bin/prefect work-queue pause "$WORK_QUEUE_NAME" -p "$WORK_POOL_NAME" || true
+
+if [ -n "$AUTOMATION_NAME" ]; then
+  PREFECT_API_URL="http://localhost:4200/api" \
+    timeout 20s .venv/bin/prefect automation pause "$AUTOMATION_NAME" || true
+fi
 
 mapfile -t flow_run_containers < <(
   docker ps -q --filter label=io.prefect.flow-run-id

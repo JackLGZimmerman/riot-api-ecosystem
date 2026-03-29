@@ -2,125 +2,119 @@
 
 set -euo pipefail
 
-compose_down_args=(--remove-orphans)
-cleanup_message="Cancelled during restart cleanup before launching a new deployment run."
-completion_message="Restart complete"
+WORK_POOL_NAME="${WORK_POOL_NAME:-docker-pool}"
+WORK_QUEUE_NAME="${WORK_QUEUE_NAME:-default}"
+AUTOMATION_NAME="${AUTOMATION_NAME:-}"
 
-if [ "${1:-}" = "--fresh" ]; then
-  compose_down_args=(-v --remove-orphans)
-  cleanup_message="Cancelled during fresh-start cleanup before launching a new deployment run."
-  completion_message="Fresh start complete"
-elif [ "$#" -ne 0 ]; then
-  echo "Usage: $0 [--fresh]" >&2
-  exit 2
-fi
+case "${1:-}" in
+  "")
+    fresh=0
+    ;;
+  --fresh)
+    fresh=1
+    ;;
+  *)
+    echo "Usage: $0 [--fresh]" >&2
+    exit 2
+    ;;
+esac
 
-clear_stale_prefect_runs() {
-  docker exec \
-    -e CANCEL_MESSAGE="$cleanup_message" \
-    prefect-server \
-    python - <<'PY'
-import os
-import requests
-
-base = "http://localhost:4200/api"
-deployment_name = "riot-pipeline/riot-pipeline"
-cancel_message = os.environ["CANCEL_MESSAGE"]
-
-deployment = requests.get(f"{base}/deployments/name/{deployment_name}", timeout=30)
-if deployment.status_code == 404:
-    print("No existing deployment found; skipping stale-run cleanup.")
-    raise SystemExit(0)
-deployment.raise_for_status()
-deployment_id = deployment.json()["id"]
-
-runs = requests.post(
-    f"{base}/flow_runs/filter",
-    json={"flow_runs": {"state": {"type": {"any_": ["RUNNING", "PENDING", "SCHEDULED", "CANCELLING"]}}}},
-    timeout=60,
-)
-runs.raise_for_status()
-
-stale_runs = [run for run in runs.json() if run.get("deployment_id") == deployment_id]
-if not stale_runs:
-    print("No non-terminal runs found for deployment.")
-    raise SystemExit(0)
-
-for run in stale_runs:
-    requests.post(
-        f"{base}/flow_runs/{run['id']}/set_state",
-        json={
-            "state": {
-                "type": "CANCELLED",
-                "name": "Cancelled",
-                "message": cancel_message,
-            },
-            "force": True,
-        },
-        timeout=60,
-    ).raise_for_status()
-    print(f"Cancelled stale flow run {run['id']} ({run['state_type']}/{run['state_name']}).")
-PY
-}
-
-echo "========================================"
-echo "Ensuring local log files are writable..."
-echo "========================================"
-mkdir -p app/core/logging/logs/schema_drift
 for path in \
   app/core/logging/logs/app.log.jsonl \
   app/core/logging/logs/schema_drift/non_timeline.log.jsonl \
   app/core/logging/logs/schema_drift/timeline.log.jsonl
 do
-  [ ! -e "$path" ] || [ -w "$path" ] || rm -f "$path"
+  mkdir -p "$(dirname "$path")"
+  rm -f "$path"
   touch "$path"
   chmod u+rw "$path"
 done
 
-echo "========================================"
-echo "Attempting graceful pipeline stop..."
-echo "========================================"
+echo "Stopping current pipeline"
 ./stop_pipeline_safely.sh || true
 
-echo "========================================"
-if [ "${1:-}" = "--fresh" ]; then
-  echo "Fresh start: stopping containers and removing volumes..."
+echo "Resetting containers"
+if [ "$fresh" -eq 1 ]; then
+  docker compose down -v --remove-orphans
 else
-  echo "Restart: stopping containers (preserving volumes)..."
+  docker compose down --remove-orphans
 fi
-echo "========================================"
-docker compose down "${compose_down_args[@]}"
 
-echo "========================================"
-echo "Cleaning old Prefect flow-run containers..."
-echo "========================================"
 docker ps -aq --filter label=io.prefect.flow-run-id | xargs -r docker rm -f
 
-echo "========================================"
-echo "Starting containers with rebuild and waiting for health..."
-echo "========================================"
-docker compose up -d --build --wait
-
-echo "========================================"
-echo "Clearing stale Prefect runs for deployment..."
-echo "========================================"
-clear_stale_prefect_runs
-
-echo "========================================"
-echo "Building riot-pipeline image (no cache)..."
-echo "========================================"
+echo "Building flow image"
 docker build --no-cache -t riot-pipeline:latest .
 
-echo "========================================"
-echo "Deploying Prefect flow..."
-echo "========================================"
+echo "Starting services"
+docker compose up -d --build --wait
+
+echo "Cancelling old Prefect runs"
+docker exec prefect-server python - <<'PY'
+import requests
+import time
+
+base = "http://localhost:4200/api"
+deployment_name = "riot-pipeline/riot-pipeline"
+message = "Cancelled during restart cleanup before launching a new deployment run."
+
+response = requests.get(f"{base}/deployments/name/{deployment_name}", timeout=30)
+if response.status_code == 404:
+    raise SystemExit(0)
+response.raise_for_status()
+deployment_id = response.json()["id"]
+
+def fetch_runs():
+    response = requests.post(
+        f"{base}/flow_runs/filter",
+        json={"flow_runs": {"state": {"type": {"any_": ["RUNNING", "PENDING", "SCHEDULED", "CANCELLING"]}}}},
+        timeout=60,
+    )
+    response.raise_for_status()
+    return [run for run in response.json() if run.get("deployment_id") == deployment_id]
+
+def active_slots():
+    response = requests.get(f"{base}/deployments/{deployment_id}", timeout=30)
+    response.raise_for_status()
+    return ((response.json().get("global_concurrency_limit") or {}).get("active_slots") or 0)
+
+for _ in range(30):
+    runs = fetch_runs()
+    for run in runs:
+        cancel = requests.post(
+            f"{base}/flow_runs/{run['id']}/set_state",
+            json={
+                "state": {
+                    "type": "CANCELLED",
+                    "name": "Cancelled",
+                    "message": message,
+                },
+                "force": True,
+            },
+            timeout=60,
+        )
+        cancel.raise_for_status()
+        if cancel.json().get("status") != "ACCEPT":
+            raise SystemExit(f"Failed to cancel {run['id']}: {cancel.text}")
+
+    if not fetch_runs() and active_slots() == 0:
+        raise SystemExit(0)
+
+    time.sleep(2)
+
+raise SystemExit("Non-terminal Prefect runs remain after cleanup.")
+PY
+
+echo "Deploying flow"
 .venv/bin/prefect --no-prompt deploy --prefect-file prefect.yaml
 
-echo "========================================"
-echo "Running Prefect deployment..."
-echo "========================================"
-.venv/bin/prefect deployment run 'riot-pipeline/riot-pipeline'
+echo "Resuming Prefect intake"
+PREFECT_API_URL="http://localhost:4200/api" \
+  timeout 20s .venv/bin/prefect work-queue resume "$WORK_QUEUE_NAME" -p "$WORK_POOL_NAME" || true
 
-echo "========================================"
-echo "$completion_message"
-echo "========================================"
+if [ -n "$AUTOMATION_NAME" ]; then
+  PREFECT_API_URL="http://localhost:4200/api" \
+    timeout 20s .venv/bin/prefect automation resume "$AUTOMATION_NAME" || true
+fi
+
+echo "Starting new run"
+.venv/bin/prefect deployment run 'riot-pipeline/riot-pipeline'

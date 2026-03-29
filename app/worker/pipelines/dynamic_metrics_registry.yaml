@@ -1,63 +1,75 @@
 groups:
-  - group_id: grp_support
-    group_name: Support
-    parent_group_id: null
+  - group_name: Support
+    parent_group_name: null
     is_active: true
-  - group_id: grp_support_engage
-    group_name: Support Engage
-    parent_group_id: grp_support
+  - group_name: Support Engage
+    parent_group_name: Support
     is_active: true
-  - group_id: grp_support_leona
-    group_name: Leona Support
-    parent_group_id: grp_support_engage
+  - group_name: Leona Support
+    parent_group_name: Support Engage
     is_active: true
 
 members:
-  - member_id: mem_support_any
+  - member_name: Any Support
     team_position: UTILITY
     champion_id: null
     build_scope: null
     is_active: true
-  - member_id: mem_leona_support
+  - member_name: Leona Support
     team_position: UTILITY
     champion_id: 89
     build_scope: null
     is_active: true
+  - member_name: Nautilus Support
+    team_position: UTILITY
+    champion_id: 111
+    build_scope: null
+    is_active: true
 
 group_members:
-  - group_id: grp_support
-    member_id: mem_support_any
+  - group_name: Support
+    member_name: Any Support
     is_active: true
-  - group_id: grp_support_leona
-    member_id: mem_leona_support
+  - group_name: Support Engage
+    member_name: Leona Support
+    is_active: true
+  - group_name: Support Engage
+    member_name: Nautilus Support
+    is_active: true
+  - group_name: Leona Support
+    member_name: Leona Support
     is_active: true
 
 metrics:
-  - metric_id: m_pick_rate
-    metric_name: Pick Rate
+  - metric_name: Vision Score Per Min
     metric_kind: existing
     default_aggregation: avg
     is_active: true
-  - metric_id: m_engage_share
-    metric_name: Engage Share
+  - metric_name: CC Score Per Min
     metric_kind: derived
     default_aggregation: avg
     is_active: true
-  - metric_id: m_leona_combo_rate
-    metric_name: Leona Combo Rate
+  - metric_name: Engage Success Rate
     metric_kind: derived
+    default_aggregation: avg
+    is_active: true
+  - metric_name: Damage Taken Per Min
+    metric_kind: existing
     default_aggregation: avg
     is_active: true
 
 group_metrics:
-  - group_id: grp_support
-    metric_id: m_pick_rate
+  - group_name: Support
+    metric_name: Vision Score Per Min
     is_active: true
-  - group_id: grp_support_engage
-    metric_id: m_engage_share
+  - group_name: Support Engage
+    metric_name: CC Score Per Min
     is_active: true
-  - group_id: grp_support_leona
-    metric_id: m_leona_combo_rate
+  - group_name: Support Engage
+    metric_name: Engage Success Rate
+    is_active: true
+  - group_name: Leona Support
+    metric_name: Damage Taken Per Min
     is_active: true
 
 metric_dependencies: []

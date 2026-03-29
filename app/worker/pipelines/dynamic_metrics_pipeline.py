@@ -1,23 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
-
-Aggregation = Literal["avg", "sum", "min", "max", "count"]
-MetricKind = Literal["existing", "derived", "composite"]
+from collections import defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
 class Group:
-    group_id: str
     group_name: str
-    parent_group_id: str | None = None
+    parent_group_name: str | None = None
     is_active: bool = True
 
 
 @dataclass(frozen=True)
 class MemberRule:
-    member_id: str
+    member_name: str
     team_position: str | None = None
     champion_id: int | None = None
     build_scope: str | None = None
@@ -26,56 +24,56 @@ class MemberRule:
 
 @dataclass(frozen=True)
 class GroupMember:
-    group_id: str
-    member_id: str
+    group_name: str
+    member_name: str
     is_active: bool = True
 
 
 @dataclass(frozen=True)
 class MetricDefinition:
-    metric_id: str
     metric_name: str
-    metric_kind: MetricKind
-    default_aggregation: Aggregation = "avg"
+    metric_kind: str
+    default_aggregation: str
     is_active: bool = True
 
 
 @dataclass(frozen=True)
 class GroupMetric:
-    group_id: str
-    metric_id: str
+    group_name: str
+    metric_name: str
     is_active: bool = True
 
 
 @dataclass(frozen=True)
 class MetricDependency:
-    metric_id: str
-    depends_on_metric_id: str
+    metric_name: str
+    depends_on_metric_name: str
     role: str
 
 
 @dataclass(frozen=True)
 class MetadataSnapshot:
-    groups: tuple[Group, ...]
-    members: tuple[MemberRule, ...]
-    group_members: tuple[GroupMember, ...]
-    metrics: tuple[MetricDefinition, ...]
-    group_metrics: tuple[GroupMetric, ...]
-    metric_dependencies: tuple[MetricDependency, ...] = ()
+    groups: list[Group] = field(default_factory=list)
+    members: list[MemberRule] = field(default_factory=list)
+    group_members: list[GroupMember] = field(default_factory=list)
+    metrics: list[MetricDefinition] = field(default_factory=list)
+    group_metrics: list[GroupMetric] = field(default_factory=list)
+    metric_dependencies: list[MetricDependency] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class ResolvedBranch:
-    selected_group_id: str
-    source_group_id: str
+    selected_group_name: str
+    source_group_name: str
+    depth: int
     path: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class ResolvedMember:
-    selected_group_id: str
-    source_group_id: str
-    matched_member_id: str
+    selected_group_name: str
+    source_group_name: str
+    matched_member_name: str
     team_position: str | None
     champion_id: int | None
     build_scope: str | None
@@ -84,194 +82,235 @@ class ResolvedMember:
 
 @dataclass(frozen=True)
 class ResolvedMetric:
-    selected_group_id: str
-    source_group_id: str
-    metric_id: str
+    selected_group_name: str
+    source_group_name: str
     metric_name: str
-    metric_kind: MetricKind
-    default_aggregation: Aggregation
-    declared_by_group_id: str
+    metric_kind: str
+    default_aggregation: str
+    declared_by_group_name: str
 
 
 @dataclass(frozen=True)
 class DynamicMetricExecutionPlan:
-    selected_group_id: str
-    branches: tuple[ResolvedBranch, ...]
-    members: tuple[ResolvedMember, ...]
-    metrics: tuple[ResolvedMetric, ...]
-    metric_dependencies: tuple[MetricDependency, ...]
+    selected_group_name: str
+    branches: list[ResolvedBranch]
+    members: list[ResolvedMember]
+    metrics: list[ResolvedMetric]
+    metric_dependencies: list[MetricDependency]
+
+
+def load_metadata_snapshot(path: str | Path) -> MetadataSnapshot:
+    import yaml
+
+    raw = yaml.safe_load(Path(path).read_text()) or {}
+
+    snapshot = MetadataSnapshot(
+        groups=[Group(**row) for row in raw.get("groups", [])],
+        members=[MemberRule(**row) for row in raw.get("members", [])],
+        group_members=[GroupMember(**row) for row in raw.get("group_members", [])],
+        metrics=[MetricDefinition(**row) for row in raw.get("metrics", [])],
+        group_metrics=[GroupMetric(**row) for row in raw.get("group_metrics", [])],
+        metric_dependencies=[
+            MetricDependency(**row) for row in raw.get("metric_dependencies", [])
+        ],
+    )
+
+    _ensure_unique_names(snapshot.groups, key="group_name", label="group")
+    _ensure_unique_names(snapshot.members, key="member_name", label="member")
+    _ensure_unique_names(snapshot.metrics, key="metric_name", label="metric")
+    return snapshot
 
 
 def build_execution_plan(
     snapshot: MetadataSnapshot,
     *,
-    selected_group_id: str,
+    selected_group_name: str,
 ) -> DynamicMetricExecutionPlan:
-    groups_by_id = {
-        group.group_id: group for group in snapshot.groups if group.is_active
+    groups_by_name = {
+        group.group_name: group for group in snapshot.groups if group.is_active
     }
-    if selected_group_id not in groups_by_id:
-        raise KeyError(f"Unknown selected_group_id: {selected_group_id}")
+    if selected_group_name not in groups_by_name:
+        raise KeyError(f"Unknown selected_group_name: {selected_group_name}")
 
-    children_by_parent: dict[str, list[str]] = {}
-    for group in groups_by_id.values():
-        if group.parent_group_id is None:
+    children_by_parent: dict[str, list[str]] = defaultdict(list)
+    for group in groups_by_name.values():
+        if group.parent_group_name is None:
             continue
-        children_by_parent.setdefault(group.parent_group_id, []).append(group.group_id)
+        children_by_parent[group.parent_group_name].append(group.group_name)
 
-    members_by_id = {
-        member.member_id: member for member in snapshot.members if member.is_active
+    members_by_name = {
+        member.member_name: member for member in snapshot.members if member.is_active
     }
-    group_members_by_group: dict[str, list[GroupMember]] = {}
+    group_members_by_group: dict[str, list[str]] = defaultdict(list)
     for group_member in snapshot.group_members:
-        if group_member.is_active:
-            group_members_by_group.setdefault(group_member.group_id, []).append(
-                group_member
-            )
+        if not group_member.is_active:
+            continue
+        group_members_by_group[group_member.group_name].append(group_member.member_name)
 
-    metrics_by_id = {
-        metric.metric_id: metric for metric in snapshot.metrics if metric.is_active
+    metrics_by_name = {
+        metric.metric_name: metric for metric in snapshot.metrics if metric.is_active
     }
-    group_metrics_by_group: dict[str, list[GroupMetric]] = {}
+    group_metrics_by_group: dict[str, list[str]] = defaultdict(list)
     for group_metric in snapshot.group_metrics:
-        if group_metric.is_active:
-            group_metrics_by_group.setdefault(group_metric.group_id, []).append(
-                group_metric
-            )
+        if not group_metric.is_active:
+            continue
+        group_metrics_by_group[group_metric.group_name].append(group_metric.metric_name)
 
     branches = _resolve_branches(
-        selected_group_id=selected_group_id,
+        selected_group_name=selected_group_name,
         children_by_parent=children_by_parent,
     )
-    resolved_members = _resolve_members(
+    members = _resolve_members(
         branches=branches,
         group_members_by_group=group_members_by_group,
-        members_by_id=members_by_id,
+        members_by_name=members_by_name,
     )
-    resolved_metrics = _resolve_metrics(
+    metrics = _resolve_metrics(
         branches=branches,
         group_metrics_by_group=group_metrics_by_group,
-        metrics_by_id=metrics_by_id,
+        metrics_by_name=metrics_by_name,
     )
 
-    metric_ids = {metric.metric_id for metric in resolved_metrics}
-    metric_dependencies = tuple(
+    active_metric_names = {metric.metric_name for metric in metrics}
+    metric_dependencies = [
         dependency
         for dependency in snapshot.metric_dependencies
-        if dependency.metric_id in metric_ids
-    )
+        if dependency.metric_name in active_metric_names
+        and dependency.depends_on_metric_name in active_metric_names
+    ]
 
     return DynamicMetricExecutionPlan(
-        selected_group_id=selected_group_id,
+        selected_group_name=selected_group_name,
         branches=branches,
-        members=resolved_members,
-        metrics=resolved_metrics,
+        members=members,
+        metrics=metrics,
         metric_dependencies=metric_dependencies,
     )
 
 
 def _resolve_branches(
     *,
-    selected_group_id: str,
+    selected_group_name: str,
     children_by_parent: dict[str, list[str]],
-) -> tuple[ResolvedBranch, ...]:
+) -> list[ResolvedBranch]:
     branches: list[ResolvedBranch] = []
 
-    def walk(group_id: str, path: tuple[str, ...]) -> None:
-        if group_id in path:
-            cycle = " -> ".join((*path, group_id))
-            raise ValueError(f"Group cycle detected: {cycle}")
+    def visit(group_name: str, path: tuple[str, ...]) -> None:
+        if group_name in path[:-1]:
+            cycle = " -> ".join(path + (group_name,))
+            raise ValueError(f"Cycle detected in group definitions: {cycle}")
 
-        branch_path = (*path, group_id)
         branches.append(
             ResolvedBranch(
-                selected_group_id=selected_group_id,
-                source_group_id=group_id,
-                path=branch_path,
+                selected_group_name=selected_group_name,
+                source_group_name=group_name,
+                depth=len(path) - 1,
+                path=path,
             )
         )
 
-        for child_group_id in children_by_parent.get(group_id, ()):
-            walk(child_group_id, branch_path)
+        for child_group_name in sorted(children_by_parent.get(group_name, [])):
+            visit(child_group_name, path + (child_group_name,))
 
-    walk(selected_group_id, ())
-    return tuple(branches)
+    visit(selected_group_name, (selected_group_name,))
+    return branches
 
 
 def _resolve_members(
     *,
-    branches: tuple[ResolvedBranch, ...],
-    group_members_by_group: dict[str, list[GroupMember]],
-    members_by_id: dict[str, MemberRule],
-) -> tuple[ResolvedMember, ...]:
+    branches: list[ResolvedBranch],
+    group_members_by_group: dict[str, list[str]],
+    members_by_name: dict[str, MemberRule],
+) -> list[ResolvedMember]:
     resolved: list[ResolvedMember] = []
 
     for branch in branches:
-        deduped: dict[str, ResolvedMember] = {}
-        for group_id in branch.path:
-            for group_member in group_members_by_group.get(group_id, ()):
-                member = members_by_id.get(group_member.member_id)
-                if member is None:
-                    continue
-                resolved_member = ResolvedMember(
-                    selected_group_id=branch.selected_group_id,
-                    source_group_id=branch.source_group_id,
-                    matched_member_id=member.member_id,
-                    team_position=member.team_position,
-                    champion_id=member.champion_id,
-                    build_scope=member.build_scope,
-                    specificity=_member_specificity(member),
-                )
-                current = deduped.get(member.member_id)
-                if current is None or resolved_member.specificity > current.specificity:
-                    deduped[member.member_id] = resolved_member
-        resolved.extend(
-            sorted(
-                deduped.values(),
-                key=lambda item: (-item.specificity, item.matched_member_id),
-            )
-        )
+        for group_name in reversed(branch.path):
+            member_names = group_members_by_group.get(group_name, [])
+            if not member_names:
+                continue
 
-    return tuple(resolved)
+            seen_member_names: set[str] = set()
+            branch_members: list[ResolvedMember] = []
+            for member_name in member_names:
+                if member_name in seen_member_names:
+                    continue
+                seen_member_names.add(member_name)
+
+                member = members_by_name.get(member_name)
+                if member is None:
+                    raise KeyError(f"Unknown member_name: {member_name}")
+
+                branch_members.append(
+                    ResolvedMember(
+                        selected_group_name=branch.selected_group_name,
+                        source_group_name=branch.source_group_name,
+                        matched_member_name=member.member_name,
+                        team_position=member.team_position,
+                        champion_id=member.champion_id,
+                        build_scope=member.build_scope,
+                        specificity=_member_specificity(member),
+                    )
+                )
+
+            branch_members.sort(
+                key=lambda member: (-member.specificity, member.matched_member_name)
+            )
+            resolved.extend(branch_members)
+            break
+
+    return resolved
 
 
 def _resolve_metrics(
     *,
-    branches: tuple[ResolvedBranch, ...],
-    group_metrics_by_group: dict[str, list[GroupMetric]],
-    metrics_by_id: dict[str, MetricDefinition],
-) -> tuple[ResolvedMetric, ...]:
+    branches: list[ResolvedBranch],
+    group_metrics_by_group: dict[str, list[str]],
+    metrics_by_name: dict[str, MetricDefinition],
+) -> list[ResolvedMetric]:
     resolved: list[ResolvedMetric] = []
 
     for branch in branches:
-        effective_by_metric_id: dict[str, ResolvedMetric] = {}
-        for group_id in branch.path:
-            for group_metric in group_metrics_by_group.get(group_id, ()):
-                metric = metrics_by_id.get(group_metric.metric_id)
+        effective_metrics: dict[str, ResolvedMetric] = {}
+
+        for group_name in branch.path:
+            for metric_name in group_metrics_by_group.get(group_name, []):
+                metric = metrics_by_name.get(metric_name)
                 if metric is None:
-                    continue
-                effective_by_metric_id[metric.metric_id] = ResolvedMetric(
-                    selected_group_id=branch.selected_group_id,
-                    source_group_id=branch.source_group_id,
-                    metric_id=metric.metric_id,
+                    raise KeyError(f"Unknown metric_name: {metric_name}")
+
+                effective_metrics[metric.metric_name] = ResolvedMetric(
+                    selected_group_name=branch.selected_group_name,
+                    source_group_name=branch.source_group_name,
                     metric_name=metric.metric_name,
                     metric_kind=metric.metric_kind,
                     default_aggregation=metric.default_aggregation,
-                    declared_by_group_id=group_id,
+                    declared_by_group_name=group_name,
                 )
-        resolved.extend(
-            sorted(effective_by_metric_id.values(), key=lambda item: item.metric_id)
-        )
 
-    return tuple(resolved)
+        resolved.extend(effective_metrics.values())
+
+    return resolved
 
 
 def _member_specificity(member: MemberRule) -> int:
     score = 0
-    if member.team_position is not None:
+
+    if member.team_position not in (None, "ANY"):
         score += 1
     if member.champion_id is not None:
         score += 1
-    if member.build_scope is not None:
+    if member.build_scope not in (None, "ANY"):
         score += 1
+
     return score
+
+
+def _ensure_unique_names(items: list[Any], *, key: str, label: str) -> None:
+    seen: set[str] = set()
+
+    for item in items:
+        value = getattr(item, key)
+        if value in seen:
+            raise ValueError(f"Duplicate {label} name: {value}")
+        seen.add(value)

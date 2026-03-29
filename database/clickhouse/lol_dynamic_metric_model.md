@@ -60,71 +60,76 @@ The structures below are logical control-plane entities.
 
 They can live in:
 
-- Python dictionaries
 - Python classes
-- YAML or JSON files loaded by Python
+- YAML files loaded by Python
 - another metadata store that Python reads
 
-The examples are shown as small tables only to make the relationships clear.
+The important constraint is:
+
+- group names are unique
+- member names are unique
+- metric names are unique
+
+We do not need separate control-plane ids if those names are guaranteed to be unique.
 
 ### 1) Group Definitions
 
-| group_id | group_name | group_type | meaning |
-|---|---|---|---|
-| `grp_support` | Support | `multi_member_group` | All support-role participants |
-| `grp_support_engage` | Support Engage | `multi_member_group` | Engage-oriented supports |
-| `grp_support_leona` | Leona Support | `champion_role` | Leona played as support |
+| group_name | group_type | meaning |
+|---|---|---|
+| `Support` | `multi_member_group` | All support-role participants |
+| `Support Engage` | `multi_member_group` | Engage-oriented supports |
+| `Leona Support` | `champion_role` | Leona played as support |
 
 ### 2) Group Compositions
 
-| parent_group_id | child_group_id | meaning |
+| parent_group_name | child_group_name | meaning |
 |---|---|---|
-| `grp_support` | `grp_support_engage` | Engage support is a child branch of support |
-| `grp_support_engage` | `grp_support_leona` | Leona support is a child branch of engage support |
+| `Support` | `Support Engage` | Engage support is a child branch of support |
+| `Support Engage` | `Leona Support` | Leona support is a child branch of engage support |
 
 ### 3) Members
 
-| member_id | team_position | champion_id | build_scope | meaning |
+| member_name | team_position | champion_id | build_scope | meaning |
 |---|---|---|---|---|
-| `mem_support_any` | `UTILITY` | `ANY` | `ANY` | Any support player |
-| `mem_leona_support` | `UTILITY` | `89` | `ANY` | Leona support |
-| `mem_nautilus_support` | `UTILITY` | `111` | `ANY` | Nautilus support |
+| `Any Support` | `UTILITY` | `ANY` | `ANY` | Any support player |
+| `Leona Support` | `UTILITY` | `89` | `ANY` | Leona support |
+| `Nautilus Support` | `UTILITY` | `111` | `ANY` | Nautilus support |
 
 ### 4) Group Memberships
 
-| group_id | member_id | why it is attached |
+| group_name | member_name | why it is attached |
 |---|---|---|
-| `grp_support` | `mem_support_any` | broad support coverage |
-| `grp_support_engage` | `mem_leona_support` | Leona is an engage support |
-| `grp_support_engage` | `mem_nautilus_support` | Nautilus is an engage support |
-| `grp_support_leona` | `mem_leona_support` | champion-specific branch |
+| `Support` | `Any Support` | broad support coverage |
+| `Support Engage` | `Leona Support` | Leona is an engage support |
+| `Support Engage` | `Nautilus Support` | Nautilus is an engage support |
+| `Leona Support` | `Leona Support` | champion-specific branch |
 
 ### 5) Metric Definitions
 
-| metric_id | metric_name | metric_kind | default_aggregation | meaning |
-|---|---|---|---|---|
-| `vision_score_per_min` | Vision Score Per Min | `existing` | `avg` | Broad support vision metric |
-| `cc_score_per_min` | CC Score Per Min | `derived` | `avg` | Engage crowd control metric |
-| `engage_success_rate` | Engage Success Rate | `composite` | `avg` | Engage outcome metric |
-| `damage_taken_per_min` | Damage Taken Per Min | `existing` | `avg` | Tankiness metric |
+| metric_name | metric_kind | default_aggregation | meaning |
+|---|---|---|---|
+| `Vision Score Per Min` | `existing` | `avg` | Broad support vision metric |
+| `CC Score Per Min` | `derived` | `avg` | Engage crowd control metric |
+| `Engage Success Rate` | `composite` | `avg` | Engage outcome metric |
+| `Damage Taken Per Min` | `existing` | `avg` | Tankiness metric |
 
 ### 6) Group Metric Assignments
 
-| group_id | metric_id | why it is attached |
+| group_name | metric_name | why it is attached |
 |---|---|---|
-| `grp_support` | `vision_score_per_min` | every support should expose vision |
-| `grp_support_engage` | `cc_score_per_min` | engage branch metric |
-| `grp_support_engage` | `engage_success_rate` | engage branch metric |
-| `grp_support_leona` | `damage_taken_per_min` | Leona tank profile |
+| `Support` | `Vision Score Per Min` | every support should expose vision |
+| `Support Engage` | `CC Score Per Min` | engage branch metric |
+| `Support Engage` | `Engage Success Rate` | engage branch metric |
+| `Leona Support` | `Damage Taken Per Min` | Leona tank profile |
 
 ### 7) Metric Dependencies
 
 This is needed for higher-level metrics.
 
-| metric_id | depends_on_metric_id | role |
+| metric_name | depends_on_metric_name | role |
 |---|---|---|
-| `engage_success_rate` | `engage_attempts` | denominator |
-| `engage_success_rate` | `successful_engages` | numerator |
+| `Engage Success Rate` | `Engage Attempts` | denominator |
+| `Engage Success Rate` | `Successful Engages` | numerator |
 
 ## Build Order
 
@@ -157,6 +162,20 @@ Recommended matching logic:
 - exact champion or `ANY`
 - exact build or `ANY`
 
+For the simple branch model in `dynamic_metrics_pipeline.py`, use the nearest group in the branch path that declares members.
+
+So for:
+
+- `Support`
+- `Support Engage`
+- `Leona Support`
+
+the branch members become:
+
+- `Support` -> `Any Support`
+- `Support Engage` -> `Leona Support`, `Nautilus Support`
+- `Leona Support` -> `Leona Support`
+
 If multiple rules in the same branch match the same participant, keep one deterministic winner.
 
 Recommended specificity order:
@@ -168,9 +187,9 @@ Recommended specificity order:
 
 Preserve:
 
-- `selected_group_id`
-- `source_group_id`
-- `matched_member_id`
+- `selected_group_name`
+- `source_group_name`
+- `matched_member_name`
 
 ### Composition Groups
 
@@ -195,13 +214,13 @@ So composition groups are:
 
 ## Metric Resolution
 
-Python should resolve metrics by `metric_id`, not by direct source-column name at runtime.
+Python should resolve metrics by `metric_name`, not by direct source-column name at runtime.
 
 Default rule:
 
 - always add all metrics declared along the resolved branch path
 - resolve from parent to leaf
-- if the same `metric_id` is declared more than once, the definition closest to the leaf wins
+- if the same `metric_name` is declared more than once, the definition closest to the leaf wins
 
 So for one branch:
 
@@ -213,7 +232,7 @@ So for one branch:
 Recommended formula:
 
 - `effective_metrics(branch) = ordered union of declared metrics from root to leaf`
-- `closest declaration to the leaf wins on duplicate metric_id`
+- `closest declaration to the leaf wins on duplicate metric_name`
 
 Recommended metric categories:
 
@@ -223,7 +242,6 @@ Recommended metric categories:
 
 Each metric definition should provide:
 
-- `metric_id`
 - `metric_name`
 - `metric_kind`
 - `source_grain`
@@ -244,8 +262,8 @@ Sibling groups should be resolved independently by default.
 
 Example:
 
-- `grp_support_engage`
-- `grp_support_enchanter`
+- `Support Engage`
+- `Support Enchanter`
 
 Do not intersect sibling metrics as the base rule.
 
@@ -253,7 +271,7 @@ Default behavior:
 
 - resolve each sibling branch separately
 - let each sibling keep its own effective metric set
-- preserve `source_group_id` so branch provenance is never lost
+- preserve `source_group_name` so branch provenance is never lost
 
 Optional behavior:
 
@@ -273,33 +291,33 @@ Recommended plan components:
 
 ### Branch Plan
 
-| selected_group_id | source_group_id | depth |
+| selected_group_name | source_group_name | depth |
 |---|---|---|
-| `grp_support` | `grp_support` | `0` |
-| `grp_support` | `grp_support_engage` | `1` |
-| `grp_support` | `grp_support_leona` | `2` |
+| `Support` | `Support` | `0` |
+| `Support` | `Support Engage` | `1` |
+| `Support` | `Leona Support` | `2` |
 
 ### Member Plan
 
-| selected_group_id | source_group_id | matched_member_id | team_position | champion_id |
+| selected_group_name | source_group_name | matched_member_name | team_position | champion_id |
 |---|---|---|---|---|
-| `grp_support` | `grp_support` | `mem_support_any` | `UTILITY` | `ANY` |
-| `grp_support` | `grp_support_engage` | `mem_leona_support` | `UTILITY` | `89` |
-| `grp_support` | `grp_support_engage` | `mem_nautilus_support` | `UTILITY` | `111` |
-| `grp_support` | `grp_support_leona` | `mem_leona_support` | `UTILITY` | `89` |
+| `Support` | `Support` | `Any Support` | `UTILITY` | `ANY` |
+| `Support` | `Support Engage` | `Leona Support` | `UTILITY` | `89` |
+| `Support` | `Support Engage` | `Nautilus Support` | `UTILITY` | `111` |
+| `Support` | `Leona Support` | `Leona Support` | `UTILITY` | `89` |
 
 ### Metric Plan
 
-| selected_group_id | source_group_id | metric_id | metric_name | metric_kind |
-|---|---|---|---|---|
-| `grp_support` | `grp_support` | `vision_score_per_min` | Vision Score Per Min | `existing` |
-| `grp_support` | `grp_support_engage` | `vision_score_per_min` | Vision Score Per Min | `existing` |
-| `grp_support` | `grp_support_engage` | `cc_score_per_min` | CC Score Per Min | `derived` |
-| `grp_support` | `grp_support_engage` | `engage_success_rate` | Engage Success Rate | `composite` |
-| `grp_support` | `grp_support_leona` | `vision_score_per_min` | Vision Score Per Min | `existing` |
-| `grp_support` | `grp_support_leona` | `cc_score_per_min` | CC Score Per Min | `derived` |
-| `grp_support` | `grp_support_leona` | `engage_success_rate` | Engage Success Rate | `composite` |
-| `grp_support` | `grp_support_leona` | `damage_taken_per_min` | Damage Taken Per Min | `existing` |
+| selected_group_name | source_group_name | metric_name | metric_kind |
+|---|---|---|---|
+| `Support` | `Support` | `Vision Score Per Min` | `existing` |
+| `Support` | `Support Engage` | `Vision Score Per Min` | `existing` |
+| `Support` | `Support Engage` | `CC Score Per Min` | `derived` |
+| `Support` | `Support Engage` | `Engage Success Rate` | `composite` |
+| `Support` | `Leona Support` | `Vision Score Per Min` | `existing` |
+| `Support` | `Leona Support` | `CC Score Per Min` | `derived` |
+| `Support` | `Leona Support` | `Engage Success Rate` | `composite` |
+| `Support` | `Leona Support` | `Damage Taken Per Min` | `existing` |
 
 This resolved plan is what ClickHouse should execute against.
 
@@ -311,7 +329,7 @@ This is the recommended method.
 
 Input:
 
-- `selected_group_id`
+- `selected_group_name`
 
 Python resolves:
 
@@ -347,11 +365,11 @@ ClickHouse joins source rows to the resolved member rules and returns matched pa
 
 Recommended intermediate output:
 
-| selected_group_id | source_group_id | matched_member_id | match_id | participant_id |
+| selected_group_name | source_group_name | matched_member_name | match_id | participant_id |
 |---|---|---|---|---|
-| `grp_support` | `grp_support` | `mem_support_any` | `1001` | `6` |
-| `grp_support` | `grp_support_engage` | `mem_leona_support` | `1001` | `6` |
-| `grp_support` | `grp_support_leona` | `mem_leona_support` | `1001` | `6` |
+| `Support` | `Support` | `Any Support` | `1001` | `6` |
+| `Support` | `Support Engage` | `Leona Support` | `1001` | `6` |
+| `Support` | `Leona Support` | `Leona Support` | `1001` | `6` |
 
 ### Step 5: Build or Return Metrics
 
@@ -367,13 +385,13 @@ All metric outputs should share one standard shape.
 
 Recommended final solution table shape:
 
-| selected_group_id | source_group_id | matched_member_id | group_instance_id | match_id | participant_id | metric_id | metric_name | metric_value |
-|---|---|---|---|---|---|---|---|---|
+| selected_group_name | source_group_name | matched_member_name | group_instance_key | match_id | participant_id | metric_name | metric_value |
+|---|---|---|---|---|---|---|---|
 
 Notes:
 
-- `group_instance_id` can be null for simple segmentation groups.
-- `group_instance_id` is useful for true composition groups.
+- `group_instance_key` can be null for simple segmentation groups.
+- `group_instance_key` is useful for true composition groups.
 
 This is the first correct target.
 
@@ -393,7 +411,7 @@ Those should be derived outputs, not the base representation.
 
 Selected group:
 
-- `grp_support`
+- `Support`
 
 ### Example Source Participant Rows
 
@@ -406,7 +424,7 @@ Selected group:
 
 ### Resolved Matches
 
-| participant_id | champion_name | matches `grp_support` | matches `grp_support_engage` | matches `grp_support_leona` |
+| participant_id | champion_name | matches `Support` | matches `Support Engage` | matches `Leona Support` |
 |---|---|---|---|---|
 | `6` | Leona | `yes` | `yes` | `yes` |
 | `7` | Nautilus | `yes` | `yes` | `no` |
@@ -415,21 +433,21 @@ Selected group:
 
 ### Final Solution Table
 
-| selected_group_id | source_group_id | matched_member_id | match_id | participant_id | champion_name | metric_id | metric_name | metric_value |
-|---|---|---|---|---|---|---|---|---|
-| `grp_support` | `grp_support` | `mem_support_any` | `1001` | `6` | Leona | `vision_score_per_min` | Vision Score Per Min | `2.7` |
-| `grp_support` | `grp_support_engage` | `mem_leona_support` | `1001` | `6` | Leona | `vision_score_per_min` | Vision Score Per Min | `2.7` |
-| `grp_support` | `grp_support_engage` | `mem_leona_support` | `1001` | `6` | Leona | `cc_score_per_min` | CC Score Per Min | `1.4` |
-| `grp_support` | `grp_support_engage` | `mem_leona_support` | `1001` | `6` | Leona | `engage_success_rate` | Engage Success Rate | `0.75` |
-| `grp_support` | `grp_support_leona` | `mem_leona_support` | `1001` | `6` | Leona | `vision_score_per_min` | Vision Score Per Min | `2.7` |
-| `grp_support` | `grp_support_leona` | `mem_leona_support` | `1001` | `6` | Leona | `cc_score_per_min` | CC Score Per Min | `1.4` |
-| `grp_support` | `grp_support_leona` | `mem_leona_support` | `1001` | `6` | Leona | `engage_success_rate` | Engage Success Rate | `0.75` |
-| `grp_support` | `grp_support_leona` | `mem_leona_support` | `1001` | `6` | Leona | `damage_taken_per_min` | Damage Taken Per Min | `840.0` |
-| `grp_support` | `grp_support` | `mem_support_any` | `1001` | `7` | Nautilus | `vision_score_per_min` | Vision Score Per Min | `2.3` |
-| `grp_support` | `grp_support_engage` | `mem_nautilus_support` | `1001` | `7` | Nautilus | `vision_score_per_min` | Vision Score Per Min | `2.3` |
-| `grp_support` | `grp_support_engage` | `mem_nautilus_support` | `1001` | `7` | Nautilus | `cc_score_per_min` | CC Score Per Min | `1.7` |
-| `grp_support` | `grp_support_engage` | `mem_nautilus_support` | `1001` | `7` | Nautilus | `engage_success_rate` | Engage Success Rate | `0.71` |
-| `grp_support` | `grp_support` | `mem_support_any` | `1001` | `8` | Janna | `vision_score_per_min` | Vision Score Per Min | `3.2` |
+| selected_group_name | source_group_name | matched_member_name | match_id | participant_id | champion_name | metric_name | metric_value |
+|---|---|---|---|---|---|---|---|
+| `Support` | `Support` | `Any Support` | `1001` | `6` | Leona | `Vision Score Per Min` | `2.7` |
+| `Support` | `Support Engage` | `Leona Support` | `1001` | `6` | Leona | `Vision Score Per Min` | `2.7` |
+| `Support` | `Support Engage` | `Leona Support` | `1001` | `6` | Leona | `CC Score Per Min` | `1.4` |
+| `Support` | `Support Engage` | `Leona Support` | `1001` | `6` | Leona | `Engage Success Rate` | `0.75` |
+| `Support` | `Leona Support` | `Leona Support` | `1001` | `6` | Leona | `Vision Score Per Min` | `2.7` |
+| `Support` | `Leona Support` | `Leona Support` | `1001` | `6` | Leona | `CC Score Per Min` | `1.4` |
+| `Support` | `Leona Support` | `Leona Support` | `1001` | `6` | Leona | `Engage Success Rate` | `0.75` |
+| `Support` | `Leona Support` | `Leona Support` | `1001` | `6` | Leona | `Damage Taken Per Min` | `840.0` |
+| `Support` | `Support` | `Any Support` | `1001` | `7` | Nautilus | `Vision Score Per Min` | `2.3` |
+| `Support` | `Support Engage` | `Nautilus Support` | `1001` | `7` | Nautilus | `Vision Score Per Min` | `2.3` |
+| `Support` | `Support Engage` | `Nautilus Support` | `1001` | `7` | Nautilus | `CC Score Per Min` | `1.7` |
+| `Support` | `Support Engage` | `Nautilus Support` | `1001` | `7` | Nautilus | `Engage Success Rate` | `0.71` |
+| `Support` | `Support` | `Any Support` | `1001` | `8` | Janna | `Vision Score Per Min` | `3.2` |
 
 This is the correct first output because:
 

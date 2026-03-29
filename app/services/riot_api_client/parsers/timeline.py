@@ -630,14 +630,17 @@ class MatchDataTimelineParsingOrchestrator:
         info = raw.get("info")
         if not isinstance(info, dict):
             return False
-        if info.get("endOfGameResult") != "Abort_Unexpected":
-            return False
+        end_of_game_result = info.get("endOfGameResult")  # NEW
+        if isinstance(end_of_game_result, str) and end_of_game_result.startswith(  # NEW
+            "Abort"  # NEW
+        ):  # NEW
+            return True  # NEW
         frames = info.get("frames")
         if not isinstance(frames, list) or not frames:
-            return True
+            return False  # NEW
         first_frame = frames[0]
         return isinstance(first_frame, dict) and (
-            first_frame.get("participantFrames") is None
+            first_frame.get("participantFrames") is None  # NEW
         )
 
     def run(self, raw: dict[str, Any]) -> TimelineTables:
@@ -651,10 +654,15 @@ class MatchDataTimelineParsingOrchestrator:
         timeline_drift(raw, match_id=match_id, drift_date=drift_date)
 
         if self._is_abort_unexpected_payload(raw):
-            logger.warning(
-                "TimelineAbortUnexpected match_id=%s date=%s; skipping timeline rows.",
+            info = raw.get("info")  # NEW
+            end_of_game_result = (  # NEW
+                info.get("endOfGameResult") if isinstance(info, dict) else "unknown"  # NEW
+            )  # NEW
+            logger.warning(  # NEW
+                "TimelineAbort match_id=%s date=%s endOfGameResult=%s; emitting empty timeline tables.",  # NEW
                 match_id,
                 drift_date,
+                end_of_game_result,  # NEW
             )
             return TimelineTables(
                 participantStats=[],
