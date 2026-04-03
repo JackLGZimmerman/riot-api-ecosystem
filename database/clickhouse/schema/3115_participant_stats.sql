@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
 (
     run_id UUID,
     matchid UInt64,
+    matchidfull String,
     participantid UInt8,
     puuid FixedString (78),
     teamid UInt8,

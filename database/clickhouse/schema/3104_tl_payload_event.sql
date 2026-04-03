@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS game_data.tl_payload_event
 (
     run_id UUID,
     matchid UInt64,
+    matchidfull String,
     frame_timestamp UInt32,
     type Enum8 (
         'WARD_KILL' = 1,

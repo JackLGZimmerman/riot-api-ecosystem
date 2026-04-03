@@ -32,17 +32,11 @@ SELECT DISTINCT matchid
 FROM game_data.matchdata_matchids
 "
 
-pending_u64_ids="
-SELECT DISTINCT toUInt64OrNull(arrayElement(splitByChar('_', matchid), 2))
-FROM game_data.matchdata_matchids
-WHERE toUInt64OrNull(arrayElement(splitByChar('_', matchid), 2)) IS NOT NULL
-"
-
 string_tables=(
   game_data.metadata
 )
 
-u64_tables=(
+matchid_full_tables=(
   game_data.info
   game_data.bans
   game_data.feats
@@ -64,6 +58,9 @@ u64_tables=(
 )
 
 overlap_rows=0
+pending_before="$(
+  clickhouse "SELECT count() FROM game_data.matchdata_matchids FORMAT TabSeparatedRaw"
+)"
 
 show_overlap_rows() {
   local table
@@ -88,12 +85,12 @@ FORMAT TabSeparatedRaw
     fi
   done
 
-  for table in "${u64_tables[@]}"; do
+  for table in "${matchid_full_tables[@]}"; do
     count="$(
       clickhouse "
 SELECT count()
 FROM ${table}
-WHERE matchid IN (${pending_u64_ids})
+WHERE matchidfull IN (${pending_string_ids})
 FORMAT TabSeparatedRaw
 "
     )"
@@ -124,20 +121,16 @@ SETTINGS mutations_sync = 2
 "
   done
 
-  for table in "${u64_tables[@]}"; do
+  for table in "${matchid_full_tables[@]}"; do
     echo "Deleting $table"
     clickhouse "
 ALTER TABLE ${table}
 DELETE
-WHERE matchid IN (${pending_u64_ids})
+WHERE matchidfull IN (${pending_string_ids})
 SETTINGS mutations_sync = 2
 "
   done
 }
-
-pending_before="$(
-  clickhouse "SELECT count() FROM game_data.matchdata_matchids FORMAT TabSeparatedRaw"
-)"
 
 echo "Pending queue rows: $pending_before"
 show_overlap_rows

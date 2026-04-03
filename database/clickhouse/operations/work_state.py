@@ -97,11 +97,30 @@ def seed_from_latest_matchids() -> int:
 
     rows = client.query(
         f"""
+        WITH completed_matchids AS
+        (
+            SELECT DISTINCT matchidfull
+            FROM game_data.info
+            WHERE matchidfull != ''
+              AND endofgameresult LIKE 'Abort%%'
+            UNION DISTINCT
+            SELECT DISTINCT info.matchidfull
+            FROM game_data.info AS info
+            WHERE info.matchidfull != ''
+              AND info.matchidfull IN
+            (
+                SELECT DISTINCT matchidfull
+                FROM game_data.tl_payload_event
+                WHERE matchidfull != ''
+                  AND type = 'GAME_END'
+            )
+        )
         SELECT DISTINCT
             m.run_id AS run_id,
             toString(m.matchid) AS matchid
         FROM game_data.matchids AS m
         WHERE m.run_id = %(run_id)s
+          AND toString(m.matchid) NOT IN completed_matchids
           AND toString(m.matchid) NOT IN
           (
               SELECT DISTINCT matchid

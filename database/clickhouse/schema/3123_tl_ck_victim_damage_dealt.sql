@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS game_data.tl_ck_victim_damage_dealt
     truedamage UInt32,
     type String,
     matchid UInt64,
+    matchidfull String,
     frame_timestamp UInt32,
     timestamp UInt64,
     champion_kill_event_id String,

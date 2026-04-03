@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS game_data.info
     gameduration UInt16,
     gameendtimestamp UInt64,
     matchid UInt64,
+    matchidfull String,
     gamestarttimestamp UInt64,
     gametype LowCardinality (String),
     gameversion LowCardinality (String),

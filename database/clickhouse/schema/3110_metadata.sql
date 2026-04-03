@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS game_data.metadata
 (
     run_id UUID,
     matchid String,
+    matchidfull String,
     dataversion UInt8,
     participants Array (FixedString (78))
 )

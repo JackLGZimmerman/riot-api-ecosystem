@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS game_data.tl_elite_monster_kill
 (
     run_id UUID,
     matchid UInt64,
+    matchidfull String,
     frame_timestamp UInt32,
     timestamp UInt64,
     type LowCardinality (String),

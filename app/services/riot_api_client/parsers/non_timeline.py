@@ -25,7 +25,15 @@ from app.services.riot_api_client.parsers.schema_drift import (
 logger = logging.getLogger(__name__)
 
 
-class TabulatedMetadata(TypedDict):
+class MatchIdFullRow(TypedDict):
+    matchIdFull: str
+
+
+class NumericMatchIdRow(MatchIdFullRow):
+    matchId: NonNegativeInt
+
+
+class TabulatedMetadata(MatchIdFullRow):
     matchId: str
     dataVersion: str
     participants: list[str]
@@ -42,12 +50,11 @@ class MetadataParser:
         ]
 
 
-class TabulatedInfo(TypedDict):
+class TabulatedInfo(NumericMatchIdRow):
     endOfGameResult: str
     gameCreation: NonNegativeInt
     gameDuration: NonNegativeInt
     gameEndTimestamp: NonNegativeInt
-    matchId: NonNegativeInt
     gameStartTimestamp: NonNegativeInt
     gameType: str
     gameVersion: str
@@ -104,8 +111,7 @@ class GameInfoParser:
         ]
 
 
-class TabulatedBan(TypedDict):
-    matchId: NonNegativeInt
+class TabulatedBan(NumericMatchIdRow):
     teamId: PositiveInt
     pickTurn: PositiveInt
     championId: int
@@ -131,8 +137,7 @@ class BansParser:
         return rows
 
 
-class TabulatedFeat(TypedDict):
-    matchId: NonNegativeInt
+class TabulatedFeat(NumericMatchIdRow):
     teamId: PositiveInt
     featType: str
     featState: int
@@ -166,8 +171,7 @@ class FeatsParser:
         return rows
 
 
-class TabulatedObjective(TypedDict):
-    matchId: NonNegativeInt
+class TabulatedObjective(NumericMatchIdRow):
     teamId: PositiveInt
     objectiveType: str
     first: bool
@@ -210,8 +214,7 @@ class ObjectivesParser:
         return rows
 
 
-class TabulatedParticipantStats(TypedDict):
-    matchId: NonNegativeInt
+class TabulatedParticipantStats(NumericMatchIdRow):
     participantId: NonNegativeInt
     puuid: str
     teamId: NonNegativeInt
@@ -444,8 +447,7 @@ class ParticipantStatsParser:
         return rows
 
 
-class TabulatedParticipantChallenges(TypedDict):
-    matchId: NonNegativeInt
+class TabulatedParticipantChallenges(NumericMatchIdRow):
     teamId: PositiveInt
     puuid: str
     payload: dict[str, ChallengeValue]
@@ -479,8 +481,7 @@ class ParticipantChallengesParser:
         return rows
 
 
-class TabulatedParticipantPerkValues(TypedDict):
-    matchId: NonNegativeInt
+class TabulatedParticipantPerkValues(NumericMatchIdRow):
     teamId: PositiveInt
     puuid: str
 
@@ -505,8 +506,7 @@ class TabulatedParticipantPerkValues(TypedDict):
     sub_var3_2: int
 
 
-class TabulatedParticipantPerkIds(TypedDict):
-    matchId: NonNegativeInt
+class TabulatedParticipantPerkIds(NumericMatchIdRow):
     teamId: PositiveInt
     puuid: str
 
@@ -676,8 +676,9 @@ class MatchDataNonTimelineParsingOrchestrator:
     @staticmethod
     def _is_abort_unexpected_payload(raw: dict[str, Any]) -> bool:
         info = raw.get("info")
-        return isinstance(info, dict) and (
-            info.get("endOfGameResult") == "Abort_Unexpected"
+        end_of_game_result = info.get("endOfGameResult") if isinstance(info, dict) else None
+        return isinstance(end_of_game_result, str) and end_of_game_result.startswith(
+            "Abort"
         )
 
     def run(self, raw: dict[str, Any]) -> NonTimelineTables:
@@ -692,7 +693,7 @@ class MatchDataNonTimelineParsingOrchestrator:
 
         if self._is_abort_unexpected_payload(raw):
             logger.warning(
-                "NonTimelineAbortUnexpected match_id=%s date=%s; skipping non-timeline rows.",
+                "NonTimelineAbort match_id=%s date=%s; skipping non-timeline rows.",
                 match_id,
                 drift_date,
             )

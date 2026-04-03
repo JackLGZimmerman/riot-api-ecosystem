@@ -59,7 +59,8 @@ from app.worker.pipelines.orchestrator import (
 from app.worker.pipelines.recovery_utils import run_sync_with_retry
 from app.worker.pipelines.stop_flag import raise_if_stop_requested
 from database.clickhouse.operations.matchdata import (
-    delete_by_run_id_and_matchids,
+    delete_by_matchids,
+    ensure_matchid_full_schema,
 )
 from database.clickhouse.operations.utils import delete_by_run_id, persist_data
 from database.clickhouse.operations.work_state import (
@@ -340,8 +341,9 @@ class MatchDataLoader(Loader):
 
     def load(self, ctx: OrchestrationContext) -> MatchDataCollectorState:
         _ = ctx
-        ensure_matchdata_state_schema()
         if not self._initialized:
+            ensure_matchdata_state_schema()
+            ensure_matchid_full_schema()
             seeded_pending = seed_from_latest_matchids()
             if seeded_pending:
                 logger.info("MatchData loader seeded pending=%d", seeded_pending)
@@ -421,6 +423,7 @@ class MatchDataSaver(Saver):
                     nt: NonTimelineTables = await asyncio.to_thread(
                         self.non_timeline_parser.run, item.raw
                     )
+                    self._attach_match_id_full(nt, match_id)
                     if match_id != "unknown":
                         stream_successes[match_id].add("non_timeline")
                     await self._buffer_inserts(
@@ -434,6 +437,7 @@ class MatchDataSaver(Saver):
                     tl: TimelineTables = await asyncio.to_thread(
                         self.timeline_parser.run, item.raw
                     )
+                    self._attach_match_id_full(tl, match_id)
                     if match_id != "unknown":
                         stream_successes[match_id].add("timeline")
                     await self._buffer_inserts(
@@ -471,7 +475,7 @@ class MatchDataSaver(Saver):
                     len(failed_match_ids),
                     failed_match_ids[:20],
                 )
-                await self.delete_failed_matchids(ctx.run_id, failed_match_ids)
+                await self.delete_failed_matchids(failed_match_ids)
 
             await self.mark_finished_matchids(successful_match_ids)
 
@@ -484,6 +488,7 @@ class MatchDataSaver(Saver):
             )
 
         except Exception as exc:
+            await self.delete_failed_matchids(state.matchids)
             await self.rollback_run(ctx.run_id)
             logger.exception(
                 "MatchData batch exception run_id=%s: %s",
@@ -502,25 +507,22 @@ class MatchDataSaver(Saver):
                 args=(table, run_id),
             )
 
-    async def delete_failed_matchids(self, run_id: UUID, match_ids: list[str]) -> None:
-        await self._run_deletes_for_matchids(
-            NON_TIMELINE_DELETE_TABLES, run_id, match_ids
-        )
-        await self._run_deletes_for_matchids(TIMELINE_DELETE_TABLES, run_id, match_ids)
+    async def delete_failed_matchids(self, match_ids: list[str]) -> None:
+        await self._run_deletes_for_matchids(NON_TIMELINE_DELETE_TABLES, match_ids)
+        await self._run_deletes_for_matchids(TIMELINE_DELETE_TABLES, match_ids)
 
     async def _run_deletes_for_matchids(
         self,
         tables: tuple[str, ...],
-        run_id: UUID,
         match_ids: list[str],
     ) -> None:
         for table in tables:
             await run_sync_with_retry(
                 logger=logger,
                 component="MatchData",
-                op_name=f"delete_by_run_id_and_matchids:{table}",
-                func=delete_by_run_id_and_matchids,
-                args=(table, run_id, match_ids),
+                op_name=f"delete_by_matchids:{table}",
+                func=delete_by_matchids,
+                args=(table, match_ids),
             )
 
     async def mark_finished_matchids(self, match_ids: list[str]) -> None:
@@ -545,6 +547,14 @@ class MatchDataSaver(Saver):
             return "unknown"
         match_id = metadata.get("matchId")
         return match_id if isinstance(match_id, str) else "unknown"
+
+    @staticmethod
+    def _attach_match_id_full(parsed: Any, match_id: str) -> None:
+        if not match_id:
+            return
+        for rows in vars(parsed).values():
+            for row in rows:
+                row["matchIdFull"] = match_id
 
     @retry(
         stop=stop_after_attempt(8),

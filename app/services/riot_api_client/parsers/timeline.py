@@ -53,8 +53,12 @@ def champion_kill_event_id(
     return f"{matchId}:{timestamp}:{killerId}:{victimId}"
 
 
-class ParticipantStatsRow(TypedDict):
+class MatchIdentityRow(TypedDict):
     matchId: NonNegativeInt
+    matchIdFull: str
+
+
+class ParticipantStatsRow(MatchIdentityRow):
     frame_timestamp: NonNegativeInt
     participantId: NonNegativeInt
 
@@ -148,8 +152,7 @@ class ParticipantStatsParser:
         return rows
 
 
-class TimelineEventRowBase(TypedDict):
-    matchId: int
+class TimelineEventRowBase(MatchIdentityRow):
     frame_timestamp: NonNegativeInt
     timestamp: int
 
@@ -180,8 +183,7 @@ class ChampionKillRow(TimelineEventRowBase):
     position_y: int
 
 
-class ChampionKillDamageInstanceRow(DamageInstance):
-    matchId: NonNegativeInt
+class ChampionKillDamageInstanceRow(DamageInstance, MatchIdentityRow):
     frame_timestamp: int
     timestamp: int
     champion_kill_event_id: str
@@ -630,17 +632,17 @@ class MatchDataTimelineParsingOrchestrator:
         info = raw.get("info")
         if not isinstance(info, dict):
             return False
-        end_of_game_result = info.get("endOfGameResult")  # NEW
-        if isinstance(end_of_game_result, str) and end_of_game_result.startswith(  # NEW
-            "Abort"  # NEW
-        ):  # NEW
-            return True  # NEW
+
+        end_of_game_result = info.get("endOfGameResult")
         frames = info.get("frames")
-        if not isinstance(frames, list) or not frames:
-            return False  # NEW
-        first_frame = frames[0]
-        return isinstance(first_frame, dict) and (
-            first_frame.get("participantFrames") is None  # NEW
+        first_frame = frames[0] if isinstance(frames, list) and frames else None
+
+        return (
+            isinstance(end_of_game_result, str)
+            and end_of_game_result.startswith("Abort")
+        ) or (
+            isinstance(first_frame, dict)
+            and first_frame.get("participantFrames") is None
         )
 
     def run(self, raw: dict[str, Any]) -> TimelineTables:
@@ -654,15 +656,15 @@ class MatchDataTimelineParsingOrchestrator:
         timeline_drift(raw, match_id=match_id, drift_date=drift_date)
 
         if self._is_abort_unexpected_payload(raw):
-            info = raw.get("info")  # NEW
-            end_of_game_result = (  # NEW
-                info.get("endOfGameResult") if isinstance(info, dict) else "unknown"  # NEW
-            )  # NEW
-            logger.warning(  # NEW
-                "TimelineAbort match_id=%s date=%s endOfGameResult=%s; emitting empty timeline tables.",  # NEW
+            info = raw.get("info")
+            end_of_game_result = (
+                info.get("endOfGameResult") if isinstance(info, dict) else "unknown"
+            )
+            logger.warning(
+                "TimelineAbort match_id=%s date=%s endOfGameResult=%s; emitting empty timeline tables.",
                 match_id,
                 drift_date,
-                end_of_game_result,  # NEW
+                end_of_game_result,
             )
             return TimelineTables(
                 participantStats=[],

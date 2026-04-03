@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS game_data.bans
 (
     run_id UUID,
     matchid UInt64,
+    matchidfull String,
     teamid UInt8,
     pickturn UInt8,
     championid Nullable (Int32)

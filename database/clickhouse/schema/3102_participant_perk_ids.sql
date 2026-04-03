@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS game_data.participant_perk_ids
 (
     run_id UUID,
     matchid UInt64,
+    matchidfull String,
     teamid UInt8,
     puuid FixedString (78),
 
