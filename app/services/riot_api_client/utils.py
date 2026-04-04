@@ -1,12 +1,13 @@
-import itertools
+import asyncio
 import logging
 from collections import defaultdict, deque
 from typing import (
     Any,
+    AsyncIterator,
+    Awaitable,
     Callable,
     Hashable,
     Iterable,
-    Iterator,
     NamedTuple,
     TypeAlias,
     TypeVar,
@@ -34,6 +35,7 @@ _BASIC_RANKS = [(tier, div) for tier in Tiers for div in Divisions]
 
 T = TypeVar("T")
 P = TypeVar("P")
+R = TypeVar("R")
 
 JSONLike = JSON | JSONList | None
 
@@ -104,14 +106,47 @@ async def fetch_region_payload(
         return region, None
 
 
-def chunked(iterable: Iterable[T], n: int) -> Iterator[list[T]]:
-    """Yield consecutive n-sized chunks from `iterable` (last may be smaller)."""
-    it = iter(iterable)
-    while True:
-        batch = list(itertools.islice(it, n))
-        if not batch:
+async def iter_in_flight(
+    items: Iterable[T],
+    worker: Callable[[T], Awaitable[R]],
+    *,
+    max_in_flight: int,
+) -> AsyncIterator[R]:
+    if max_in_flight <= 0:
+        raise ValueError("max_in_flight must be > 0")
+
+    iterator = iter(items)
+    pending: set[asyncio.Future[R]] = set()
+
+    def submit_next() -> bool:
+        try:
+            item = next(iterator)
+        except StopIteration:
+            return False
+
+        pending.add(asyncio.ensure_future(worker(item)))
+        return True
+
+    for _ in range(max_in_flight):
+        if not submit_next():
             break
-        yield batch
+
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            done_tasks = list(done)
+            for _ in done_tasks:
+                submit_next()
+            for task in done_tasks:
+                yield await task
+    finally:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 def bounded_elite_tiers(cfg: EliteBoundConfig) -> list[EliteTiers]:

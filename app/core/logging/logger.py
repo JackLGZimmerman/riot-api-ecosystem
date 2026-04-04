@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging.config
 import logging.handlers
+import os
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,9 @@ def _ensure_file_handler_dirs(config: dict[str, Any], *, project_root: Path) -> 
         log_path = _resolve_log_path(filename, project_root)
         handler_cfg["filename"] = str(log_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        if log_path.exists() and not os.access(log_path, os.W_OK):
+            log_path.unlink()
+        log_path.touch(exist_ok=True)
 
 
 def setup_logging_config() -> None:

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from uuid import uuid4
-
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator
-import time
+from uuid import uuid4
+
 from tenacity import before_sleep_log, retry, stop_never, wait_exponential
+
 from app.core.config.constants import (
     ENDPOINTS,
     QUEUE_TYPE_TO_QUEUE_CODE,
@@ -22,24 +23,25 @@ from app.services.riot_api_client.match_ids import (
 from app.services.riot_api_client.utils import PlayerCrawlState
 from app.worker.pipelines.orchestrator import (
     Collector,
-    Orchestrator,
     OrchestrationContext,
+    Orchestrator,
 )
 from app.worker.pipelines.stop_flag import raise_if_stop_requested
 from database.clickhouse.operations.matchids import (
-    load_matchid_puuid_ts,
-    load_matchid_puuids,
-    insert_matchids_stream_in_batches,
-    upsert_puuid_timestamp,
-    insert_puuids_in_batches,
     delete_failed_puuid_timestamp,
-    delete_old_puuid_timestamps,
     delete_matchid_puuids,
     delete_matchids,
+    delete_old_puuid_timestamps,
+    insert_matchids_stream_in_batches,
+    insert_puuids_in_batches,
+    load_matchid_puuid_ts,
+    load_matchid_puuids,
+    upsert_puuid_timestamp,
 )
 from database.clickhouse.operations.players import PlayerKeyRow, load_players
 
 logger = logging.getLogger(__name__)
+
 
 def build_initial_player_states(
     players: list[PlayerKeyRow],
@@ -226,17 +228,23 @@ class MatchIDSaver:
             timestamp_upserted = True
         except Exception:
             await self._delete_with_retry(
-                "delete_failed_puuid_timestamp", delete_failed_puuid_timestamp, ctx.run_id
+                "delete_failed_puuid_timestamp",
+                delete_failed_puuid_timestamp,
+                ctx.run_id,
             )
             await self._delete_with_retry(
                 "delete_matchid_puuids", delete_matchid_puuids, ctx.run_id
             )
-            await self._delete_with_retry("delete_matchids", delete_matchids, ctx.run_id)
+            await self._delete_with_retry(
+                "delete_matchids", delete_matchids, ctx.run_id
+            )
             raise
         finally:
             if timestamp_upserted:
                 await self._delete_with_retry(
-                    "delete_old_puuid_timestamps", delete_old_puuid_timestamps, ctx.run_id
+                    "delete_old_puuid_timestamps",
+                    delete_old_puuid_timestamps,
+                    ctx.run_id,
                 )
             else:
                 logger.warning(

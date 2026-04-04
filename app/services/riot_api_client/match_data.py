@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, AsyncIterator, NamedTuple
 
@@ -9,7 +8,7 @@ from app.core.config.constants import (
 )
 from app.core.config.constants.geography import REGION_TO_CONTINENT, Continent, Region
 from app.services.riot_api_client.base import RiotAPI
-from app.services.riot_api_client.utils import chunked, spreading
+from app.services.riot_api_client.utils import iter_in_flight, spreading
 
 MAX_IN_FLIGHT = 64
 logger = logging.getLogger(__name__)
@@ -47,25 +46,22 @@ async def yield_match_data(
 
     shuffled = spreading(work_items, lambda w: w.continent)
 
-    for batch in chunked(shuffled, MAX_IN_FLIGHT):
-        async with asyncio.TaskGroup() as tg:
-            tasks = [
-                tg.create_task(
-                    riot_api.fetch_json(
-                        url=endpoint.format(
-                            continent=w.continent,
-                            matchId=w.match_id,
-                        ),
-                        location=w.continent,
-                    )
-                )
-                for w in batch
-            ]
+    async def fetch_one(work: MatchWork) -> Any:
+        return await riot_api.fetch_json(
+            url=endpoint.format(
+                continent=work.continent,
+                matchId=work.match_id,
+            ),
+            location=work.continent,
+        )
 
-        for t in tasks:
-            data = t.result()
-            if isinstance(data, dict):
-                yield data
+    async for data in iter_in_flight(
+        shuffled,
+        fetch_one,
+        max_in_flight=MAX_IN_FLIGHT,
+    ):
+        if isinstance(data, dict):
+            yield data
 
 
 async def stream_non_timeline_data(

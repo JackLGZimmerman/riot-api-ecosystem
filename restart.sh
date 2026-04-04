@@ -19,19 +19,8 @@ case "${1:-}" in
     ;;
 esac
 
-for path in \
-  app/core/logging/logs/app.log.jsonl \
-  app/core/logging/logs/schema_drift/non_timeline.log.jsonl \
-  app/core/logging/logs/schema_drift/timeline.log.jsonl
-do
-  mkdir -p "$(dirname "$path")"
-  rm -f "$path"
-  touch "$path"
-  chmod u+rw "$path"
-done
-
 echo "Stopping current pipeline"
-./stop_pipeline_safely.sh || true
+./stop_pipeline_safely.sh
 
 echo "Resetting containers"
 if [ "$fresh" -eq 1 ]; then
@@ -43,7 +32,7 @@ fi
 docker ps -aq --filter label=io.prefect.flow-run-id | xargs -r docker rm -f
 
 echo "Building flow image"
-docker build --no-cache -t riot-pipeline:latest .
+docker build -t riot-pipeline:latest .
 
 echo "Starting services"
 docker compose up -d --build --wait
@@ -109,11 +98,11 @@ echo "Deploying flow"
 
 echo "Resuming Prefect intake"
 PREFECT_API_URL="http://localhost:4200/api" \
-  timeout 20s .venv/bin/prefect work-queue resume "$WORK_QUEUE_NAME" -p "$WORK_POOL_NAME" || true
+  timeout 20s .venv/bin/prefect work-queue resume "$WORK_QUEUE_NAME" -p "$WORK_POOL_NAME"
 
 if [ -n "$AUTOMATION_NAME" ]; then
   PREFECT_API_URL="http://localhost:4200/api" \
-    timeout 20s .venv/bin/prefect automation resume "$AUTOMATION_NAME" || true
+    timeout 20s .venv/bin/prefect automation resume "$AUTOMATION_NAME"
 fi
 
 echo "Starting new run"

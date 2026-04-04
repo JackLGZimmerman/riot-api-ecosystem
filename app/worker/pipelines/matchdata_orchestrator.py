@@ -18,13 +18,12 @@ from uuid import UUID, uuid4
 from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
 
 from app.core.config.settings import settings
-from app.services.riot_api_client.base import RiotAPI, get_riot_api
+from app.services.riot_api_client.base import RiotAPI
 from app.services.riot_api_client.match_data import (
     stream_non_timeline_data,
     stream_timeline_data,
 )
 from app.services.riot_api_client.parsers.non_timeline import (
-    MatchDataNonTimelineParsingOrchestrator,
     NonTimelineTables,
     TabulatedBan,
     TabulatedFeat,
@@ -43,7 +42,6 @@ from app.services.riot_api_client.parsers.timeline import (
     ChampionSpecialKillRow,
     DragonSoulGivenRow,
     EliteMonsterKillRow,
-    MatchDataTimelineParsingOrchestrator,
     ParticipantStatsRow,
     RareEventRow,
     TimelineTables,
@@ -622,35 +620,3 @@ class MatchDataSaver(Saver):
     ) -> None:
         for table in tuple(buffers.keys()):
             await self._flush_table_buffer(table, buffers, run_id)
-
-
-if __name__ == "__main__":
-
-    async def _main() -> None:
-        async with get_riot_api() as riot_api:
-            loader = MatchDataLoader(batch_size=MATCHDATA_BATCH_SIZE)
-            non_timeline_collector = MatchDataStreamCollector(
-                riot_api=riot_api,
-                stream="non_timeline",
-            )
-            timeline_collector = MatchDataStreamCollector(
-                riot_api=riot_api,
-                stream="timeline",
-            )
-
-            saver = MatchDataSaver(
-                non_timeline_parser=MatchDataNonTimelineParsingOrchestrator(),
-                timeline_parser=MatchDataTimelineParsingOrchestrator(),
-            )
-
-            orchestrator = MatchDataOrchestrator(
-                pipeline="match_data",
-                loader=loader,
-                non_timeline_collector=non_timeline_collector,
-                timeline_collector=timeline_collector,
-                saver=saver,
-            )
-
-            await orchestrator.run()
-
-    asyncio.run(_main())

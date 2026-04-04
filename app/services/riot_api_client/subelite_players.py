@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import AsyncIterator, TypeAlias
 
@@ -20,11 +19,13 @@ from app.models import (
 from app.models.riot.league import LeagueEntryDTO
 from app.services.riot_api_client.base import FetchOutcome, RiotAPI
 from app.services.riot_api_client.utils import (
+    JSONLike,
+    UrlRegion,
     UrlTuple,
     bounded_sub_elite_tiers,
-    chunked,
     compact_preview,
     fetch_region_payload,
+    iter_in_flight,
     spreading,
 )
 
@@ -100,23 +101,36 @@ async def discover_page_bounds(
     spread_work = spreading(work, key_fn=lambda x: x[0])
 
     results: list[tuple[PageKey, int]] = []
-    for batch in chunked(spread_work, MAX_IN_FLIGHT):
-        probed = await asyncio.gather(
-            *(probe(*args) for args in batch),
-            return_exceptions=True,
-        )
-        for args, item in zip(batch, probed, strict=True):
-            if isinstance(item, BaseException):
-                region, queue, tier, div = args
-                logger.warning(
-                    "LeagueBoundProbeFailed region=%s queue=%s tier=%s division=%s error=%s",
-                    region.value,
-                    queue.value,
-                    tier.value,
-                    div.value,
-                    type(item).__name__,
-                )
-                continue
+
+    async def probe_safe(
+        args: tuple[Region, Queues, Tiers, Divisions],
+    ) -> tuple[
+        tuple[Region, Queues, Tiers, Divisions],
+        tuple[PageKey, int] | None,
+        Exception | None,
+    ]:
+        try:
+            return args, await probe(*args), None
+        except Exception as exc:
+            return args, None, exc
+
+    async for args, item, exc in iter_in_flight(
+        spread_work,
+        probe_safe,
+        max_in_flight=MAX_IN_FLIGHT,
+    ):
+        if exc is not None:
+            region, queue, tier, div = args
+            logger.warning(
+                "LeagueBoundProbeFailed region=%s queue=%s tier=%s division=%s error=%s",
+                region.value,
+                queue.value,
+                tier.value,
+                div.value,
+                type(exc).__name__,
+            )
+            continue
+        if item is not None:
             results.append(item)
 
     return results
@@ -149,30 +163,33 @@ async def stream_sub_elite_players(
     del jobs
     del page_bounds
 
-    for batch in chunked(spread_jobs, MAX_IN_FLIGHT):
-        tasks = [
-            fetch_region_payload(
-                url=url,
-                region=region,
-                riot_api=riot_api,
-                logger=logger,
-            )
-            for url, region in batch
-        ]
-        for region, records in await asyncio.gather(*tasks):
-            if not isinstance(records, list) or not records:
-                continue
+    async def fetch_one(job: UrlRegion) -> tuple[Region, JSONLike]:
+        url, region = job
+        return await fetch_region_payload(
+            url=url,
+            region=region,
+            riot_api=riot_api,
+            logger=logger,
+        )
 
-            for raw in records:
-                try:
-                    dto = LeagueEntryDTO(**raw)
-                    entry = MinifiedLeagueEntryDTO.from_entry(dto, region=region)
-                except Exception as exc:
-                    logger.info(
-                        "LeagueUnexpectedFailed region=%s error=%s preview=%r",
-                        region.value,
-                        type(exc).__name__,
-                        compact_preview(raw),
-                    )
-                    continue
-                yield entry
+    async for region, records in iter_in_flight(
+        spread_jobs,
+        fetch_one,
+        max_in_flight=MAX_IN_FLIGHT,
+    ):
+        if not isinstance(records, list) or not records:
+            continue
+
+        for raw in records:
+            try:
+                dto = LeagueEntryDTO(**raw)
+                entry = MinifiedLeagueEntryDTO.from_entry(dto, region=region)
+            except Exception as exc:
+                logger.info(
+                    "LeagueUnexpectedFailed region=%s error=%s preview=%r",
+                    region.value,
+                    type(exc).__name__,
+                    compact_preview(raw),
+                )
+                continue
+            yield entry
