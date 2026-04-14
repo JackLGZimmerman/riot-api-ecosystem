@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 from uuid import UUID, uuid4
 
 from app.models import MinifiedLeagueEntryDTO
@@ -35,15 +35,6 @@ class PlayersOrchestrator(Orchestrator):
     loader: PlayerLoader
     collector: PlayerCollector
     saver: PlayerSaver
-
-    def __init__(
-        self,
-        pipeline: str,
-        loader: PlayerLoader,
-        collector: PlayerCollector,
-        saver: PlayerSaver,
-    ):
-        super().__init__(pipeline=pipeline, loader=loader, collector=collector, saver=saver)
 
     async def run(self) -> None:
         # Players intentionally does not use resumable state tracking.

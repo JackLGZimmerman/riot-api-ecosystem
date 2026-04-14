@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncIterator, NamedTuple
+from collections.abc import AsyncIterator
+from typing import Any, Literal, NamedTuple
 
 from app.core.config.constants import (
     ENDPOINTS,
@@ -12,6 +13,7 @@ from app.services.riot_api_client.utils import iter_in_flight, spreading
 
 MAX_IN_FLIGHT = 64
 logger = logging.getLogger(__name__)
+type MatchEndpointType = Literal["by_match_id", "timeline_by_match_id"]
 
 
 class MatchWork(NamedTuple):
@@ -19,9 +21,9 @@ class MatchWork(NamedTuple):
     continent: Continent
 
 
-async def yield_match_data(
+async def stream_match_data(
     matchids: list[str],
-    endpoint_type: str,
+    endpoint_type: MatchEndpointType,
     riot_api: RiotAPI,
 ) -> AsyncIterator[dict[str, Any]]:
     endpoint = ENDPOINTS["match"][endpoint_type]
@@ -62,29 +64,3 @@ async def yield_match_data(
     ):
         if isinstance(data, dict):
             yield data
-
-
-async def stream_non_timeline_data(
-    matchids: list[str],
-    *,
-    riot_api: RiotAPI,
-) -> AsyncIterator[dict[str, Any]]:
-    async for data in yield_match_data(
-        matchids,
-        endpoint_type="by_match_id",
-        riot_api=riot_api,
-    ):
-        yield data
-
-
-async def stream_timeline_data(
-    matchids: list[str],
-    *,
-    riot_api: RiotAPI,
-) -> AsyncIterator[dict[str, Any]]:
-    async for data in yield_match_data(
-        matchids,
-        endpoint_type="timeline_by_match_id",
-        riot_api=riot_api,
-    ):
-        yield data

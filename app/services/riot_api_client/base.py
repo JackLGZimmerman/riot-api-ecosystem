@@ -7,8 +7,8 @@ from json import JSONDecodeError
 import logging
 import re
 from dataclasses import dataclass
-from enum import Enum
-from functools import lru_cache
+from enum import StrEnum
+from functools import cache
 from typing import Final
 
 import aiohttp
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 rate_limiter_logger = logging.getLogger("app.services.riot_api_client.rate_limiter")
 
 
-class FetchOutcome(str, Enum):
+class FetchOutcome(StrEnum):
     OK = "ok"
     HTTP_NON_RETRYABLE = "http_non_retryable"
     NON_JSON = "non_json"
@@ -77,7 +77,7 @@ def _retry_exhausted_result(_) -> FetchJSONResult:
     )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _limiter(location_key: Region | Continent, calls: int, time_period: float):
     sustained_calls = int(calls)
     sustained_period = float(time_period)
@@ -242,11 +242,7 @@ class RiotAPI:
                             outcome=FetchOutcome.NON_JSON,
                             status=status,
                         )
-            except (
-                aiohttp.ClientConnectionError,
-                aiohttp.ClientPayloadError,
-                asyncio.TimeoutError,
-            ):
+            except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError):
                 raise
 
     async def fetch_json(

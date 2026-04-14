@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import AsyncIterator, TypeAlias
+from collections.abc import AsyncIterator
 
 from app.core.config.constants import (
     ENDPOINTS,
@@ -35,7 +35,7 @@ LEAGUE_PAGE_UPPER_BOUND: int = 1024
 MAX_IN_FLIGHT: int = 64
 PAGE_NOT_FOUND_STATUS: int = 404
 
-PageKey: TypeAlias = tuple[Region, Queues, Tiers, Divisions]
+type PageKey = tuple[Region, Queues, Tiers, Divisions]
 
 
 async def discover_page_bounds(

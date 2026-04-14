@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, Protocol
+from collections.abc import AsyncIterator
 from uuid import UUID
 
 
@@ -26,7 +28,7 @@ class Saver(Protocol):
     ) -> None: ...
 
 
-class Orchestrator:
+class Orchestrator(ABC):
     def __init__(
         self, pipeline: str, loader: Loader, collector: Collector, saver: Saver
     ):
@@ -35,5 +37,5 @@ class Orchestrator:
         self.collector = collector
         self.saver = saver
 
-    async def run(self) -> None:
-        raise NotImplementedError
+    @abstractmethod
+    async def run(self) -> None: ...

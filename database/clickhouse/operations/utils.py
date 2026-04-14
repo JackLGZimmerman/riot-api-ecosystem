@@ -1,11 +1,11 @@
 import logging
 from itertools import islice
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from uuid import UUID
 
 from database.clickhouse.client import get_client
 
-logger = logging.getLogger("app.services.riot_api_client.rate_limiter")
+logger = logging.getLogger(__name__)
 
 
 def _batched(iterable: Iterable, batch_size: int):
@@ -51,5 +51,13 @@ def persist_data(
 
 
 def delete_by_run_id(table: str, run_id: UUID) -> None:
-    command = f"ALTER TABLE {table} DELETE WHERE run_id = %(run_id)s"
-    get_client().command(command, parameters={"run_id": str(run_id)})
+    get_client().command(
+        f"ALTER TABLE {table} DELETE WHERE run_id = %(run_id)s SETTINGS mutations_sync = 2",
+        parameters={"run_id": str(run_id)},
+    )
+
+
+def _as_text(value: object) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8").rstrip("\x00")
+    return str(value)

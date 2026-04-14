@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable
 
 from app.services.riot_api_client.base import FetchOutcome, RiotAPI
 from app.services.riot_api_client.utils import PlayerCrawlState, spreading

@@ -1,6 +1,3 @@
-from collections.abc import Callable
-from typing import TypeAlias
-
 from prometheus_client import Counter, Gauge
 
 from app.core.config.constants import (
@@ -8,8 +5,6 @@ from app.core.config.constants import (
     Region,
 )
 from app.core.config.constants.generic import RETRYABLE
-
-OnAcquire: TypeAlias = Callable[[Continent, "Region | None", float], None]
 
 rate_limiter_location_rate = Gauge(
     "rate_limiter_location_rate",

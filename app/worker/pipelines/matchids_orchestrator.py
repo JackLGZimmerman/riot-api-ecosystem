@@ -4,10 +4,8 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 from uuid import uuid4
-
-from tenacity import before_sleep_log, retry, stop_never, wait_exponential
 
 from app.core.config.constants import (
     ENDPOINTS,
@@ -26,6 +24,7 @@ from app.worker.pipelines.orchestrator import (
     OrchestrationContext,
     Orchestrator,
 )
+from app.worker.pipelines.recovery_utils import run_sync_with_retry
 from app.worker.pipelines.stop_flag import raise_if_stop_requested
 from database.clickhouse.operations.matchids import (
     delete_failed_puuid_timestamp,
@@ -182,19 +181,6 @@ class MatchIDCollector(Collector):
 
 
 class MatchIDSaver:
-    @retry(
-        stop=stop_never,
-        wait=wait_exponential(multiplier=1, min=2, max=300),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        reraise=True,
-    )
-    async def _delete_with_retry(self, op_name: str, fn, *args) -> None:
-        try:
-            await asyncio.to_thread(fn, *args)
-        except Exception as e:
-            logger.exception("Error during %s: %s", op_name, e)
-            raise
-
     async def save(
         self,
         items: AsyncIterator[list[tuple[str, str]]],
@@ -227,24 +213,28 @@ class MatchIDSaver:
             )
             timestamp_upserted = True
         except Exception:
-            await self._delete_with_retry(
-                "delete_failed_puuid_timestamp",
-                delete_failed_puuid_timestamp,
-                ctx.run_id,
+            await run_sync_with_retry(
+                logger=logger, component="MatchID",
+                op_name="delete_failed_puuid_timestamp",
+                func=delete_failed_puuid_timestamp, args=(ctx.run_id,),
             )
-            await self._delete_with_retry(
-                "delete_matchid_puuids", delete_matchid_puuids, ctx.run_id
+            await run_sync_with_retry(
+                logger=logger, component="MatchID",
+                op_name="delete_matchid_puuids",
+                func=delete_matchid_puuids, args=(ctx.run_id,),
             )
-            await self._delete_with_retry(
-                "delete_matchids", delete_matchids, ctx.run_id
+            await run_sync_with_retry(
+                logger=logger, component="MatchID",
+                op_name="delete_matchids",
+                func=delete_matchids, args=(ctx.run_id,),
             )
             raise
         finally:
             if timestamp_upserted:
-                await self._delete_with_retry(
-                    "delete_old_puuid_timestamps",
-                    delete_old_puuid_timestamps,
-                    ctx.run_id,
+                await run_sync_with_retry(
+                    logger=logger, component="MatchID",
+                    op_name="delete_old_puuid_timestamps",
+                    func=delete_old_puuid_timestamps, args=(ctx.run_id,),
                 )
             else:
                 logger.warning(

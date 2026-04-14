@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Mapping
+from typing import Any
+from collections.abc import Callable, Mapping
 
 from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
+
+_logger = logging.getLogger(__name__)
 
 
 # RECOVERY-SYSTEM: shared retry wrapper for sync persistence helpers.
 @retry(
     stop=stop_after_attempt(8),
     wait=wait_exponential(multiplier=1, min=2, max=60),
-    before_sleep=lambda state: before_sleep_log(
-        state.kwargs["logger"], logging.WARNING
-    )(state),
+    before_sleep=before_sleep_log(_logger, logging.WARNING),
     reraise=True,
 )
 async def run_sync_with_retry(

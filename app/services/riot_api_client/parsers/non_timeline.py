@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Sequence, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 from pydantic import NonNegativeInt, PositiveInt, ValidationError
 
@@ -25,22 +26,22 @@ from app.services.riot_api_client.parsers.schema_drift import (
 logger = logging.getLogger(__name__)
 
 
-class MatchIdFullRow(TypedDict):
-    matchIdFull: str
+class MatchIdRow(TypedDict, total=False):
+    matchId: str | NonNegativeInt
 
 
-class NumericMatchIdRow(MatchIdFullRow):
-    matchId: NonNegativeInt
-
-
-class TabulatedMetadata(MatchIdFullRow):
-    matchId: str
+class TabulatedMetadata(MatchIdRow):
     dataVersion: str
     participants: list[str]
 
 
 class MetadataParser:
-    def parse(self, validated: Metadata) -> list[TabulatedMetadata]:
+    def parse(
+        self,
+        validated: Metadata,
+        matchId: str | int,
+    ) -> list[TabulatedMetadata]:
+        _ = matchId
         return [
             {
                 "matchId": validated.matchId,
@@ -50,11 +51,12 @@ class MetadataParser:
         ]
 
 
-class TabulatedInfo(NumericMatchIdRow):
+class TabulatedInfo(MatchIdRow):
     endOfGameResult: str
     gameCreation: NonNegativeInt
     gameDuration: NonNegativeInt
     gameEndTimestamp: NonNegativeInt
+    gameId: NonNegativeInt
     gameStartTimestamp: NonNegativeInt
     gameType: str
     gameVersion: str
@@ -67,7 +69,11 @@ class TabulatedInfo(NumericMatchIdRow):
 
 
 class GameInfoParser:
-    def parse(self, validated: Info) -> list[TabulatedInfo]:
+    def parse(
+        self,
+        validated: Info,
+        matchId: str | int,
+    ) -> list[TabulatedInfo]:
         gameVersion = validated.gameVersion
         parts = gameVersion.split(".")
         season = -1
@@ -80,13 +86,13 @@ class GameInfoParser:
                 patch = int(parts[1])
             except ValueError:
                 logger.warning(
-                    "UnexpectedGameVersionNumericFormat match_id=%s gameVersion=%r",
+                    "UnexpectedGameVersionNumericFormat game_id=%s gameVersion=%r",
                     validated.gameId,
                     gameVersion,
                 )
         else:
             logger.warning(
-                "UnexpectedGameVersionFormat match_id=%s gameVersion=%r",
+                "UnexpectedGameVersionFormat game_id=%s gameVersion=%r",
                 validated.gameId,
                 gameVersion,
             )
@@ -97,7 +103,8 @@ class GameInfoParser:
                 "gameCreation": validated.gameCreation,
                 "gameDuration": validated.gameDuration,
                 "gameEndTimestamp": validated.gameEndTimestamp,
-                "matchId": validated.gameId,
+                "gameId": validated.gameId,
+                "matchId": matchId,
                 "gameStartTimestamp": validated.gameStartTimestamp,
                 "gameType": validated.gameType,
                 "gameVersion": gameVersion,
@@ -111,15 +118,18 @@ class GameInfoParser:
         ]
 
 
-class TabulatedBan(NumericMatchIdRow):
+class TabulatedBan(MatchIdRow):
     teamId: PositiveInt
     pickTurn: PositiveInt
     championId: int
 
 
 class BansParser:
-    def parse(self, validated: Info) -> list[TabulatedBan]:
-        matchId: NonNegativeInt = validated.gameId
+    def parse(
+        self,
+        validated: Info,
+        matchId: str | int,
+    ) -> list[TabulatedBan]:
         rows: list[TabulatedBan] = []
 
         for team in validated.teams:
@@ -137,15 +147,18 @@ class BansParser:
         return rows
 
 
-class TabulatedFeat(NumericMatchIdRow):
+class TabulatedFeat(MatchIdRow):
     teamId: PositiveInt
     featType: str
     featState: int
 
 
 class FeatsParser:
-    def parse(self, validated: Info) -> list[TabulatedFeat]:
-        matchId: NonNegativeInt = validated.gameId
+    def parse(
+        self,
+        validated: Info,
+        matchId: str | int,
+    ) -> list[TabulatedFeat]:
         rows: list[TabulatedFeat] = []
 
         for team in validated.teams:
@@ -171,7 +184,7 @@ class FeatsParser:
         return rows
 
 
-class TabulatedObjective(NumericMatchIdRow):
+class TabulatedObjective(MatchIdRow):
     teamId: PositiveInt
     objectiveType: str
     first: bool
@@ -179,9 +192,12 @@ class TabulatedObjective(NumericMatchIdRow):
 
 
 class ObjectivesParser:
-    def parse(self, validated: Info) -> list[TabulatedObjective]:
+    def parse(
+        self,
+        validated: Info,
+        matchId: str | int,
+    ) -> list[TabulatedObjective]:
         rows: list[TabulatedObjective] = []
-        matchId: NonNegativeInt = validated.gameId
 
         for team in validated.teams:
             teamId: PositiveInt = team.teamId
@@ -214,7 +230,7 @@ class ObjectivesParser:
         return rows
 
 
-class TabulatedParticipantStats(NumericMatchIdRow):
+class TabulatedParticipantStats(MatchIdRow):
     participantId: NonNegativeInt
     puuid: str
     teamId: NonNegativeInt
@@ -389,7 +405,7 @@ class ParticipantStatsParser:
     def parse(
         self,
         participants: Sequence[Participant],
-        matchId: NonNegativeInt,
+        matchId: str | NonNegativeInt,
     ) -> list[TabulatedParticipantStats]:
         rows: list[TabulatedParticipantStats] = []
 
@@ -447,7 +463,7 @@ class ParticipantStatsParser:
         return rows
 
 
-class TabulatedParticipantChallenges(NumericMatchIdRow):
+class TabulatedParticipantChallenges(MatchIdRow):
     teamId: PositiveInt
     puuid: str
     payload: dict[str, ChallengeValue]
@@ -455,7 +471,7 @@ class TabulatedParticipantChallenges(NumericMatchIdRow):
 
 class ParticipantChallengesParser:
     def parse(
-        self, participants: Sequence[Participant], matchId: NonNegativeInt
+        self, participants: Sequence[Participant], matchId: str | int
     ) -> list[TabulatedParticipantChallenges]:
         rows: list[TabulatedParticipantChallenges] = []
         for p in participants:
@@ -481,7 +497,7 @@ class ParticipantChallengesParser:
         return rows
 
 
-class TabulatedParticipantPerkValues(NumericMatchIdRow):
+class TabulatedParticipantPerkValues(MatchIdRow):
     teamId: PositiveInt
     puuid: str
 
@@ -506,7 +522,7 @@ class TabulatedParticipantPerkValues(NumericMatchIdRow):
     sub_var3_2: int
 
 
-class TabulatedParticipantPerkIds(NumericMatchIdRow):
+class TabulatedParticipantPerkIds(MatchIdRow):
     teamId: PositiveInt
     puuid: str
 
@@ -529,7 +545,7 @@ class TabulatedParticipantPerkIds(NumericMatchIdRow):
 
 class ParticipantPerkValuesParser:
     def parse(
-        self, participants: Sequence[Participant], matchId: NonNegativeInt
+        self, participants: Sequence[Participant], matchId: str | int
     ) -> list[TabulatedParticipantPerkValues]:
         rows: list[TabulatedParticipantPerkValues] = []
 
@@ -570,7 +586,7 @@ class ParticipantPerkValuesParser:
 
 class ParticipantPerkIdsParser:
     def parse(
-        self, participants: Sequence[Participant], matchId: NonNegativeInt
+        self, participants: Sequence[Participant], matchId: str | int
     ) -> list[TabulatedParticipantPerkIds]:
         rows: list[TabulatedParticipantPerkIds] = []
         perk_bit_width = 14
@@ -714,14 +730,14 @@ class MatchDataNonTimelineParsingOrchestrator:
             metadata: Metadata = nt.metadata
             info: Info = nt.info
             participants: list[Participant] = info.participants
-            matchId: NonNegativeInt = info.gameId
+            matchId = metadata.matchId
 
             tables = NonTimelineTables(
-                metadata=self.metadata.parse(metadata),
-                game_info=self.gameInfo.parse(info),
-                bans=self.bans.parse(info),
-                feats=self.feats.parse(info),
-                objectives=self.objectives.parse(info),
+                metadata=self.metadata.parse(metadata, matchId),
+                game_info=self.gameInfo.parse(info, matchId),
+                bans=self.bans.parse(info, matchId),
+                feats=self.feats.parse(info, matchId),
+                objectives=self.objectives.parse(info, matchId),
                 participant_stats=self.participantStats.parse(participants, matchId),
                 participant_challenges=self.participantChallenges.parse(
                     participants, matchId

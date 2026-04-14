@@ -4,25 +4,17 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from operator import attrgetter
-from typing import (
-    Any,
-    AsyncIterable,
-    AsyncIterator,
-    Literal,
-    TypeAlias,
-)
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
 
 from app.core.config.settings import settings
 from app.services.riot_api_client.base import RiotAPI
-from app.services.riot_api_client.match_data import (
-    stream_non_timeline_data,
-    stream_timeline_data,
-)
+from app.services.riot_api_client.match_data import stream_match_data
 from app.services.riot_api_client.parsers.non_timeline import (
     NonTimelineTables,
     TabulatedBan,
@@ -58,7 +50,6 @@ from app.worker.pipelines.recovery_utils import run_sync_with_retry
 from app.worker.pipelines.stop_flag import raise_if_stop_requested
 from database.clickhouse.operations.matchdata import (
     delete_by_matchids,
-    ensure_matchid_full_schema,
 )
 from database.clickhouse.operations.utils import delete_by_run_id, persist_data
 from database.clickhouse.operations.work_state import (
@@ -71,7 +62,10 @@ from database.clickhouse.operations.work_state import (
 logger = logging.getLogger(__name__)
 
 # RECOVERY-SYSTEM: batch checkpointing config.
-MATCHDATA_BATCH_SIZE = 10_000
+# Keep the claim batch smaller so any rollback/delete scope is capped per run,
+# while preserving larger row insert batches for throughput.
+MATCHDATA_CLAIM_BATCH_SIZE = 250
+MATCHDATA_INSERT_BATCH_SIZE = 10_000
 MATCHDATA_FLUSH_WINDOW_CALLS = 250
 MATCHDATA_MIN_FLUSH_INTERVAL_S = 60.0
 MATCHDATA_MAX_FLUSH_INTERVAL_S = 5_000.0
@@ -102,130 +96,95 @@ def columns_from_typed_dict(td: type) -> tuple[str, ...]:
     return tuple(annotations)
 
 
-BUILDING_KILL_COLS = columns_from_typed_dict(BuildingKillRow)
-CHAMPION_KILL_COLS = columns_from_typed_dict(ChampionKillRow)
-DRAGON_SOUL_GIVEN_COLS = columns_from_typed_dict(DragonSoulGivenRow)
-ELITE_MONSTER_KILL_COLS = columns_from_typed_dict(EliteMonsterKillRow)
-PARTICIPANT_STATS_COLS = columns_from_typed_dict(ParticipantStatsRow)
-CHAMPION_SPECIAL_KILL_COLS = columns_from_typed_dict(ChampionSpecialKillRow)
-TURRET_PLATE_DESTROYED_COLS = columns_from_typed_dict(TurretPlateDestroyedRow)
-PAYLOAD_EVENT_COLS = columns_from_typed_dict(RareEventRow)
-CHAMPION_KILL_DAMAGE_INSTANCE_COLS = columns_from_typed_dict(
-    ChampionKillDamageInstanceRow
-)
-
-TABULATED_METADATA_COLS = columns_from_typed_dict(TabulatedMetadata)
-TABULATED_INFO_COLS = columns_from_typed_dict(TabulatedInfo)
-TABULATED_BAN_COLS = columns_from_typed_dict(TabulatedBan)
-TABULATED_FEAT_COLS = columns_from_typed_dict(TabulatedFeat)
-TABULATED_OBJECTIVE_COLS = columns_from_typed_dict(TabulatedObjective)
-TABULATED_PARTICIPANT_STATS_COLS = columns_from_typed_dict(TabulatedParticipantStats)
-TABULATED_PARTICIPANT_PERK_VALUES_COLS = columns_from_typed_dict(
-    TabulatedParticipantPerkValues
-)
-TABULATED_PARTICIPANT_PERK_IDS_COLS = columns_from_typed_dict(
-    TabulatedParticipantPerkIds
-)
-TABULATED_PARTICIPANT_CHALLENGES_COLS = columns_from_typed_dict(
-    TabulatedParticipantChallenges
-)
-
-NON_TIMELINE_DELETE_TABLES: tuple[str, ...] = (
-    "game_data.metadata",
-    "game_data.info",
-    "game_data.bans",
-    "game_data.feats",
-    "game_data.objectives",
-    "game_data.participant_stats",
-    "game_data.participant_challenges",
-    "game_data.participant_perk_values",
-    "game_data.participant_perk_ids",
-)
-
-TIMELINE_DELETE_TABLES: tuple[str, ...] = (
-    "game_data.tl_participant_stats",
-    "game_data.tl_building_kill",
-    "game_data.tl_champion_kill",
-    "game_data.tl_champion_special_kill",
-    "game_data.tl_dragon_soul_given",
-    "game_data.tl_elite_monster_kill",
-    "game_data.tl_payload_event",
-    "game_data.tl_turret_plate_destroyed",
-    "game_data.tl_ck_victim_damage_dealt",
-    "game_data.tl_ck_victim_damage_received",
-)
+@dataclass(frozen=True)
+class TableSpec:
+    table: str
+    columns: tuple[str, ...]
+    getter: Callable[[Any], Iterable[dict[str, Any]]]
 
 
-NON_TIMELINE_INSERTS = (
-    ("game_data.metadata", TABULATED_METADATA_COLS, attrgetter("metadata")),
-    ("game_data.info", TABULATED_INFO_COLS, attrgetter("game_info")),
-    ("game_data.bans", TABULATED_BAN_COLS, attrgetter("bans")),
-    ("game_data.feats", TABULATED_FEAT_COLS, attrgetter("feats")),
-    ("game_data.objectives", TABULATED_OBJECTIVE_COLS, attrgetter("objectives")),
-    (
+def _table_spec(table: str, row_type: type[Any], attr: str) -> TableSpec:
+    return TableSpec(
+        table=table,
+        columns=columns_from_typed_dict(row_type),
+        getter=attrgetter(attr),
+    )
+
+
+NON_TIMELINE_TABLE_SPECS = (
+    _table_spec("game_data.metadata", TabulatedMetadata, "metadata"),
+    _table_spec("game_data.info", TabulatedInfo, "game_info"),
+    _table_spec("game_data.bans", TabulatedBan, "bans"),
+    _table_spec("game_data.feats", TabulatedFeat, "feats"),
+    _table_spec("game_data.objectives", TabulatedObjective, "objectives"),
+    _table_spec(
         "game_data.participant_stats",
-        TABULATED_PARTICIPANT_STATS_COLS,
-        attrgetter("participant_stats"),
+        TabulatedParticipantStats,
+        "participant_stats",
     ),
-    (
+    _table_spec(
         "game_data.participant_challenges",
-        TABULATED_PARTICIPANT_CHALLENGES_COLS,
-        attrgetter("participant_challenges"),
+        TabulatedParticipantChallenges,
+        "participant_challenges",
     ),
-    (
+    _table_spec(
         "game_data.participant_perk_values",
-        TABULATED_PARTICIPANT_PERK_VALUES_COLS,
-        attrgetter("participant_perk_values"),
+        TabulatedParticipantPerkValues,
+        "participant_perk_values",
     ),
-    (
+    _table_spec(
         "game_data.participant_perk_ids",
-        TABULATED_PARTICIPANT_PERK_IDS_COLS,
-        attrgetter("participant_perk_ids"),
+        TabulatedParticipantPerkIds,
+        "participant_perk_ids",
     ),
 )
 
-TIMELINE_INSERTS = (
-    (
+TIMELINE_TABLE_SPECS = (
+    _table_spec(
         "game_data.tl_participant_stats",
-        PARTICIPANT_STATS_COLS,
-        attrgetter("participantStats"),
+        ParticipantStatsRow,
+        "participantStats",
     ),
-    ("game_data.tl_building_kill", BUILDING_KILL_COLS, attrgetter("buildingKill")),
-    ("game_data.tl_champion_kill", CHAMPION_KILL_COLS, attrgetter("championKill")),
-    (
+    _table_spec("game_data.tl_building_kill", BuildingKillRow, "buildingKill"),
+    _table_spec("game_data.tl_champion_kill", ChampionKillRow, "championKill"),
+    _table_spec(
         "game_data.tl_champion_special_kill",
-        CHAMPION_SPECIAL_KILL_COLS,
-        attrgetter("championSpecialKill"),
+        ChampionSpecialKillRow,
+        "championSpecialKill",
     ),
-    (
+    _table_spec(
         "game_data.tl_dragon_soul_given",
-        DRAGON_SOUL_GIVEN_COLS,
-        attrgetter("dragonSoulGiven"),
+        DragonSoulGivenRow,
+        "dragonSoulGiven",
     ),
-    (
+    _table_spec(
         "game_data.tl_elite_monster_kill",
-        ELITE_MONSTER_KILL_COLS,
-        attrgetter("eliteMonsterKill"),
+        EliteMonsterKillRow,
+        "eliteMonsterKill",
     ),
-    ("game_data.tl_payload_event", PAYLOAD_EVENT_COLS, attrgetter("payloadEvents")),
-    (
+    _table_spec("game_data.tl_payload_event", RareEventRow, "payloadEvents"),
+    _table_spec(
         "game_data.tl_turret_plate_destroyed",
-        TURRET_PLATE_DESTROYED_COLS,
-        attrgetter("turretPlateDestroyed"),
+        TurretPlateDestroyedRow,
+        "turretPlateDestroyed",
     ),
-    (
+    _table_spec(
         "game_data.tl_ck_victim_damage_dealt",
-        CHAMPION_KILL_DAMAGE_INSTANCE_COLS,
-        attrgetter("championKillVictimDamageDealt"),
+        ChampionKillDamageInstanceRow,
+        "championKillVictimDamageDealt",
     ),
-    (
+    _table_spec(
         "game_data.tl_ck_victim_damage_received",
-        CHAMPION_KILL_DAMAGE_INSTANCE_COLS,
-        attrgetter("championKillVictimDamageReceived"),
+        ChampionKillDamageInstanceRow,
+        "championKillVictimDamageReceived",
     ),
 )
 
-StreamName: TypeAlias = Literal["non_timeline", "timeline"]
+NON_TIMELINE_DELETE_TABLES = tuple(spec.table for spec in NON_TIMELINE_TABLE_SPECS)
+TIMELINE_DELETE_TABLES = tuple(spec.table for spec in TIMELINE_TABLE_SPECS)
+ALL_TABLE_SPECS = (*NON_TIMELINE_TABLE_SPECS, *TIMELINE_TABLE_SPECS)
+
+type StreamName = Literal["non_timeline", "timeline"]
 
 
 @dataclass(frozen=True)
@@ -239,7 +198,7 @@ class _Done:
     stream: StreamName
 
 
-QueueMsg: TypeAlias = StreamItem | _Done
+type QueueMsg = StreamItem | _Done
 
 
 @dataclass(frozen=True)
@@ -332,7 +291,7 @@ class MatchDataLoader(Loader):
     def __init__(
         self,
         *,
-        batch_size: int = MATCHDATA_BATCH_SIZE,
+        batch_size: int = MATCHDATA_CLAIM_BATCH_SIZE,
     ) -> None:
         self.batch_size = batch_size
         self._initialized = False
@@ -341,7 +300,6 @@ class MatchDataLoader(Loader):
         _ = ctx
         if not self._initialized:
             ensure_matchdata_state_schema()
-            ensure_matchid_full_schema()
             seeded_pending = seed_from_latest_matchids()
             if seeded_pending:
                 logger.info("MatchData loader seeded pending=%d", seeded_pending)
@@ -365,11 +323,14 @@ class MatchDataStreamCollector(Collector):
         self, state: MatchDataCollectorState, ctx: OrchestrationContext
     ) -> AsyncIterator[dict[str, Any]]:
         _ = ctx
-        iterator: AsyncIterator[dict[str, Any]]
-        if self.stream == "non_timeline":
-            iterator = stream_non_timeline_data(state.matchids, riot_api=self.riot_api)
-        else:
-            iterator = stream_timeline_data(state.matchids, riot_api=self.riot_api)
+        endpoint_type = (
+            "by_match_id" if self.stream == "non_timeline" else "timeline_by_match_id"
+        )
+        iterator = stream_match_data(
+            state.matchids,
+            endpoint_type=endpoint_type,
+            riot_api=self.riot_api,
+        )
 
         raise_if_stop_requested(stage=f"match_data:{self.stream}:start")
         async for raw in iterator:
@@ -387,14 +348,13 @@ class MatchDataSaver(Saver):
         self.non_timeline_parser = non_timeline_parser
         self.timeline_parser = timeline_parser
 
-        self.batch_size = MATCHDATA_BATCH_SIZE
+        self.batch_size = MATCHDATA_INSERT_BATCH_SIZE
         self.flush_interval_s = min(
             MATCHDATA_MAX_FLUSH_INTERVAL_S,
             _flush_interval_from_rate_limit() * MATCHDATA_FLUSH_INTERVAL_MULTIPLIER,
         )
-        self._table_meta: dict[str, tuple[tuple[str, ...], int]] = {
-            table: (cols, self.batch_size)
-            for table, cols, _ in (*NON_TIMELINE_INSERTS, *TIMELINE_INSERTS)
+        self._table_columns: dict[str, tuple[str, ...]] = {
+            spec.table: spec.columns for spec in ALL_TABLE_SPECS
         }
 
     async def save(
@@ -421,11 +381,11 @@ class MatchDataSaver(Saver):
                     nt: NonTimelineTables = await asyncio.to_thread(
                         self.non_timeline_parser.run, item.raw
                     )
-                    self._attach_match_id_full(nt, match_id)
+                    self._attach_match_id(nt, match_id)
                     if match_id != "unknown":
                         stream_successes[match_id].add("non_timeline")
                     await self._buffer_inserts(
-                        NON_TIMELINE_INSERTS,
+                        NON_TIMELINE_TABLE_SPECS,
                         nt,
                         buffers,
                         ctx.run_id,
@@ -435,11 +395,11 @@ class MatchDataSaver(Saver):
                     tl: TimelineTables = await asyncio.to_thread(
                         self.timeline_parser.run, item.raw
                     )
-                    self._attach_match_id_full(tl, match_id)
+                    self._attach_match_id(tl, match_id)
                     if match_id != "unknown":
                         stream_successes[match_id].add("timeline")
                     await self._buffer_inserts(
-                        TIMELINE_INSERTS,
+                        TIMELINE_TABLE_SPECS,
                         tl,
                         buffers,
                         ctx.run_id,
@@ -455,16 +415,15 @@ class MatchDataSaver(Saver):
 
             await self._flush_all_buffers(buffers, ctx.run_id)
 
-            successful_match_ids: list[str] = [
-                match_id
-                for match_id in state.matchids
-                if stream_successes.get(match_id) == {"non_timeline", "timeline"}
-            ]
-            failed_match_ids: list[str] = [
-                match_id
-                for match_id in state.matchids
-                if stream_successes.get(match_id) != {"non_timeline", "timeline"}
-            ]
+            both: set[StreamName] = {"non_timeline", "timeline"}
+            successful_match_ids: list[str] = []
+            failed_match_ids: list[str] = []
+            for mid in state.matchids:
+                (
+                    successful_match_ids
+                    if stream_successes.get(mid) == both
+                    else failed_match_ids
+                ).append(mid)
 
             if failed_match_ids:
                 logger.warning(
@@ -495,33 +454,24 @@ class MatchDataSaver(Saver):
             )
             raise
 
-    async def _run_deletes(self, tables: tuple[str, ...], run_id: UUID) -> None:
-        for table in tables:
-            await run_sync_with_retry(
-                logger=logger,
-                component="MatchData",
-                op_name=f"delete_by_run_id:{table}",
-                func=delete_by_run_id,
-                args=(table, run_id),
-            )
-
-    async def delete_failed_matchids(self, match_ids: list[str]) -> None:
-        await self._run_deletes_for_matchids(NON_TIMELINE_DELETE_TABLES, match_ids)
-        await self._run_deletes_for_matchids(TIMELINE_DELETE_TABLES, match_ids)
-
-    async def _run_deletes_for_matchids(
+    async def _delete_tables(
         self,
         tables: tuple[str, ...],
-        match_ids: list[str],
+        func: Callable[..., Any],
+        *func_args: Any,
     ) -> None:
         for table in tables:
             await run_sync_with_retry(
                 logger=logger,
                 component="MatchData",
-                op_name=f"delete_by_matchids:{table}",
-                func=delete_by_matchids,
-                args=(table, match_ids),
+                op_name=f"{func.__name__}:{table}",
+                func=func,
+                args=(table, *func_args),
             )
+
+    async def delete_failed_matchids(self, match_ids: list[str]) -> None:
+        for tables in (NON_TIMELINE_DELETE_TABLES, TIMELINE_DELETE_TABLES):
+            await self._delete_tables(tables, delete_by_matchids, match_ids)
 
     async def mark_finished_matchids(self, match_ids: list[str]) -> None:
         await run_sync_with_retry(
@@ -533,8 +483,8 @@ class MatchDataSaver(Saver):
         )
 
     async def rollback_run(self, run_id: UUID) -> None:
-        await self._run_deletes(NON_TIMELINE_DELETE_TABLES, run_id)
-        await self._run_deletes(TIMELINE_DELETE_TABLES, run_id)
+        for tables in (NON_TIMELINE_DELETE_TABLES, TIMELINE_DELETE_TABLES):
+            await self._delete_tables(tables, delete_by_run_id, run_id)
 
     @staticmethod
     def _extract_match_id(raw: Any) -> str:
@@ -547,12 +497,12 @@ class MatchDataSaver(Saver):
         return match_id if isinstance(match_id, str) else "unknown"
 
     @staticmethod
-    def _attach_match_id_full(parsed: Any, match_id: str) -> None:
+    def _attach_match_id(parsed: Any, match_id: str) -> None:
         if not match_id:
             return
         for rows in vars(parsed).values():
             for row in rows:
-                row["matchIdFull"] = match_id
+                row["matchId"] = match_id
 
     @retry(
         stop=stop_after_attempt(8),
@@ -561,13 +511,17 @@ class MatchDataSaver(Saver):
         reraise=True,
     )
     async def _insert_one(
-        self, table: str, cols, items, run_id: UUID, *, batch_size: int
+        self,
+        table: str,
+        cols: tuple[str, ...],
+        items: list[dict[str, Any]],
+        run_id: UUID,
     ) -> None:
         if not items:
             return
         try:
             await asyncio.to_thread(
-                persist_data, table, cols, items, run_id, batch_size
+                persist_data, table, cols, items, run_id, self.batch_size
             )
         except Exception as e:
             logger.exception(
@@ -580,19 +534,18 @@ class MatchDataSaver(Saver):
 
     async def _buffer_inserts(
         self,
-        specs,
-        parsed,
+        specs: tuple[TableSpec, ...],
+        parsed: Any,
         buffers: dict[str, list[dict[str, Any]]],
         run_id: UUID,
     ) -> None:
-        for table, _, getter in specs:
-            items = list(getter(parsed))
+        for spec in specs:
+            items = list(spec.getter(parsed))
             if not items:
                 continue
-            buffers[table].extend(items)
-            _, batch_size = self._table_meta[table]
-            if len(buffers[table]) >= batch_size:
-                await self._flush_table_buffer(table, buffers, run_id)
+            buffers[spec.table].extend(items)
+            if len(buffers[spec.table]) >= self.batch_size:
+                await self._flush_table_buffer(spec.table, buffers, run_id)
 
     async def _flush_table_buffer(
         self,
@@ -603,15 +556,9 @@ class MatchDataSaver(Saver):
         items = buffers.get(table)
         if not items:
             return
-        cols, batch_size = self._table_meta[table]
+        cols = self._table_columns[table]
         buffers[table] = []
-        await self._insert_one(
-            table,
-            cols,
-            items,
-            run_id,
-            batch_size=batch_size,
-        )
+        await self._insert_one(table, cols, items, run_id)
 
     async def _flush_all_buffers(
         self,

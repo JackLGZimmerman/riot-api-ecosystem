@@ -1,7 +1,8 @@
 import time
 import asyncio
 import logging
-from typing import AsyncIterator, NamedTuple
+from typing import NamedTuple
+from collections.abc import AsyncIterator
 from uuid import UUID
 from app.core.config import settings
 
@@ -92,19 +93,6 @@ def delete_partial_players_run(run_id: UUID) -> None:
     """
 
     get_client().command(query, parameters={"run_id": run_id})
-
-
-def load_players_snapshot_ts() -> int:
-    query = """
-        SELECT stored_at
-        FROM game_data.data_timestamps
-        WHERE name = %(name)s
-    """
-    rows = get_client().query(
-        query,
-        parameters={"name": PLAYERS_SNAPSHOT_TIMESTAMP_NAME},
-    ).result_rows
-    return int(rows[0][0]) if rows else 0
 
 
 def upsert_players_snapshot_ts(ts: int, run_id: UUID) -> None:

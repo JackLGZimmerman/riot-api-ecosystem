@@ -1,12 +1,13 @@
 import asyncio
 import logging
-from typing import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable
 from uuid import UUID
 
 from database.clickhouse.client import get_client
+from database.clickhouse.operations.utils import _as_text
 
 PUUID_DATA_TIMESTAMP_NAME = "matchids_puuids_ts"
-logger = logging.getLogger("app.services.riot_api_client.rate_limiter")
+logger = logging.getLogger(__name__)
 
 
 # RECOVERY-SYSTEM: deterministic per-batch insert helper used by resumable saver.
@@ -23,23 +24,6 @@ def _insert_matchids_rows(rows: list[tuple[UUID, str, str]]) -> None:
         data=rows,
         column_names=["run_id", "matchid", "queue_type"],
     )
-
-
-def insert_matchids_in_batches(
-    match_rows: Iterable[tuple[str, str]],
-    run_id: UUID,
-    *,
-    batch_size: int = 20_000,
-) -> None:
-    batch: list[tuple[UUID, str, str]] = []
-    for match_id, queue_type in match_rows:
-        batch.append((run_id, match_id, queue_type))
-        if len(batch) >= batch_size:
-            _insert_matchids_rows(batch)
-            batch.clear()
-
-    if batch:
-        _insert_matchids_rows(batch)
 
 
 async def insert_matchids_stream_in_batches(
@@ -202,7 +186,3 @@ def insert_puuids_in_batches(
         )
 
 
-def _as_text(value: object) -> str:
-    if isinstance(value, (bytes, bytearray)):
-        return value.decode("utf-8").rstrip("\x00")
-    return str(value)

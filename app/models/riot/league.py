@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict
 
 from pydantic import BaseModel, TypeAdapter
 
@@ -25,7 +25,7 @@ class MiniSeriesDTO(BaseModel):
 class LeagueItemDTO(BaseModel):
     freshBlood: bool
     wins: int
-    miniSeries: Optional[MiniSeriesDTO] = None
+    miniSeries: MiniSeriesDTO | None = None
     inactive: bool
     veteran: bool
     hotStreak: bool
@@ -37,7 +37,7 @@ class LeagueItemDTO(BaseModel):
 
 class LeagueListDTO(BaseModel):
     leagueId: str
-    entries: List[LeagueItemDTO]
+    entries: list[LeagueItemDTO]
     tier: str
     name: str
     queue: str
@@ -56,7 +56,7 @@ class LeagueEntryDTO(BaseModel):
     veteran: bool
     freshBlood: bool
     inactive: bool
-    miniSeries: Optional[MiniSeriesDTO] = None
+    miniSeries: MiniSeriesDTO | None = None
 
 
 class EntryPayload(TypedDict):
@@ -102,8 +102,8 @@ class MinifiedLeagueEntryDTO(BaseModel):
         dto: LeagueListDTO,
         *,
         region: str,
-    ) -> List[MinifiedLeagueEntryDTO]:
-        payload: List[EntryPayload] = [
+    ) -> list[MinifiedLeagueEntryDTO]:
+        payload: list[EntryPayload] = [
             {
                 "puuid": e.puuid,
                 "queueType": dto.queue,
@@ -115,7 +115,7 @@ class MinifiedLeagueEntryDTO(BaseModel):
             }
             for e in dto.entries
         ]
-        adapter = TypeAdapter(List[MinifiedLeagueEntryDTO])
+        adapter = TypeAdapter(list[MinifiedLeagueEntryDTO])
         return adapter.validate_python(payload)
 
 
@@ -133,8 +133,8 @@ class BasicBoundConfig(BaseModel):
     lower_division: Divisions | None = None
 
 
-EliteBoundsConfig = Dict[Queues, EliteBoundConfig]
-BasicBoundsConfig = Dict[Queues, BasicBoundConfig]
+EliteBoundsConfig = dict[Queues, EliteBoundConfig]
+BasicBoundsConfig = dict[Queues, BasicBoundConfig]
 
 
 _elite_bounds_adapter = TypeAdapter(EliteBoundsConfig)

@@ -1,8 +1,8 @@
 from http import HTTPStatus
-from typing import Any, TypeAlias
+from typing import Any
 
-JSON: TypeAlias = dict[str, Any]
-JSONList: TypeAlias = list[JSON]
+type JSON = dict[str, Any]
+type JSONList = list[JSON]
 
 RETRYABLE = {
     HTTPStatus.TOO_MANY_REQUESTS.value,  # 429

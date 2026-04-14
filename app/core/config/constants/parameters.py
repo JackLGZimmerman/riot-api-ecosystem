@@ -1,8 +1,5 @@
-from typing import TypeVar, Mapping
+from collections.abc import Mapping
 from enum import StrEnum
-
-# Define a generic enum type variable
-E = TypeVar("E", bound=StrEnum)
 
 
 class Queues(StrEnum):

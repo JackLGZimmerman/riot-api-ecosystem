@@ -1,17 +1,8 @@
 import asyncio
 import logging
 from collections import defaultdict, deque
-from typing import (
-    Any,
-    AsyncIterator,
-    Awaitable,
-    Callable,
-    Hashable,
-    Iterable,
-    NamedTuple,
-    TypeAlias,
-    TypeVar,
-)
+from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Iterable
+from typing import Any, NamedTuple
 
 from app.core.config.constants import (
     JSON,
@@ -33,14 +24,9 @@ from app.services.riot_api_client.base import RiotAPI
 _ELITE_ORDER = list(EliteTiers)
 _BASIC_RANKS = [(tier, div) for tier in Tiers for div in Divisions]
 
-T = TypeVar("T")
-P = TypeVar("P")
-R = TypeVar("R")
-
-JSONLike = JSON | JSONList | None
-
-UrlRegion: TypeAlias = tuple[str, Region]
-UrlTuple: TypeAlias = list[UrlRegion]
+type JSONLike = JSON | JSONList | None
+type UrlRegion = tuple[str, Region]
+type UrlTuple = list[UrlRegion]
 
 
 class PlayerCrawlState(NamedTuple):
@@ -50,27 +36,7 @@ class PlayerCrawlState(NamedTuple):
     next_page_start: int
     base_url: str
 
-
-K = TypeVar("K", bound=Hashable)
 MAX_LOG_PREVIEW = 300
-
-
-async def fetch_json_with_carry_over(
-    *,
-    url: str,
-    location: Region | Continent,
-    riot_api: RiotAPI,
-    carry_over: tuple[Any, ...],
-) -> tuple[Any, ...]:
-    """
-    Thin wrapper around riot_api.fetch_json that:
-    - returns all `carry_over` values plus the fetched JSON as a single tuple.
-    """
-    data: JSONLike = await riot_api.fetch_json(
-        url=url,
-        location=location,
-    )
-    return (*carry_over, data)
 
 
 def compact_preview(payload: Any, *, max_len: int = MAX_LOG_PREVIEW) -> str:
@@ -89,13 +55,10 @@ async def fetch_region_payload(
     error_event: str = "LeagueFetchFailed",
 ) -> tuple[Region, JSONLike]:
     try:
-        _, data = await fetch_json_with_carry_over(
-            carry_over=(region,),
+        return region, await riot_api.fetch_json(
             url=url,
             location=region,
-            riot_api=riot_api,
         )
-        return region, data
     except Exception as exc:
         logger.warning(
             "%s region=%s error=%s",
@@ -106,7 +69,7 @@ async def fetch_region_payload(
         return region, None
 
 
-async def iter_in_flight(
+async def iter_in_flight[T, R](
     items: Iterable[T],
     worker: Callable[[T], Awaitable[R]],
     *,
@@ -188,7 +151,7 @@ def bounded_sub_elite_tiers(cfg: BasicBoundConfig) -> list[tuple[Tiers, Division
     return _BASIC_RANKS[start : end + 1]
 
 
-def spreading(items: Iterable[P], key_fn: Callable[[P], K]) -> list[P]:
+def spreading[P, K: Hashable](items: Iterable[P], key_fn: Callable[[P], K]) -> list[P]:
     buckets: dict[K, deque[P]] = defaultdict(deque)
     for item in items:
         buckets[key_fn(item)].append(item)

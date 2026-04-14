@@ -29,6 +29,10 @@ if [ "${#flow_run_containers[@]}" -gt 0 ]; then
   docker wait "${flow_run_containers[@]}" >/dev/null 2>&1 || true
 fi
 
+echo "Cancelling active Prefect runs"
+PREFECT_API_URL="http://localhost:4200/api" \
+  .venv/bin/python scripts/cancel_deployment_runs.py || true
+
 docker stop prefect-worker
 
 unfinished_matchdata_mutations() {

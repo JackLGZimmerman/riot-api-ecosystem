@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from typing import (
     Any,
     ClassVar,
-    Generic,
     Literal,
     TypedDict,
     TypeVar,
@@ -45,7 +44,7 @@ def nearest_frame_timestamp(timestamp_ms: int) -> int:
 
 def champion_kill_event_id(
     *,
-    matchId: int,
+    matchId: str | int,
     timestamp: int,
     killerId: int,
     victimId: int,
@@ -54,8 +53,7 @@ def champion_kill_event_id(
 
 
 class MatchIdentityRow(TypedDict):
-    matchId: NonNegativeInt
-    matchIdFull: str
+    matchId: str | NonNegativeInt
 
 
 class ParticipantStatsRow(MatchIdentityRow):
@@ -106,7 +104,7 @@ class ParticipantStatsRow(MatchIdentityRow):
 
 
 class ParticipantStatsParser:
-    def parse(self, frames: list[Frame], matchId: int) -> list[ParticipantStatsRow]:
+    def parse(self, frames: list[Frame], matchId: str | int) -> list[ParticipantStatsRow]:
         rows: list[ParticipantStatsRow] = []
 
         for frame in frames:
@@ -251,10 +249,10 @@ class TurretPlateDestroyedRow(TimelineEventRowBase):
 RowT = TypeVar("RowT")
 
 
-class EventTypeParser(Generic[RowT]):
+class EventTypeParser[RowT]:
     EVENT_TYPE: ClassVar[str]
 
-    def parse(self, frames: list[Frame], matchId: int) -> list[RowT]:
+    def parse(self, frames: list[Frame], matchId: str | int) -> list[RowT]:
         rows: list[RowT] = []
 
         for frame in frames:
@@ -286,10 +284,10 @@ class EventTypeParser(Generic[RowT]):
         return rows
 
 
-class EventPayloadParser(Generic[RowT]):
+class EventPayloadParser[RowT]:
     EVENT_TYPES: ClassVar[set[str]]
 
-    def parse(self, frames: list[Frame], matchId: int) -> list[RowT]:
+    def parse(self, frames: list[Frame], matchId: str | int) -> list[RowT]:
         rows: list[RowT] = []
 
         for frame in frames:
@@ -324,7 +322,7 @@ class EventPayloadParser(Generic[RowT]):
 class ChampionKillParser(EventTypeParser[ChampionKillRow]):
     EVENT_TYPE = "CHAMPION_KILL"
 
-    def parse(self, frames: list[Frame], matchId: int) -> list[ChampionKillRow]:
+    def parse(self, frames: list[Frame], matchId: str | int) -> list[ChampionKillRow]:
         rows: list[ChampionKillRow] = []
 
         for frame in frames:
@@ -378,7 +376,7 @@ class ChampionKillDamageInstanceParser:
     DIRECTION: ClassVar[Literal["DEALT", "RECEIVED"]]
 
     def parse(
-        self, frames: list["Frame"], matchId: int
+        self, frames: list[Frame], matchId: str | int
     ) -> list[ChampionKillDamageInstanceRow]:
         rows: list[ChampionKillDamageInstanceRow] = []
 
@@ -433,7 +431,7 @@ class VictimDamageReceivedParser(ChampionKillDamageInstanceParser):
 class ChampionSpecialKillParser(EventTypeParser[ChampionSpecialKillRow]):
     EVENT_TYPE = "CHAMPION_SPECIAL_KILL"
 
-    def parse(self, frames: list[Frame], matchId: int) -> list[ChampionSpecialKillRow]:
+    def parse(self, frames: list[Frame], matchId: str | int) -> list[ChampionSpecialKillRow]:
         rows: list[ChampionSpecialKillRow] = []
 
         for frame in frames:
@@ -472,7 +470,7 @@ class DragonSoulGivenParser(EventTypeParser[DragonSoulGivenRow]):
 class EliteMonsterKillParser(EventTypeParser[EliteMonsterKillRow]):
     EVENT_TYPE = "ELITE_MONSTER_KILL"
 
-    def parse(self, frames: list[Frame], matchId: int) -> list[EliteMonsterKillRow]:
+    def parse(self, frames: list[Frame], matchId: str | int) -> list[EliteMonsterKillRow]:
         rows: list[EliteMonsterKillRow] = []
 
         for frame in frames:
@@ -534,7 +532,7 @@ class TurretPlateDestroyedParser(EventTypeParser[TurretPlateDestroyedRow]):
 class BuildingKillParser(EventTypeParser[BuildingKillRow]):
     EVENT_TYPE = "BUILDING_KILL"
 
-    def parse(self, frames: list[Frame], matchId: int) -> list[BuildingKillRow]:
+    def parse(self, frames: list[Frame], matchId: str | int) -> list[BuildingKillRow]:
         rows: list[BuildingKillRow] = []
 
         for frame in frames:
@@ -681,9 +679,10 @@ class MatchDataTimelineParsingOrchestrator:
 
         try:
             tl = Timeline.model_validate(raw)
+            metadata = tl.metadata
             info = tl.info
             frames = info.frames
-            matchId = int(info.gameId)
+            matchId = metadata.matchId
 
             tables = TimelineTables(
                 participantStats=self.participantStats.parse(frames, matchId),

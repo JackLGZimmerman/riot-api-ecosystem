@@ -29,69 +29,11 @@ else
   docker compose down --remove-orphans
 fi
 
-docker ps -aq --filter label=io.prefect.flow-run-id | xargs -r docker rm -f
-
 echo "Building flow image"
 docker build -t riot-pipeline:latest .
 
 echo "Starting services"
 docker compose up -d --build --wait
-
-echo "Cancelling old Prefect runs"
-docker exec prefect-server python - <<'PY'
-import requests
-import time
-
-base = "http://localhost:4200/api"
-deployment_name = "riot-pipeline/riot-pipeline"
-message = "Cancelled during restart cleanup before launching a new deployment run."
-
-response = requests.get(f"{base}/deployments/name/{deployment_name}", timeout=30)
-if response.status_code == 404:
-    raise SystemExit(0)
-response.raise_for_status()
-deployment_id = response.json()["id"]
-
-def fetch_runs():
-    response = requests.post(
-        f"{base}/flow_runs/filter",
-        json={"flow_runs": {"state": {"type": {"any_": ["RUNNING", "PENDING", "SCHEDULED", "CANCELLING"]}}}},
-        timeout=60,
-    )
-    response.raise_for_status()
-    return [run for run in response.json() if run.get("deployment_id") == deployment_id]
-
-def active_slots():
-    response = requests.get(f"{base}/deployments/{deployment_id}", timeout=30)
-    response.raise_for_status()
-    return ((response.json().get("global_concurrency_limit") or {}).get("active_slots") or 0)
-
-for _ in range(30):
-    runs = fetch_runs()
-    for run in runs:
-        cancel = requests.post(
-            f"{base}/flow_runs/{run['id']}/set_state",
-            json={
-                "state": {
-                    "type": "CANCELLED",
-                    "name": "Cancelled",
-                    "message": message,
-                },
-                "force": True,
-            },
-            timeout=60,
-        )
-        cancel.raise_for_status()
-        if cancel.json().get("status") != "ACCEPT":
-            raise SystemExit(f"Failed to cancel {run['id']}: {cancel.text}")
-
-    if not fetch_runs() and active_slots() == 0:
-        raise SystemExit(0)
-
-    time.sleep(2)
-
-raise SystemExit("Non-terminal Prefect runs remain after cleanup.")
-PY
 
 echo "Deploying flow"
 .venv/bin/prefect --no-prompt deploy --prefect-file prefect.yaml

@@ -1,5 +1,6 @@
 from enum import StrEnum
-from typing import Final, Mapping
+from typing import Final
+from collections.abc import Mapping
 
 
 class Continent(StrEnum):
