@@ -1,4 +1,6 @@
-CREATE TABLE IF NOT EXISTS game_data_filtered.participant_item_value_totals
+DROP TABLE IF EXISTS game_data_filtered.participant_item_value_totals;
+
+CREATE TABLE game_data_filtered.participant_item_value_totals
 (
     matchid String,
     teamid UInt8,
@@ -12,9 +14,12 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.participant_item_value_totals
     lethality Float32,
     on_hit Float32,
     crit Float32,
-    tank Float32,
-    off_tank Float32,
-    utility Float32,
+    utility_enchanter Float32,
+    utility_protection Float32,
+    ar_tank Float32,
+    mr_tank Float32,
+    ad_off_tank Float32,
+    ap_off_tank Float32,
 
     highest_value Float32,
     highest_value_label LowCardinality (String)

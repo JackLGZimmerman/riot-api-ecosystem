@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pydantic import PositiveInt, SecretStr
@@ -16,8 +15,7 @@ class Settings(BaseSettings):
 
     rate_limit_calls: PositiveInt = 100
     rate_limit_period: PositiveInt = 120
-    rate_limit_burst_calls: PositiveInt = 20
-    rate_limit_burst_period: PositiveInt = 1
+    rate_limiter_debug: bool = False
 
     base_project_path: Path = PROJECT_ROOT
 
@@ -26,10 +24,6 @@ class Settings(BaseSettings):
     clickhouse_database: str
     clickhouse_user: str
     clickhouse_password: SecretStr
-
-    threadpool_executor_clickhouse: ThreadPoolExecutor = ThreadPoolExecutor(
-        max_workers=2, thread_name_prefix="clickhouse"
-    )
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

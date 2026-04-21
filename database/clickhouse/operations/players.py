@@ -4,14 +4,10 @@ import logging
 from typing import NamedTuple
 from collections.abc import AsyncIterator
 from uuid import UUID
-from app.core.config import settings
-
 from app.models.riot.league import MinifiedLeagueEntryDTO
 from database.clickhouse.client import get_client
 
 logger = logging.getLogger(__name__)
-
-_CH_EXECUTOR = settings.threadpool_executor_clickhouse
 
 PLAYERS_TABLE = "game_data.players"
 PLAYERS_SNAPSHOT_TIMESTAMP_NAME = "players_snapshot_ts"
@@ -79,11 +75,11 @@ async def insert_players_stream_in_batches(
         ):
             rows = batch
             batch = []
-            await loop.run_in_executor(_CH_EXECUTOR, _insert_rows, rows)
+            await loop.run_in_executor(None, _insert_rows, rows)
             last_flush = time.monotonic()
 
     if batch:
-        await loop.run_in_executor(_CH_EXECUTOR, _insert_rows, batch)
+        await loop.run_in_executor(None, _insert_rows, batch)
 
 
 def delete_partial_players_run(run_id: UUID) -> None:

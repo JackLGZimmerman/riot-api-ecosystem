@@ -88,7 +88,7 @@ def _limiter(location_key: Region | Continent, calls: int, time_period: float):
             calls=sustained_calls,
             period_s=sustained_period,
         ),
-        debug=True,
+        debug=settings.rate_limiter_debug,
     )
 
     return TelemetryLimiter(
@@ -168,38 +168,66 @@ class RiotAPI:
     ) -> FetchJSONResult:
         """
         Fetch JSON from Riot API with:
-        - per-(location, calls, period) rate limiter
-        - retry on transient HTTP errors (429/5xx)
-        - single enriched log line per granted token from RateLimiter
+        - per-(location, calls, period) rate limiter acquired on each attempt
+        - on 429: advances the limiter to now+Retry-After so all workers on
+          this continent pause until the rolling window has headroom again
+        - on 5xx/connection errors: standard exponential backoff retry
         """
-
-        limiter = _limiter(
-            location,
-            self.calls,
-            self.time_period,
-        )
-
         if self._session is None or self._session.closed:
             raise RuntimeError(
                 "RiotAPI session is not initialised. "
                 "Use `async with RiotAPI()` when calling fetch_json."
             )
 
-        session = self._session
+        limiter = _limiter(location, self.calls, self.time_period)
 
         async with limiter:
-            headers = {"X-Riot-Token": self.api_key}
-            try:
-                async with session.get(url, headers=headers) as resp:
-                    status: int = resp.status
+            return await self._http_request(
+                url=url, location=location, session=self._session, limiter=limiter
+            )
 
-                    if not 200 <= status < 300:
-                        export_http_error_code_counter(status)
+    async def _http_request(
+        self,
+        *,
+        url: str,
+        location: Region | Continent,
+        session: aiohttp.ClientSession,
+        limiter: TelemetryLimiter,
+    ) -> FetchJSONResult:
+        """Single HTTP call. Raises retryable exceptions for fetch_json_detailed's @retry."""
+        headers = {"X-Riot-Token": self.api_key}
+        try:
+            async with session.get(url, headers=headers) as resp:
+                status: int = resp.status
 
-                        if status in RETRYABLE:
-                            event = (
-                                "RateLimitHTTP" if status == 429 else "RetryableHTTP"
+                if not 200 <= status < 300:
+                    export_http_error_code_counter(status)
+
+                    if status in RETRYABLE:
+                        event = (
+                            "RateLimitHTTP" if status == 429 else "RetryableHTTP"
+                        )
+                        if status == 429:
+                            retry_after = int(resp.headers.get("Retry-After", "5"))
+                            loop = asyncio.get_running_loop()
+                            await limiter.pause_until(loop.time() + retry_after)
+                            rate_limiter_logger.error(
+                                "%s status=%s url=%s location=%s "
+                                "retry_after=%s limit_type=%s "
+                                "app_limit=%s app_count=%s "
+                                "method_limit=%s method_count=%s",
+                                event,
+                                status,
+                                mask_api_key(str(resp.url)),
+                                location,
+                                retry_after,
+                                resp.headers.get("X-Rate-Limit-Type", "?"),
+                                resp.headers.get("X-App-Rate-Limit", "?"),
+                                resp.headers.get("X-App-Rate-Limit-Count", "?"),
+                                resp.headers.get("X-Method-Rate-Limit", "?"),
+                                resp.headers.get("X-Method-Rate-Limit-Count", "?"),
                             )
+                        else:
                             rate_limiter_logger.error(
                                 "%s status=%s url=%s location=%s",
                                 event,
@@ -207,43 +235,43 @@ class RiotAPI:
                                 mask_api_key(str(resp.url)),
                                 location,
                             )
-                            resp.raise_for_status()
+                        resp.raise_for_status()
 
-                        logger.warning(
-                            "NonRetryableHTTP status=%s url=%s location=%s",
-                            status,
-                            mask_api_key(str(resp.url)),
-                            location,
-                        )
-                        return FetchJSONResult(
-                            data=None,
-                            outcome=FetchOutcome.HTTP_NON_RETRYABLE,
-                            status=status,
-                        )
-                    try:
-                        return FetchJSONResult(
-                            data=await resp.json(),
-                            outcome=FetchOutcome.OK,
-                            status=status,
-                        )
-                    except (aiohttp.ContentTypeError, JSONDecodeError):
-                        body = await resp.text()
-                        preview = body.replace("\n", " ")[:MAX_BODY_PREVIEW]
-                        logger.warning(
-                            "NonJSONResponse status=%s url=%s location=%s len=%d preview=%r",
-                            status,
-                            mask_api_key(str(resp.url)),
-                            location,
-                            len(body),
-                            preview,
-                        )
-                        return FetchJSONResult(
-                            data=None,
-                            outcome=FetchOutcome.NON_JSON,
-                            status=status,
-                        )
-            except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError):
-                raise
+                    logger.warning(
+                        "NonRetryableHTTP status=%s url=%s location=%s",
+                        status,
+                        mask_api_key(str(resp.url)),
+                        location,
+                    )
+                    return FetchJSONResult(
+                        data=None,
+                        outcome=FetchOutcome.HTTP_NON_RETRYABLE,
+                        status=status,
+                    )
+                try:
+                    return FetchJSONResult(
+                        data=await resp.json(),
+                        outcome=FetchOutcome.OK,
+                        status=status,
+                    )
+                except (aiohttp.ContentTypeError, JSONDecodeError):
+                    body = await resp.text()
+                    preview = body.replace("\n", " ")[:MAX_BODY_PREVIEW]
+                    logger.warning(
+                        "NonJSONResponse status=%s url=%s location=%s len=%d preview=%r",
+                        status,
+                        mask_api_key(str(resp.url)),
+                        location,
+                        len(body),
+                        preview,
+                    )
+                    return FetchJSONResult(
+                        data=None,
+                        outcome=FetchOutcome.NON_JSON,
+                        status=status,
+                    )
+        except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError):
+            raise
 
     async def fetch_json(
         self,

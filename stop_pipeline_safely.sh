@@ -33,9 +33,11 @@ echo "Cancelling active Prefect runs"
 PREFECT_API_URL="http://localhost:4200/api" \
   .venv/bin/python scripts/cancel_deployment_runs.py || true
 
-docker stop prefect-worker
+docker stop prefect-worker 2>/dev/null || true
 
 unfinished_matchdata_mutations() {
+  docker container inspect "$CLICKHOUSE_CONTAINER" --format '{{.State.Running}}' 2>/dev/null \
+    | grep -q "true" || { echo "0"; return; }
   docker exec "$CLICKHOUSE_CONTAINER" clickhouse-client \
     --connect_timeout=30 \
     --receive_timeout=3600 \

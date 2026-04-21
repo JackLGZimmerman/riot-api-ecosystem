@@ -1,0 +1,187 @@
+{"id":1001,"name":"Boots","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1001_class_t1_bootsofspeed.png"}
+{"id":1006,"name":"Rejuvenation Bead","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1006_tank_t1_rejuvenationbead.png"}
+{"id":1011,"name":"Giant's Belt","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1011_class_t2_giantsbelt.png"}
+{"id":1018,"name":"Cloak of Agility","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1018_base_t1_cloakagility.png"}
+{"id":1026,"name":"Blasting Wand","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1026_mage_t1_blastingwand.png"}
+{"id":1028,"name":"Ruby Crystal","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1028_base_t1_rubycrystal.png"}
+{"id":1029,"name":"Cloth Armor","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1029_base_t1_clotharmor.png"}
+{"id":1031,"name":"Chain Vest","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1031_base_t2_chainvest.png"}
+{"id":1033,"name":"Null-Magic Mantle","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1033_base_t1_magicmantle.png"}
+{"id":1036,"name":"Long Sword","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1036_class_t1_longsword.png"}
+{"id":1037,"name":"Pickaxe","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1037_class_t1_pickaxe.png"}
+{"id":1038,"name":"B. F. Sword","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1038_marksman_t1_bfsword.png"}
+{"id":1042,"name":"Dagger","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1042_base_t1_dagger.png"}
+{"id":1043,"name":"Recurve Bow","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1043_base_t2_recurvebow.png"}
+{"id":1052,"name":"Amplifying Tome","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1052_mage_t2_amptome.png"}
+{"id":1053,"name":"Vampiric Scepter","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1053_fighter_t2_vampiricscepter.png"}
+{"id":1057,"name":"Negatron Cloak","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1057_tank_t2_negatroncloak.png"}
+{"id":1058,"name":"Needlessly Large Rod","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1058_mage_t1_largerod.png"}
+{"id":1082,"name":"Dark Seal","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/1082_mage_t1_darkseal.png"}
+{"id":2019,"name":"Steel Sigil","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2019_steel_sigil.png"}
+{"id":2020,"name":"The Brutalizer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2020_thebrutalizer.png"}
+{"id":2021,"name":"Tunneler","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2012_tunneler.png"}
+{"id":2022,"name":"Glowing Mote","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2022_glowingmote.png"}
+{"id":2065,"name":"Shurelya's Battlesong","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2065_tank_t4_shurelyasbattlesong.png"}
+{"id":2420,"name":"Seeker's Armguard","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3191_battlemage_t2_seekersarmguard.png"}
+{"id":2501,"name":"Overlord's Bloodmail","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/7111_overlordsbloodmail.png"}
+{"id":2502,"name":"Unending Despair","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2502_unendingdespair.png"}
+{"id":2503,"name":"Blackfire Torch","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2503_blackfiretorch64.png"}
+{"id":2504,"name":"Kaenic Rookern","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2504_kaenicrookern.png"}
+{"id":2508,"name":"Fated Ashes","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2508_fatedashes64.png"}
+{"id":2510,"name":"Dusk and Dawn","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2510_apfightersheen.png"}
+{"id":2512,"name":"Fiendhunter Bolts","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2512_adcallin.png"}
+{"id":2517,"name":"Endless Hunger","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2517_adfighteromnivamp.png"}
+{"id":2520,"name":"Bastionbreaker","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2520_adassassingameender.png"}
+{"id":2522,"name":"Actualizer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2522_manaactive.png"}
+{"id":2523,"name":"Hexoptics C44","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2523_adcscope.png"}
+{"id":2524,"name":"Bandlepipes","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2524_tankasaura.png"}
+{"id":2525,"name":"Protoplasm Harness","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2525_tanklifeline.png"}
+{"id":2526,"name":"Whispering Circlet","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2526_enchantertearbase.png"}
+{"id":3002,"name":"Trailblazer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3002_trailblazer.png"}
+{"id":3003,"name":"Archangel's Staff","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3003_mage_t3_archangelstaff.png"}
+{"id":3004,"name":"Manamune","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3004_marksman_t3_manamune.png"}
+{"id":3006,"name":"Berserker's Greaves","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3006_class_t2_berserkersgreaves.png"}
+{"id":3009,"name":"Boots of Swiftness","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3009_class_t2_bootsofswiftness.png"}
+{"id":3020,"name":"Sorcerer's Shoes","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3020_class_t2_sorcerersshoes.png"}
+{"id":3024,"name":"Glacial Buckler","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3024_tank_t2_glacialshroud.png"}
+{"id":3026,"name":"Guardian Angel","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3026_fighter_t3_guardianangel.png"}
+{"id":3031,"name":"Infinity Edge","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3031_marksman_t3_infinityedge.png"}
+{"id":3032,"name":"Yun Tal Wildarrows","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3032_yuntalwildarrows.png"}
+{"id":3033,"name":"Mortal Reminder","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3033_marksman_t3_mortalreminder.png"}
+{"id":3035,"name":"Last Whisper","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3035_marksman_t2_lastwhisper.png"}
+{"id":3036,"name":"Lord Dominik's Regards","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3036_marksman_t3_dominikregards.png"}
+{"id":3041,"name":"Mejai's Soulstealer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3041_mage_t2_mejaissoulstealer.png"}
+{"id":3044,"name":"Phage","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3044_fighter_t2_phage.png"}
+{"id":3046,"name":"Phantom Dancer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3046_marksman_t3_phantomdancer.png"}
+{"id":3047,"name":"Plated Steelcaps","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3047_class_t2_ninjatabi.png"}
+{"id":3050,"name":"Zeke's Convergence","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3050_enchanter_t3_zekesconvergence.png"}
+{"id":3051,"name":"Hearthbound Axe","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3051_fighter_t2_axeofavarosa.png"}
+{"id":3053,"name":"Sterak's Gage","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3053_steraks_gage.png"}
+{"id":3057,"name":"Sheen","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3057_fighter_t2_sheen.png"}
+{"id":3065,"name":"Spirit Visage","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3065_tank_t3_spiritvisage.png"}
+{"id":3066,"name":"Winged Moonplate","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3066_tank_t3_wingedmoonplate.png"}
+{"id":3067,"name":"Kindlegem","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3067_tank_t1_kindlegem.png"}
+{"id":3068,"name":"Sunfire Aegis","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3068_tank_t4_sunfireaegis.png"}
+{"id":3070,"name":"Tear of the Goddess","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3070_all_t1_tearofthegoddess.png"}
+{"id":3071,"name":"Black Cleaver","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3071_fighter_t3_blackcleaver.png"}
+{"id":3072,"name":"Bloodthirster","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3072_fighter_t3_bloodthirster.png"}
+{"id":3073,"name":"Experimental Hexplate","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3073_hexaegis.png"}
+{"id":3074,"name":"Ravenous Hydra","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3074_fighter_t3_ravenoushydra.png"}
+{"id":3075,"name":"Thornmail","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3075_tank_t3_thornmail.png"}
+{"id":3076,"name":"Bramble Vest","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3076_tank_t2_bramblevest.png"}
+{"id":3077,"name":"Tiamat","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3077_fighter_t2_tiamat.png"}
+{"id":3078,"name":"Trinity Force","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3078_fighter_t4_trinityforce.png"}
+{"id":3082,"name":"Warden's Mail","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3082_tank_t2_wardensmail.png"}
+{"id":3083,"name":"Warmog's Armor","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3083_tank_t3_warmogs.png"}
+{"id":3084,"name":"Heartsteel","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3084_tank_t4_heartsteel.png"}
+{"id":3085,"name":"Runaan's Hurricane","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3085_marksman_t3_runaans.png"}
+{"id":3086,"name":"Zeal","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3086_fighter_t2_zeal.png"}
+{"id":3087,"name":"Statikk Shiv","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3087_statikk_shiv.png"}
+{"id":3089,"name":"Rabadon's Deathcap","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3089_mage_t3_deathcap.png"}
+{"id":3091,"name":"Wit's End","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3091_fighter_t3_witsend.png"}
+{"id":3094,"name":"Rapid Firecannon","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3094_marksman_t3_rapidfirehandcannon.png"}
+{"id":3097,"name":"Stormrazor","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3095_windblade.png"}
+{"id":3100,"name":"Lich Bane","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3100_mage_t3_lichbane.png"}
+{"id":3102,"name":"Banshee's Veil","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3102_mage_t3_bansheesveil.png"}
+{"id":3107,"name":"Redemption","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3107_enchanter_t3_redemption.png"}
+{"id":3108,"name":"Fiendish Codex","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3108_mage_t2_fiendishcodex.png"}
+{"id":3109,"name":"Knight's Vow","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3109_tank_t3_knightsvow.png"}
+{"id":3110,"name":"Frozen Heart","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3110_tank_t3_frozenheart.png"}
+{"id":3111,"name":"Mercury's Treads","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3111_class_t2_mercurystreads.png"}
+{"id":3113,"name":"Aether Wisp","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3113_mage_t2_aetherwisp.png"}
+{"id":3114,"name":"Forbidden Idol","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3114_mage_t2_forbiddenidol.png"}
+{"id":3115,"name":"Nashor's Tooth","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3115_mage_t3_nashorstooth.png"}
+{"id":3116,"name":"Rylai's Crystal Scepter","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3116_mage_t3_rylajscrystalscepter.png"}
+{"id":3118,"name":"Malignance","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3118_malignance.png"}
+{"id":3119,"name":"Winter's Approach","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3119_wintersapproach.png"}
+{"id":3123,"name":"Executioner's Calling","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3123_fighter_t2_executionerscalling.png"}
+{"id":3124,"name":"Guinsoo's Rageblade","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3124_marksman_t3_guinsoosrageblade.png"}
+{"id":3133,"name":"Caulfield's Warhammer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3133_fighter_t2_caulfieldswarhammer.png"}
+{"id":3134,"name":"Serrated Dirk","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3134_assassin_t2_serrateddirk.png"}
+{"id":3135,"name":"Void Staff","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3135_mage_t3_voidstaff.png"}
+{"id":3137,"name":"Cryptbloom","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3137_cryptbloom.png"}
+{"id":3139,"name":"Mercurial Scimitar","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3139_marksman_t3_mercurialscimitar.png"}
+{"id":3140,"name":"Quicksilver Sash","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3140_marksman_t2_quicksilversash.png"}
+{"id":3142,"name":"Youmuu's Ghostblade","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3142_assassin_t3_youmuusghostblade.png"}
+{"id":3143,"name":"Randuin's Omen","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3143_tank_t3_randuinsomen.png"}
+{"id":3144,"name":"Scout's Slingshot","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3144_scoutslingshot.png"}
+{"id":3145,"name":"Hextech Alternator","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3145_mage_t2_hextechalternator.png"}
+{"id":3146,"name":"Hextech Gunblade","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3146_hextechgunblade.png"}
+{"id":3147,"name":"Haunting Guise","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3147_hauntingguise.png"}
+{"id":3152,"name":"Hextech Rocketbelt","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3152_mage_t4_hextechrocketbelt.png"}
+{"id":3153,"name":"Blade of The Ruined King","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3153_fighter_t3_bladeoftheruinedking.png"}
+{"id":3155,"name":"Hexdrinker","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3155_fighter_t2_hexdrinker.png"}
+{"id":3156,"name":"Maw of Malmortius","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3156_fighter_t3_mawofmalmortius.png"}
+{"id":3157,"name":"Zhonya's Hourglass","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3157_mage_t3_zhonyashourglass.png"}
+{"id":3158,"name":"Ionian Boots of Lucidity","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3158_class_t2_ionianbootsoflucidity.png"}
+{"id":3161,"name":"Spear of Shojin","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3161_fighter_t3_spearofshojin.png"}
+{"id":3165,"name":"Morellonomicon","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3165_mage_t3_morellonomicon.png"}
+{"id":3170,"name":"Swiftmarch","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/boots_tier3_swiftness_64.png"}
+{"id":3171,"name":"Crimson Lucidity","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/boots_tier3_ionianboots_64.png"}
+{"id":3172,"name":"Gunmetal Greaves","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/boots_tier3_berserkersgreaves_64.png"}
+{"id":3173,"name":"Chainlaced Crushers","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/boots_tier3_mercury_64.png"}
+{"id":3174,"name":"Armored Advance","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/boots_tier3_platedsteelcaps_64.png"}
+{"id":3175,"name":"Spellslinger's Shoes","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/boots_tier3_sorceror_64.png"}
+{"id":3179,"name":"Umbral Glaive","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3179_assassin_t3_umbralglaive.png"}
+{"id":3181,"name":"Hullbreaker","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3181_hullbreaker.png"}
+{"id":3190,"name":"Locket of the Iron Solari","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3190_enchanter_t4_locketofironsolari.png"}
+{"id":3211,"name":"Spectre's Cowl","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3211_tank_t2_spectrescowl.png"}
+{"id":3222,"name":"Mikael's Blessing","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3222_enchanter_t3_mikaelsblessing.png"}
+{"id":3302,"name":"Terminus","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3302_terminus.png"}
+{"id":3504,"name":"Ardent Censer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3504_enchanter_t3_ardentcenser.png"}
+{"id":3508,"name":"Essence Reaver","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3508_marksman_t3_essencereaver.png"}
+{"id":3742,"name":"Dead Man's Plate","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3742_tank_t3_deadmansplate.png"}
+{"id":3748,"name":"Titanic Hydra","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3748_fighter_t3_titanichydra.png"}
+{"id":3801,"name":"Crystalline Bracer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3801_tank_t2_crystallinebracer.png"}
+{"id":3802,"name":"Lost Chapter","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3802_mage_tier2_lostchapter.png"}
+{"id":3803,"name":"Catalyst of Aeons","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3803_mage_t2_catalystofaeons.png"}
+{"id":3814,"name":"Edge of Night","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3814_assassin_t3_edgeofnight.png"}
+{"id":3869,"name":"Celestial Opposition","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3869_celestialopposition.png"}
+{"id":3870,"name":"Dream Maker","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3870_dreammaker.png"}
+{"id":3871,"name":"Zaz'Zak's Realmspike","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3871_zazzaksrealmspike.png"}
+{"id":3876,"name":"Solstice Sleigh","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3876_solticesleigh.png"}
+{"id":3877,"name":"Bloodsong","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3877_bloodsong.png"}
+{"id":3916,"name":"Oblivion Orb","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3916_mage_t2_oblivionorb.png"}
+{"id":4005,"name":"Imperial Mandate","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4005_enchanter_t4_imperialmandate.png"}
+{"id":4401,"name":"Force of Nature","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4401_tank_t3_forceofnature.png"}
+{"id":4628,"name":"Horizon Focus","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4628_mage_t3_horizonfocus.png"}
+{"id":4629,"name":"Cosmic Drive","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4629_mage_t3_cosmicdrive.png"}
+{"id":4630,"name":"Blighting Jewel","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4630_mage_t2_voidcrystal.png"}
+{"id":4632,"name":"Verdant Barrier","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4632_tank_t2_verdantbarrier.png"}
+{"id":4633,"name":"Riftmaker","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4633_mage_t4_riftmaker.png"}
+{"id":4638,"name":"Watchful Wardstone","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4638_enchanter_t3_watchfulsightstone.png"}
+{"id":4642,"name":"Bandleglass Mirror","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4642_enchanter_t2_bandleglassmirror.png"}
+{"id":4643,"name":"Vigilant Wardstone","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4643_enchanter_t3_vigilantsightstone.png"}
+{"id":4645,"name":"Shadowflame","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4645_shadowflame.png"}
+{"id":4646,"name":"Stormsurge","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/4646_stormsurge.png"}
+{"id":6333,"name":"Death's Dance","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6333_fighter_t3_deathsdance.png"}
+{"id":6609,"name":"Chempunk Chainsword","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6609_fighter_t3_chempunkchainsword.png"}
+{"id":6610,"name":"Sundered Sky","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6610_sunderedsky.png"}
+{"id":6616,"name":"Staff of Flowing Water","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3744_enchanter_t3_staffofflowingwater.png"}
+{"id":6617,"name":"Moonstone Renewer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6617_enchanter_t4_moonstonerenewer.png"}
+{"id":6620,"name":"Echoes of Helia","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6620_echoes_of_helia.png"}
+{"id":6621,"name":"Dawncore","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6621_dawncore.png"}
+{"id":6631,"name":"Stridebreaker","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6631_fighter_t4_stridebreaker.png"}
+{"id":6653,"name":"Liandry's Torment","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6653_mage_t4_liandrysanguish.png"}
+{"id":6655,"name":"Luden's Echo","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6655_mage_t4_ludenstempest.png"}
+{"id":6657,"name":"Rod of Ages","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6657_mage_t4_rodofages.png"}
+{"id":6660,"name":"Bami's Cinder","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6660_tank_t2_bamiscinder.png"}
+{"id":6662,"name":"Iceborn Gauntlet","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6662_tank_t3_iceborngauntlet.png"}
+{"id":6664,"name":"Hollow Radiance","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6664_hollowradiance.png"}
+{"id":6665,"name":"Jak'Sho, The Protean","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6665_tank_t4_jakshotheprotean.png"}
+{"id":6670,"name":"Noonquiver","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6670_marksman_t2_noonquiver.png"}
+{"id":6672,"name":"Kraken Slayer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6672_marksman_t4_behemothslayer.png"}
+{"id":6673,"name":"Immortal Shieldbow","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6673_marksman_t4_crimsonshieldbow.png"}
+{"id":6675,"name":"Navori Flickerblade","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6675_navoriflickerblade.png"}
+{"id":6676,"name":"The Collector","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6676_marksman_t3_thecollector.png"}
+{"id":6690,"name":"Rectrix","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6690_rectrix.png"}
+{"id":6692,"name":"Eclipse","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6692_assassin_t4_eclipse.png"}
+{"id":6694,"name":"Serylda's Grudge","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6694_assasin_t3_seryldasgrudge.png"}
+{"id":6695,"name":"Serpent's Fang","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6695_assassin_t3_serpentsfang.png"}
+{"id":6696,"name":"Axiom Arc","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6696_axiomarc.png"}
+{"id":6697,"name":"Hubris","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6697_hubris.png"}
+{"id":6698,"name":"Profane Hydra","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6698_profanehydra.png"}
+{"id":6699,"name":"Voltaic Cyclosword","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6699_voltaiccyclosword.png"}
+{"id":6701,"name":"Opportunity","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/6701_opportunity.png"}
+{"id":8010,"name":"Bloodletter's Curse","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/8010_bloodletterscurse.png"}
+{"id":8020,"name":"Abyssal Mask","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/8020_tank_t3_abyssalmask.png"}

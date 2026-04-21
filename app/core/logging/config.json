@@ -74,6 +74,18 @@
             "level": "WARNING",
             "propagate": true
         },
+        "httpcore": {
+            "level": "WARNING",
+            "propagate": true
+        },
+        "httpx": {
+            "level": "WARNING",
+            "propagate": true
+        },
+        "asyncio": {
+            "level": "WARNING",
+            "propagate": true
+        },
         "schema_drift.timeline": {
             "level": "INFO",
             "handlers": [

@@ -3,6 +3,7 @@ dialect = clickhouse
 templater = raw
 max_line_length = 88
 exclude_rules = AM04,CP03,CP05,RF04
+large_file_skip_byte_limit = 0
 
 [sqlfluff:rules:capitalisation.keywords]
 capitalisation_policy = upper

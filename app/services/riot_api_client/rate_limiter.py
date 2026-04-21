@@ -135,6 +135,17 @@ class Limiter:
         if debug_metrics is not None:
             await debug_metrics.record(loop.time())
 
+    async def pause_until(self, resume_at: float) -> None:
+        """Advance _next_at to resume_at if not already scheduled beyond that point.
+
+        Called on 429 so that every subsequent acquisition on this limiter
+        (including retries from all concurrent workers) waits until Riot's
+        rolling window has shed enough old requests to have headroom again.
+        """
+        async with self._lock:
+            if self._next_at is None or self._next_at < resume_at:
+                self._next_at = resume_at
+
     async def __aenter__(self):
         await self.acquire()
         return self
@@ -181,6 +192,9 @@ class TelemetryLimiter:
         await self._wrapped_limiter.acquire()
         now = asyncio.get_running_loop().time()
         await self._record_and_export(now)
+
+    async def pause_until(self, resume_at: float) -> None:
+        await self._wrapped_limiter.pause_until(resume_at)
 
     async def __aenter__(self):
         await self.acquire()
