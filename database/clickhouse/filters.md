@@ -69,7 +69,8 @@ flagged if they have < 30 picks on such a combo in that pool. The LEFT ANTI JOIN
 of stage-1-valid against this table is `filter_stg_stage2_valid_matchids`.
 
 **Stage 3 — `filter_stg_rare_builds`** — `participant_stats` item slots
-SEMI-joined to `stage2_valid_matchids`, labelled via `item_value_map_dict` on
+`item0`–`item6`, plus optional `roleBoundItem` when present, SEMI-joined to
+`stage2_valid_matchids`, labelled via `item_value_map_dict` on
 `(championid, teamposition, highest_value_label)`. Flags participants whose
 build label appears < 8 times in the stage-2 pool for their (champion, role).
 
@@ -191,13 +192,13 @@ Either way, the 4-way hash chunking loop in `5003` collapses into a single
 | Bit | Weight | Column | Rule |
 |-----|--------|--------|------|
 | 0 | 1 | `player_low_kda` | `(kills + assists) * 5 < deaths` |
-| 1 | 2 | `player_gold_spent` | `goldspent * 100 < goldearned * 60` (spent < 60% earned) |
+| 1 | 2 | `player_gold_spent` | `goldspent * 100 < goldearned * 50` (spent < 50% earned) |
 | 2 | 4 | `no_contribution_kda` | `kills + assists = 0 AND deaths > 4` |
 | 3 | 8 | `bad_summoner_usage` | `summoner1casts = 0 OR summoner2casts = 0` |
 | 4 | 16 | `player_high_winrate` | `wins + losses > 40 AND wins > 70%` |
-| 6 | 64 | `solo_carried` | `kills > 65% of team kills` |
-| 7 | 128 | `too_little_damage` | non-UTILITY player damage share < 7.5% |
-| 8 | 256 | `low_minions_killed` | non-UTILITY CS/min < 4.5 |
+| 6 | 64 | `solo_carried` | `kills > 75% of team kills` |
+| 7 | 128 | `too_little_damage` | non-UTILITY player damage share < 5% |
+| 8 | 256 | `low_minions_killed` | non-UTILITY CS/min < 4 |
 | 11 | 2048 | `sold_all_items` | all of `item0`–`item5` are 0 |
 | 12 | 4096 | `grief_build` | all of `item0`–`item5` are equal |
 | 15 | 32768 | `rare_build_label` | `(championid, teamposition, build_label)` has < 8 games in stage-2 pool |
@@ -252,6 +253,45 @@ The item-value dictionary (`game_data.item_value_map_dict`, from
 and the downstream label totals (`5133`). The file is bind-mounted at
 `/var/lib/clickhouse/user_files/clickhouse_support/item_value_map.jsonl`, so
 host edits are immediately visible.
+
+Both consumers score the visible item slots (`item0`–`item6`) and the optional
+`roleBoundItem` field. If `roleBoundItem` is absent, the original item-slot-only
+flow is preserved. If a present role-bound item has no dictionary row, it
+contributes a zero vector instead of failing the rebuild.
+
+**Build-related rebuild** — after changing the rare-build calculation or the
+item-value totals build, rebuild in dependency order. `4001` refreshes the
+filter stages and rare-build labels, `5002` refreshes valid matchids, `5003`
+copies the filtered source tables, and `5133` rebuilds the derived item-value
+totals from the refreshed `game_data_filtered.participant_stats`.
+
+```bash
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/4001_filter_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5002_valid_game_ids_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5003_filtered_tables_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5133_participant_item_value_totals_build.sql
+```
+
+Post-run, `participant_item_value_totals` should have exactly one row per
+filtered participant:
+
+```sql
+SELECT
+    count() AS participant_stats_rows,
+    (
+        SELECT count()
+        FROM game_data_filtered.participant_item_value_totals
+    ) AS totals_rows,
+    participant_stats_rows = totals_rows AS aligned
+FROM game_data_filtered.participant_stats;
+```
 
 **Value-only edits** (numeric weights changed, keys unchanged):
 

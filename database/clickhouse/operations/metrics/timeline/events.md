@@ -8,32 +8,31 @@
 | TLE_R_004 | Champion Special Kill Event Type | game_data.tl_champion_special_kill | Event stream for champion special kill events. | identity(type) | 1.0.0 | type |
 | TLE_R_005 | Dragon Soul Given Event Type | game_data.tl_dragon_soul_given | Event stream for dragon soul assignment events. | identity(type) | 1.0.0 | type |
 | TLE_R_006 | Turret Plate Destroyed Event Type | game_data.tl_turret_plate_destroyed | Event stream for turret plate destruction events. | identity(type) | 1.0.0 | type |
-| TLE_R_007 | Payload Event Type | game_data.tl_payload_event | Event stream for generic timeline payload events. | identity(type) | 1.0.0 | type |
-| TLE_R_008 | Victim Damage Dealt Event Type | game_data.tl_ck_victim_damage_dealt | Event stream for champion-kill victim damage dealt records. | identity(type) | 1.0.0 | type |
-| TLE_R_009 | Victim Damage Received Event Type | game_data.tl_ck_victim_damage_received | Event stream for champion-kill victim damage received records. | identity(type) | 1.0.0 | type |
-| TLE_R_010 | Payload WARD_KILL Type | game_data.tl_payload_event | Payload subtype for ward kill events. | type = 'WARD_KILL' | 1.0.0 | type |
-| TLE_R_011 | Payload WARD_PLACED Type | game_data.tl_payload_event | Payload subtype for ward placement events. | type = 'WARD_PLACED' | 1.0.0 | type |
-| TLE_R_012 | Payload GAME_END Type | game_data.tl_payload_event | Payload subtype for game end events. | type = 'GAME_END' | 1.0.0 | type |
-| TLE_R_013 | Payload ITEM_DESTROYED Type | game_data.tl_payload_event | Payload subtype for item destroyed events. | type = 'ITEM_DESTROYED' | 1.0.0 | type |
-| TLE_R_014 | Payload ITEM_PURCHASED Type | game_data.tl_payload_event | Payload subtype for item purchased events. | type = 'ITEM_PURCHASED' | 1.0.0 | type |
-| TLE_R_015 | Payload ITEM_SOLD Type | game_data.tl_payload_event | Payload subtype for item sold events. | type = 'ITEM_SOLD' | 1.0.0 | type |
-| TLE_R_016 | Payload ITEM_UNDO Type | game_data.tl_payload_event | Payload subtype for item undo events. | type = 'ITEM_UNDO' | 1.0.0 | type |
-| TLE_R_017 | Payload LEVEL_UP Type | game_data.tl_payload_event | Payload subtype for level-up events. | type = 'LEVEL_UP' | 1.0.0 | type |
-| TLE_R_018 | Payload PAUSE_END Type | game_data.tl_payload_event | Payload subtype for pause-end events. | type = 'PAUSE_END' | 1.0.0 | type |
-| TLE_R_019 | Payload SKILL_LEVEL_UP Type | game_data.tl_payload_event | Payload subtype for skill-level-up events. | type = 'SKILL_LEVEL_UP' | 1.0.0 | type |
-| TLE_R_020 | Payload OBJECTIVE_BOUNTY_PRESTART Type | game_data.tl_payload_event | Payload subtype for objective bounty prestart events. | type = 'OBJECTIVE_BOUNTY_PRESTART' | 1.0.0 | type |
-| TLE_R_021 | Payload FEAT_UPDATE Type | game_data.tl_payload_event | Payload subtype for feat update events. | type = 'FEAT_UPDATE' | 1.0.0 | type |
-| TLE_R_022 | Payload OBJECTIVE_BOUNTY_FINISH Type | game_data.tl_payload_event | Payload subtype for objective bounty finish events. | type = 'OBJECTIVE_BOUNTY_FINISH' | 1.0.0 | type |
-| TLE_R_023 | Payload CHAMPION_TRANSFORM Type | game_data.tl_payload_event | Payload subtype for champion transform events. | type = 'CHAMPION_TRANSFORM' | 1.0.0 | type |
+| TLE_R_008 | Victim Damage Dealt Event Type | game_data.tl_ck_victim_damage_dealt | Event stream for champion-kill victim damage dealt records. | identity(direction) | 1.0.0 | direction |
+| TLE_R_009 | Victim Damage Received Event Type | game_data.tl_ck_victim_damage_received | Event stream for champion-kill victim damage received records. | identity(direction) | 1.0.0 | direction |
+| TLE_R_010 | Ward Kill Event Type | game_data.tl_ward_kill | Event stream for ward kill events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_011 | Ward Placed Event Type | game_data.tl_ward_placed | Event stream for ward placement events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_012 | Game End Event Type | game_data.tl_game_end | Event stream for game end events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_013 | Item Destroyed Event Type | game_data.tl_item_destroyed | Event stream for item destroyed events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_014 | Item Purchased Event Type | game_data.tl_item_purchased | Event stream for item purchased events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_015 | Item Sold Event Type | game_data.tl_item_sold | Event stream for item sold events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_016 | Item Undo Event Type | game_data.tl_item_undo | Event stream for item undo events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_017 | Level Up Event Type | game_data.tl_level_up | Event stream for level-up events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_018 | Pause End Event Type | game_data.tl_pause_end | Event stream for pause-end events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_019 | Skill Level Up Event Type | game_data.tl_skill_level_up | Event stream for skill-level-up events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_020 | Objective Bounty Prestart Event Type | game_data.tl_objective_bounty_prestart | Event stream for objective bounty prestart events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_021 | Feat Update Event Type | game_data.tl_feat_update | Event stream for feat update events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_022 | Objective Bounty Finish Event Type | game_data.tl_objective_bounty_finish | Event stream for objective bounty finish events. | row_exists() | 1.0.0 | matchid |
+| TLE_R_023 | Champion Transform Event Type | game_data.tl_champion_transform | Event stream for champion transform events. | row_exists() | 1.0.0 | matchid |
 | TLE_S_024 | Champion Kill Events Per-Minute Bin | game_data.tl_champion_kill | Per-killer kill count per minute bin. | count() grouped by (matchid, killerid, intDiv(timestamp, 60000)) | 1.0.0 | killerid, matchid, timestamp |
 | TLE_S_025 | Champion Death Events Per-Minute Bin | game_data.tl_champion_kill | Per-player death count per minute bin. | countIf(victimid = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | victimid, participantid, matchid, timestamp |
 | TLE_S_026 | Champion Assist Events Per-Minute Bin | game_data.tl_champion_kill | Per-player assist count per minute bin from nullable assisting participant IDs. | countIf(has(ifNull(assistingParticipantIds, []), participantid)) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | assistingParticipantIds, participantid, matchid, timestamp |
-| TLE_S_027 | Wards Killed Per-Minute Bin | game_data.tl_payload_event | Per-player ward-kill count per minute bin. | countIf(type = 'WARD_KILL' AND JSONExtractInt(payload, 'killerId') = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | type, payload, participantid, matchid, timestamp |
-| TLE_S_028 | Wards Placed Per-Minute Bin | game_data.tl_payload_event | Per-player ward-placement count per minute bin. | countIf(type = 'WARD_PLACED' AND JSONExtractInt(payload, 'creatorId') = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | type, payload, participantid, matchid, timestamp |
-| TLE_S_029 | Items Destroyed Per-Minute Bin | game_data.tl_payload_event | Per-player item-destroyed count per minute bin. | countIf(type = 'ITEM_DESTROYED' AND JSONExtractInt(payload, 'participantId') = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | type, payload, participantid, matchid, timestamp |
-| TLE_S_030 | Items Purchased Per-Minute Bin | game_data.tl_payload_event | Per-player item-purchased count per minute bin. | countIf(type = 'ITEM_PURCHASED' AND JSONExtractInt(payload, 'participantId') = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | type, payload, participantid, matchid, timestamp |
-| TLE_S_031 | Item Undos Per-Minute Bin | game_data.tl_payload_event | Per-player item-undo count per minute bin. | countIf(type = 'ITEM_UNDO' AND JSONExtractInt(payload, 'participantId') = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | type, payload, participantid, matchid, timestamp |
-| TLE_S_032 | Level Up Timer Seconds | game_data.tl_payload_event | Per-player level-up timer in seconds from timeline start. | maxIf(timestamp / 1000, type = 'LEVEL_UP' AND JSONExtractInt(payload, 'participantId') = participantid) | 1.0.0 | type, timestamp, payload, participantid |
+| TLE_S_027 | Wards Killed Per-Minute Bin | game_data.tl_ward_kill | Per-player ward-kill count per minute bin. | countIf(killerid = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | killerid, participantid, matchid, timestamp |
+| TLE_S_028 | Wards Placed Per-Minute Bin | game_data.tl_ward_placed | Per-player ward-placement count per minute bin. | countIf(creatorid = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | creatorid, participantid, matchid, timestamp |
+| TLE_S_029 | Items Destroyed Per-Minute Bin | game_data.tl_item_destroyed | Per-player item-destroyed count per minute bin. | countIf(participantid = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | participantid, matchid, timestamp |
+| TLE_S_030 | Items Purchased Per-Minute Bin | game_data.tl_item_purchased | Per-player item-purchased count per minute bin. | countIf(participantid = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | participantid, matchid, timestamp |
+| TLE_S_031 | Item Undos Per-Minute Bin | game_data.tl_item_undo | Per-player item-undo count per minute bin. | countIf(participantid = participantid) grouped by (matchid, participantid, intDiv(timestamp, 60000)) | 1.0.0 | participantid, matchid, timestamp |
+| TLE_S_032 | Level Up Timer Seconds | game_data.tl_level_up | Per-player level-up timer in seconds from timeline start. | maxIf(timestamp / 1000, participantid = participantid) | 1.0.0 | timestamp, participantid |
 | TLE_S_033 | Total Kill Bounty Gold | game_data.tl_champion_kill | Total kill gold value earned from champion kill events per killer. | sum(bounty) grouped by (matchid, killerid) | 1.0.0 | bounty, killerid, matchid |
 | TLE_S_034 | Average Kill Streak Length | game_data.tl_champion_kill | Average kill streak length across a killer's champion-kill events. | avg(killstreaklength) grouped by (matchid, killerid) | 1.0.0 | killstreaklength, killerid, matchid |
 | TLE_S_035 | Total Shutdown Bounty Gold | game_data.tl_champion_kill | Total shutdown bounty gold earned by killer from advantaged targets. | sum(shutdownbounty) grouped by (matchid, killerid) | 1.0.0 | shutdownbounty, killerid, matchid |

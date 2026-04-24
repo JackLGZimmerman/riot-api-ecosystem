@@ -216,25 +216,77 @@ class EliteMonsterKillRow(TimelineEventRowBase):
     position_y: int
 
 
-class RareEventRow(TimelineEventRowBase):
-    type: Literal[
-        "WARD_KILL",
-        "WARD_PLACED",
-        "GAME_END",
-        "OBJECTIVE_BOUNTY_PRESTART",
-        "OBJECTIVE_BOUNTY_FINISH",
-        "FEAT_UPDATE",
-        "CHAMPION_TRANSFORM",
-        "ITEM_DESTROYED",
-        "ITEM_PURCHASED",
-        "ITEM_SOLD",
-        "ITEM_UNDO",
-        "LEVEL_UP",
-        "PAUSE_END",
-        "SKILL_LEVEL_UP",
-        "UNKNOWN",
-    ]
-    payload: dict[str, Any]
+class WardPlacedRow(TimelineEventRowBase):
+    creatorId: NonNegativeInt
+    wardType: str
+
+
+class WardKillRow(TimelineEventRowBase):
+    killerId: int
+    wardType: str
+
+
+class ItemPurchasedRow(TimelineEventRowBase):
+    participantId: int
+    itemId: int
+
+
+class ItemSoldRow(TimelineEventRowBase):
+    participantId: int
+    itemId: int
+
+
+class ItemDestroyedRow(TimelineEventRowBase):
+    participantId: int
+    itemId: int
+
+
+class ItemUndoRow(TimelineEventRowBase):
+    participantId: int
+    beforeId: int
+    afterId: int
+    goldGain: int
+
+
+class LevelUpRow(TimelineEventRowBase):
+    participantId: int
+    level: int
+
+
+class SkillLevelUpRow(TimelineEventRowBase):
+    participantId: int
+    skillSlot: int
+    levelUpType: str
+
+
+class PauseEndRow(TimelineEventRowBase):
+    realTimestamp: int
+
+
+class GameEndRow(TimelineEventRowBase):
+    winningTeam: int
+    gameId: int | None
+    realTimestamp: int
+
+
+class ObjectiveBountyPrestartRow(TimelineEventRowBase):
+    teamId: int
+    actualStartTime: int
+
+
+class ObjectiveBountyFinishRow(TimelineEventRowBase):
+    teamId: int
+
+
+class FeatUpdateRow(TimelineEventRowBase):
+    teamId: int
+    featType: int
+    featValue: int
+
+
+class ChampionTransformRow(TimelineEventRowBase):
+    participantId: int
+    transformType: str
 
 
 class TurretPlateDestroyedRow(TimelineEventRowBase):
@@ -251,6 +303,7 @@ RowT = TypeVar("RowT")
 
 class EventTypeParser[RowT]:
     EVENT_TYPE: ClassVar[str]
+    INCLUDE_TYPE: ClassVar[bool] = False
 
     def parse(self, frames: list[Frame], matchId: str | int) -> list[RowT]:
         rows: list[RowT] = []
@@ -267,6 +320,8 @@ class EventTypeParser[RowT]:
                     "frame_timestamp": frame_timestamp,
                     "matchId": matchId,
                 }
+                if not self.INCLUDE_TYPE:
+                    row.pop("type", None)
 
                 pos = e.get("position")
                 if pos is not None:
@@ -280,41 +335,6 @@ class EventTypeParser[RowT]:
                     row.pop("position", None)
 
                 rows.append(cast(RowT, row))
-
-        return rows
-
-
-class EventPayloadParser[RowT]:
-    EVENT_TYPES: ClassVar[set[str]]
-
-    def parse(self, frames: list[Frame], matchId: str | int) -> list[RowT]:
-        rows: list[RowT] = []
-
-        for frame in frames:
-            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
-
-            for e in frame.events:
-                event_type = e["type"]
-                if event_type not in self.EVENT_TYPES:
-                    continue
-
-                payload = {
-                    k: v
-                    for k, v in e.items()
-                    if k not in {"type", "timestamp", "matchId", "gameId"}
-                }
-                rows.append(
-                    cast(
-                        RowT,
-                        {
-                            "matchId": matchId,
-                            "frame_timestamp": frame_timestamp,
-                            "type": event_type,
-                            "timestamp": e["timestamp"],
-                            "payload": payload,
-                        },
-                    )
-                )
 
         return rows
 
@@ -465,6 +485,7 @@ class ChampionSpecialKillParser(EventTypeParser[ChampionSpecialKillRow]):
 
 class DragonSoulGivenParser(EventTypeParser[DragonSoulGivenRow]):
     EVENT_TYPE = "DRAGON_SOUL_GIVEN"
+    INCLUDE_TYPE = True
 
 
 class EliteMonsterKillParser(EventTypeParser[EliteMonsterKillRow]):
@@ -505,28 +526,86 @@ class EliteMonsterKillParser(EventTypeParser[EliteMonsterKillRow]):
         return rows
 
 
-class RareEventParser(EventPayloadParser[RareEventRow]):
-    EVENT_TYPES = {
-        "WARD_KILL",
-        "WARD_PLACED",
-        "GAME_END",
-        "OBJECTIVE_BOUNTY_PRESTART",
-        "OBJECTIVE_BOUNTY_FINISH",
-        "FEAT_UPDATE",
-        "CHAMPION_TRANSFORM",
-        "ITEM_DESTROYED",
-        "ITEM_PURCHASED",
-        "ITEM_SOLD",
-        "ITEM_UNDO",
-        "LEVEL_UP",
-        "PAUSE_END",
-        "SKILL_LEVEL_UP",
-        "UNKNOWN",
-    }
+class WardPlacedParser(EventTypeParser[WardPlacedRow]):
+    EVENT_TYPE = "WARD_PLACED"
+
+
+class WardKillParser(EventTypeParser[WardKillRow]):
+    EVENT_TYPE = "WARD_KILL"
+
+
+class ItemPurchasedParser(EventTypeParser[ItemPurchasedRow]):
+    EVENT_TYPE = "ITEM_PURCHASED"
+
+
+class ItemSoldParser(EventTypeParser[ItemSoldRow]):
+    EVENT_TYPE = "ITEM_SOLD"
+
+
+class ItemDestroyedParser(EventTypeParser[ItemDestroyedRow]):
+    EVENT_TYPE = "ITEM_DESTROYED"
+
+
+class ItemUndoParser(EventTypeParser[ItemUndoRow]):
+    EVENT_TYPE = "ITEM_UNDO"
+
+
+class LevelUpParser(EventTypeParser[LevelUpRow]):
+    EVENT_TYPE = "LEVEL_UP"
+
+
+class SkillLevelUpParser(EventTypeParser[SkillLevelUpRow]):
+    EVENT_TYPE = "SKILL_LEVEL_UP"
+
+
+class PauseEndParser(EventTypeParser[PauseEndRow]):
+    EVENT_TYPE = "PAUSE_END"
+
+
+class GameEndParser(EventTypeParser[GameEndRow]):
+    EVENT_TYPE = "GAME_END"
+
+    def parse(self, frames: list[Frame], matchId: str | int) -> list[GameEndRow]:
+        rows: list[GameEndRow] = []
+
+        for frame in frames:
+            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
+
+            for e in frame.events:
+                if e["type"] != self.EVENT_TYPE:
+                    continue
+
+                row: dict[str, Any] = {
+                    **e,
+                    "gameId": e.get("gameId"),
+                    "frame_timestamp": frame_timestamp,
+                    "matchId": matchId,
+                }
+                row.pop("type", None)
+                rows.append(cast(GameEndRow, row))
+
+        return rows
+
+
+class ObjectiveBountyPrestartParser(EventTypeParser[ObjectiveBountyPrestartRow]):
+    EVENT_TYPE = "OBJECTIVE_BOUNTY_PRESTART"
+
+
+class ObjectiveBountyFinishParser(EventTypeParser[ObjectiveBountyFinishRow]):
+    EVENT_TYPE = "OBJECTIVE_BOUNTY_FINISH"
+
+
+class FeatUpdateParser(EventTypeParser[FeatUpdateRow]):
+    EVENT_TYPE = "FEAT_UPDATE"
+
+
+class ChampionTransformParser(EventTypeParser[ChampionTransformRow]):
+    EVENT_TYPE = "CHAMPION_TRANSFORM"
 
 
 class TurretPlateDestroyedParser(EventTypeParser[TurretPlateDestroyedRow]):
     EVENT_TYPE = "TURRET_PLATE_DESTROYED"
+    INCLUDE_TYPE = True
 
 
 class BuildingKillParser(EventTypeParser[BuildingKillRow]):
@@ -576,7 +655,21 @@ class TimelineTables:
     championSpecialKill: list[ChampionSpecialKillRow]
     dragonSoulGiven: list[DragonSoulGivenRow]
     eliteMonsterKill: list[EliteMonsterKillRow]
-    payloadEvents: list[RareEventRow]
+
+    wardPlaced: list[WardPlacedRow]
+    wardKill: list[WardKillRow]
+    itemPurchased: list[ItemPurchasedRow]
+    itemSold: list[ItemSoldRow]
+    itemDestroyed: list[ItemDestroyedRow]
+    itemUndo: list[ItemUndoRow]
+    levelUp: list[LevelUpRow]
+    skillLevelUp: list[SkillLevelUpRow]
+    pauseEnd: list[PauseEndRow]
+    gameEnd: list[GameEndRow]
+    objectiveBountyPrestart: list[ObjectiveBountyPrestartRow]
+    objectiveBountyFinish: list[ObjectiveBountyFinishRow]
+    featUpdate: list[FeatUpdateRow]
+    championTransform: list[ChampionTransformRow]
 
     turretPlateDestroyed: list[TurretPlateDestroyedRow]
 
@@ -605,8 +698,48 @@ class MatchDataTimelineParsingOrchestrator:
     eliteMonsterKill: EventParser[list[Frame], list[EliteMonsterKillRow]] = field(
         default_factory=EliteMonsterKillParser
     )
-    payloadEvents: EventParser[list[Frame], list[RareEventRow]] = field(
-        default_factory=RareEventParser
+
+    wardPlaced: EventParser[list[Frame], list[WardPlacedRow]] = field(
+        default_factory=WardPlacedParser
+    )
+    wardKill: EventParser[list[Frame], list[WardKillRow]] = field(
+        default_factory=WardKillParser
+    )
+    itemPurchased: EventParser[list[Frame], list[ItemPurchasedRow]] = field(
+        default_factory=ItemPurchasedParser
+    )
+    itemSold: EventParser[list[Frame], list[ItemSoldRow]] = field(
+        default_factory=ItemSoldParser
+    )
+    itemDestroyed: EventParser[list[Frame], list[ItemDestroyedRow]] = field(
+        default_factory=ItemDestroyedParser
+    )
+    itemUndo: EventParser[list[Frame], list[ItemUndoRow]] = field(
+        default_factory=ItemUndoParser
+    )
+    levelUp: EventParser[list[Frame], list[LevelUpRow]] = field(
+        default_factory=LevelUpParser
+    )
+    skillLevelUp: EventParser[list[Frame], list[SkillLevelUpRow]] = field(
+        default_factory=SkillLevelUpParser
+    )
+    pauseEnd: EventParser[list[Frame], list[PauseEndRow]] = field(
+        default_factory=PauseEndParser
+    )
+    gameEnd: EventParser[list[Frame], list[GameEndRow]] = field(
+        default_factory=GameEndParser
+    )
+    objectiveBountyPrestart: EventParser[
+        list[Frame], list[ObjectiveBountyPrestartRow]
+    ] = field(default_factory=ObjectiveBountyPrestartParser)
+    objectiveBountyFinish: EventParser[
+        list[Frame], list[ObjectiveBountyFinishRow]
+    ] = field(default_factory=ObjectiveBountyFinishParser)
+    featUpdate: EventParser[list[Frame], list[FeatUpdateRow]] = field(
+        default_factory=FeatUpdateParser
+    )
+    championTransform: EventParser[list[Frame], list[ChampionTransformRow]] = field(
+        default_factory=ChampionTransformParser
     )
 
     turretPlateDestroyed: EventParser[list[Frame], list[TurretPlateDestroyedRow]] = (
@@ -671,7 +804,20 @@ class MatchDataTimelineParsingOrchestrator:
                 championSpecialKill=[],
                 dragonSoulGiven=[],
                 eliteMonsterKill=[],
-                payloadEvents=[],
+                wardPlaced=[],
+                wardKill=[],
+                itemPurchased=[],
+                itemSold=[],
+                itemDestroyed=[],
+                itemUndo=[],
+                levelUp=[],
+                skillLevelUp=[],
+                pauseEnd=[],
+                gameEnd=[],
+                objectiveBountyPrestart=[],
+                objectiveBountyFinish=[],
+                featUpdate=[],
+                championTransform=[],
                 turretPlateDestroyed=[],
                 championKillVictimDamageDealt=[],
                 championKillVictimDamageReceived=[],
@@ -691,7 +837,24 @@ class MatchDataTimelineParsingOrchestrator:
                 championSpecialKill=self.championSpecialKill.parse(frames, matchId),
                 dragonSoulGiven=self.dragonSoulGiven.parse(frames, matchId),
                 eliteMonsterKill=self.eliteMonsterKill.parse(frames, matchId),
-                payloadEvents=self.payloadEvents.parse(frames, matchId),
+                wardPlaced=self.wardPlaced.parse(frames, matchId),
+                wardKill=self.wardKill.parse(frames, matchId),
+                itemPurchased=self.itemPurchased.parse(frames, matchId),
+                itemSold=self.itemSold.parse(frames, matchId),
+                itemDestroyed=self.itemDestroyed.parse(frames, matchId),
+                itemUndo=self.itemUndo.parse(frames, matchId),
+                levelUp=self.levelUp.parse(frames, matchId),
+                skillLevelUp=self.skillLevelUp.parse(frames, matchId),
+                pauseEnd=self.pauseEnd.parse(frames, matchId),
+                gameEnd=self.gameEnd.parse(frames, matchId),
+                objectiveBountyPrestart=self.objectiveBountyPrestart.parse(
+                    frames, matchId
+                ),
+                objectiveBountyFinish=self.objectiveBountyFinish.parse(
+                    frames, matchId
+                ),
+                featUpdate=self.featUpdate.parse(frames, matchId),
+                championTransform=self.championTransform.parse(frames, matchId),
                 turretPlateDestroyed=self.turretPlateDestroyed.parse(frames, matchId),
                 championKillVictimDamageDealt=self.championKillVictimDamageDealt.parse(
                     frames, matchId

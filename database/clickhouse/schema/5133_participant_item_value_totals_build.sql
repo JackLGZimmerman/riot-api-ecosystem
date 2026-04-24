@@ -1,3 +1,4 @@
+-- noqa: disable=PRS
 -- Populate game_data_filtered.participant_item_value_totals.
 -- Requires game_data_filtered.participant_stats to be populated (run 5003 first,
 -- or run this standalone after a schema rebuild via 5132).
@@ -7,6 +8,8 @@
 -- collapse to the sentinel key (0, '') and act as the general fallback; rows
 -- with populated (championid, teamposition) apply only to that specific pair.
 -- The lookup below first tries the specific key, then falls back to (0, '').
+-- rolebounditem is treated as an optional extra item slot when present; missing
+-- role-bound dictionary rows resolve to a zero vector instead of failing.
 --
 -- Memory note: the GROUP BY builds an aggregation hash table keyed by
 -- (matchid, teamid, participantid, puuid, championid, teamposition) which does
@@ -72,14 +75,19 @@ WITH item_stats AS (
                     ),
                     (toInt32(COALESCE(championid, 0)), teamposition, item_id)
                 ),
-                dictGet(
+                dictGetOrDefault(
                     'game_data.item_value_map_dict',
                     (
                         'attack_damage', 'ability_power', 'lethality', 'on_hit', 'crit',
                         'utility_enchanter', 'utility_protection',
                         'ar_tank', 'mr_tank', 'ad_off_tank', 'ap_off_tank'
                     ),
-                    (toInt32(0), '', item_id)
+                    (toInt32(0), '', item_id),
+                    (
+                        toFloat32(0), toFloat32(0), toFloat32(0), toFloat32(0),
+                        toFloat32(0), toFloat32(0), toFloat32(0), toFloat32(0),
+                        toFloat32(0), toFloat32(0), toFloat32(0)
+                    )
                 )
             ) AS v
         FROM (
@@ -90,10 +98,17 @@ WITH item_stats AS (
                 puuid,
                 championid,
                 toString(teamposition) AS teamposition,
-                arrayJoin([
-                    toUInt32(item0), toUInt32(item1), toUInt32(item2),
-                    toUInt32(item3), toUInt32(item4), toUInt32(item5), toUInt32(item6)
-                ]) AS item_id
+                arrayJoin(arrayConcat(
+                    [
+                        toUInt32(item0), toUInt32(item1), toUInt32(item2),
+                        toUInt32(item3), toUInt32(item4), toUInt32(item5), toUInt32(item6)
+                    ],
+                    if(
+                        isNull(rolebounditem),
+                        CAST([], 'Array(UInt32)'),
+                        [toUInt32(assumeNotNull(rolebounditem))]
+                    )
+                )) AS item_id
             FROM game_data_filtered.participant_stats
         )
     ) AS ps

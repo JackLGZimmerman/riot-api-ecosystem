@@ -2,8 +2,8 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse
-    mem_limit: 5g
-    memswap_limit: 5g
+    mem_limit: 10g
+    memswap_limit: 10g
     cpus: 2
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE}

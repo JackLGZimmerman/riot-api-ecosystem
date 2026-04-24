@@ -120,7 +120,7 @@ class DamageInstance(TypedDict):
     participantId: int
     physicalDamage: NonNegativeInt
     spellName: str
-    spellSlot: int
+    spellSlot: int | None
     trueDamage: NonNegativeInt
     type: str
 

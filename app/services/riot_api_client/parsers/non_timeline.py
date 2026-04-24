@@ -13,7 +13,6 @@ from app.services.riot_api_client.parsers.base_parsers import (
     ParticipantParser,
 )
 from app.services.riot_api_client.parsers.models.non_timeline import (
-    ChallengeValue,
     Info,
     Metadata,
     NonTimeline,
@@ -31,7 +30,7 @@ class MatchIdRow(TypedDict, total=False):
 
 
 class TabulatedMetadata(MatchIdRow):
-    dataVersion: str
+    dataVersion: NonNegativeInt
     participants: list[str]
 
 
@@ -45,7 +44,7 @@ class MetadataParser:
         return [
             {
                 "matchId": validated.matchId,
-                "dataVersion": validated.dataVersion,
+                "dataVersion": int(validated.dataVersion),
                 "participants": validated.participants,
             }
         ]
@@ -435,7 +434,8 @@ class ParticipantStatsParser:
             "nexusKills",
             "nexusTakedowns",
             "nexusLost",
-            "eligibleForProgressionindividualPosition",
+            "eligibleForProgression",
+            "individualPosition",
             "lane",
             "role",
             "championName",
@@ -466,7 +466,7 @@ class ParticipantStatsParser:
 class TabulatedParticipantChallenges(MatchIdRow):
     teamId: PositiveInt
     puuid: str
-    payload: dict[str, ChallengeValue]
+    payload: dict[str, float]
 
 
 class ParticipantChallengesParser:
@@ -477,14 +477,13 @@ class ParticipantChallengesParser:
         for p in participants:
             teamId: PositiveInt = p.teamId
             puuid: str = p.puuid
-            payload = {
-                k: v
-                for k, v in p.challenges.model_dump(
-                    by_alias=True,
-                    exclude_none=True,
-                ).items()
-                if not k.startswith("SWARM")
-            }
+            raw = p.challenges.model_dump(by_alias=True, exclude_none=True)
+            payload: dict[str, float] = {}
+            for k, v in raw.items():
+                if k.startswith("SWARM"):
+                    continue
+                if isinstance(v, (int, float)):
+                    payload[k] = float(v)
 
             rows.append(
                 {

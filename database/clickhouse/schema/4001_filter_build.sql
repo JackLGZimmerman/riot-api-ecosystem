@@ -124,24 +124,24 @@ SELECT
     ps.teamid,
     ps.participantid,
     (ps.kills + ps.assists) * 5 < ps.deaths AS player_low_kda,
-    ps.goldearned > 0 AND ps.goldspent * 100 < ps.goldearned * 60
+    ps.goldearned > 0 AND ps.goldspent * 100 < ps.goldearned * 50
         AS player_gold_spent,
     ps.kills + ps.assists = 0 AND ps.deaths > 4 AS no_contribution_kda,
     ps.summoner1casts = 0 OR ps.summoner2casts = 0 AS bad_summoner_usage,
     pl.wins + pl.losses > 40
     AND pl.wins * 100 > (pl.wins + pl.losses) * 70 AS player_high_winrate,
     tf.team_kills_to_deaths,
-    tf.team_kills > 0 AND ps.kills * 100 > tf.team_kills * 65 AS solo_carried,
+    tf.team_kills > 0 AND ps.kills * 100 > tf.team_kills * 75 AS solo_carried,
     (
         ps.teamposition != 'UTILITY'
         AND tf.team_damage_to_champions > 0
-        AND ps.totaldamagedealttochampions * 1000 < tf.team_damage_to_champions * 75
+        AND ps.totaldamagedealttochampions * 1000 < tf.team_damage_to_champions * 50
     ) AS too_little_damage,
     (
         ps.teamposition != 'UTILITY'
         AND ps.timeplayed > 0
         AND (ps.totalminionskilled + ps.neutralminionskilled) * 60.0 / ps.timeplayed
-        < 4.5
+        < 4.0
     ) AS low_minions_killed,
     tf.team_non_utility_avg_cs_per_min_gt_2_5_below_enemy,
     tf.team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy,
@@ -230,16 +230,16 @@ rare_champion_teampositions AS ( -- noqa: ST03
 
 player_rare_picks AS ( -- noqa: ST03
     SELECT
-        ps.puuid AS puuid,
-        ps.championid AS championid,
-        ps.teamposition AS teamposition,
+        ps.puuid AS puuid, -- noqa: AL09
+        ps.championid AS championid, -- noqa: AL09
+        ps.teamposition AS teamposition, -- noqa: AL09
         count() AS player_champion_teamposition_picks
     FROM game_data.participant_stats AS ps
     SEMI JOIN game_data.filter_stg_stage1_valid_matchids AS sv
         ON ps.matchid = sv.matchid
     INNER JOIN rare_champion_teampositions AS rct
         ON ps.championid = rct.championid AND ps.teamposition = rct.teamposition
-    GROUP BY puuid, championid, teamposition
+    GROUP BY ps.puuid, ps.championid, ps.teamposition
     HAVING player_champion_teamposition_picks < 30
 )
 
@@ -327,14 +327,19 @@ item_stats AS (
                     ),
                     (toInt32(COALESCE(championid, 0)), teamposition, item_id)
                 ),
-                dictGet(
+                dictGetOrDefault(
                     'game_data.item_value_map_dict',
                     (
                         'attack_damage', 'ability_power', 'lethality', 'on_hit', 'crit',
                         'utility_enchanter', 'utility_protection',
                         'ar_tank', 'mr_tank', 'ad_off_tank', 'ap_off_tank'
                     ),
-                    (toInt32(0), '', item_id)
+                    (toInt32(0), '', item_id),
+                    (
+                        toFloat32(0), toFloat32(0), toFloat32(0), toFloat32(0),
+                        toFloat32(0), toFloat32(0), toFloat32(0), toFloat32(0),
+                        toFloat32(0), toFloat32(0), toFloat32(0)
+                    )
                 )
             ) AS v
         FROM (
@@ -344,11 +349,18 @@ item_stats AS (
                 ps.participantid,
                 ps.championid,
                 toString(ps.teamposition) AS teamposition,
-                arrayJoin([
-                    toUInt32(ps.item0), toUInt32(ps.item1), toUInt32(ps.item2),
-                    toUInt32(ps.item3), toUInt32(ps.item4),
-                    toUInt32(ps.item5), toUInt32(ps.item6)
-                ]) AS item_id
+                arrayJoin(arrayConcat(
+                    [
+                        toUInt32(ps.item0), toUInt32(ps.item1), toUInt32(ps.item2),
+                        toUInt32(ps.item3), toUInt32(ps.item4),
+                        toUInt32(ps.item5), toUInt32(ps.item6)
+                    ],
+                    if(
+                        isNull(ps.rolebounditem),
+                        CAST([], 'Array(UInt32)'),
+                        [toUInt32(assumeNotNull(ps.rolebounditem))]
+                    )
+                )) AS item_id
             FROM game_data.participant_stats AS ps
             SEMI JOIN game_data.filter_stg_stage2_valid_matchids AS sv
                 ON ps.matchid = sv.matchid
@@ -460,11 +472,13 @@ WITH
 excluded_matchids AS (
     SELECT DISTINCT matchid FROM game_data.filter_stg_rare_builds
 ),
+
 surviving_labels AS (
     SELECT pl.*
     FROM game_data.filter_stg_participant_labels AS pl
-    LEFT ANTI JOIN excluded_matchids AS em ON pl.matchid = em.matchid
+    LEFT ANTI JOIN excluded_matchids AS em ON pl.matchid = em.matchid -- noqa: ST11
 ),
+
 build_dist AS (
     SELECT
         championid,
@@ -495,11 +509,13 @@ WITH
 excluded_matchids AS (
     SELECT DISTINCT matchid FROM game_data.filter_stg_rare_builds
 ),
+
 surviving_labels AS (
     SELECT pl.*
     FROM game_data.filter_stg_participant_labels AS pl
-    LEFT ANTI JOIN excluded_matchids AS em ON pl.matchid = em.matchid
+    LEFT ANTI JOIN excluded_matchids AS em ON pl.matchid = em.matchid -- noqa: ST11
 ),
+
 build_dist AS (
     SELECT
         championid,

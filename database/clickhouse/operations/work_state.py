@@ -119,9 +119,8 @@ def seed_from_latest_matchids() -> int:
               AND endofgameresult LIKE 'Abort%%'
             UNION DISTINCT
             SELECT DISTINCT matchid
-            FROM game_data.tl_payload_event
+            FROM game_data.tl_game_end
             WHERE matchid != ''
-              AND type = 'GAME_END'
         )
         SELECT DISTINCT
             m.run_id AS run_id,

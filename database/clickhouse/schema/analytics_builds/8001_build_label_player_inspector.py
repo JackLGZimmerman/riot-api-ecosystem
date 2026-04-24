@@ -29,7 +29,7 @@ os.environ.setdefault("CLICKHOUSE_HOST", "localhost")
 
 from database.clickhouse.client import get_client
 
-ITEM_COLS = ["item0", "item1", "item2", "item3", "item4", "item5", "item6"]
+ITEM_COLS = ["item0", "item1", "item2", "item3", "item4", "item5", "item6", "roleBoundItem"]
 
 SQL = """
 WITH params AS (
@@ -50,9 +50,15 @@ SELECT
     dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item4)) AS item4,
     dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item5)) AS item5,
     dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item6)) AS item6,
+    if(
+        isNull(ps.rolebounditem),
+        '',
+        dictGet('game_data.item_image_map_dict', 'image', toUInt32(assumeNotNull(ps.rolebounditem)))
+    ) AS roleBoundItem,
     ps.kills,
-    ps.assists,
     ps.deaths,
+    ps.assists,
+    (ps.kills + ps.assists) / ps.deaths AS KDA,
     if(ps.win = 1, 'WIN', 'LOSS') AS outcome
 FROM game_data_filtered.participant_item_value_totals AS ivt
 INNER JOIN game_data_filtered.participant_stats AS ps

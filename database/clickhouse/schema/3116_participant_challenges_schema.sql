@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS game_data.participant_challenges
     matchid String,
     teamid UInt8,
     puuid FixedString (78),
-    payload JSON
+    payload Map (String, Float32)
 )
 ENGINE = MergeTree
 ORDER BY (matchid, teamid, puuid, run_id);

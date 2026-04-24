@@ -17,7 +17,7 @@ rules AS (
         SELECT
             arrayJoin([
                 tuple(1, '01-kda-lt-0.2', countIf(player_low_kda)),
-                tuple(2, '02-spent-lt-60%-earned', countIf(player_gold_spent)),
+                tuple(2, '02-spent-lt-50%-earned', countIf(player_gold_spent)),
                 tuple(
                     3,
                     '03-kills+assists-is-0-and-deaths-gt-4',
@@ -34,12 +34,12 @@ rules AS (
                     '06-team-kd-ratio-lt-0.33-vs-enemy',
                     countIf(team_kills_to_deaths)
                 ),
-                tuple(7, '07-player-kills-gt-65%-team-kills', countIf(solo_carried)),
+                tuple(7, '07-player-kills-gt-75%-team-kills', countIf(solo_carried)),
                 tuple(
-                    8, '08-non-utility-dmg-share-lt-7.5%', countIf(too_little_damage)
+                    8, '08-non-utility-dmg-share-lt-5%', countIf(too_little_damage)
                 ),
                 tuple(
-                    9, '09-non-utility-cs-per-min-lt-4.5', countIf(low_minions_killed)
+                    9, '09-non-utility-cs-per-min-lt-4', countIf(low_minions_killed)
                 ),
                 tuple(
                     10,

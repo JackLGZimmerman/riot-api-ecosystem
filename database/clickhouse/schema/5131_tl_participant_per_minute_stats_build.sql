@@ -192,27 +192,27 @@ p_stats_derived AS (
 
 champion_kill_actor_rows AS (
     SELECT
-        ck.matchid,
-        intDiv(ck.timestamp, 60000) AS minute_bin,
-        tupleElement(ck.actor_row, 1) AS participantid,
-        tupleElement(ck.actor_row, 2) AS kill_events,
-        tupleElement(ck.actor_row, 3) AS death_events,
-        tupleElement(ck.actor_row, 4) AS assist_events
-    FROM game_data_filtered.tl_champion_kill AS ck
+        matchid,
+        intDiv(timestamp, 60000) AS minute_bin,
+        tupleElement(actor_row, 1) AS participantid,
+        tupleElement(actor_row, 2) AS kill_events,
+        tupleElement(actor_row, 3) AS death_events,
+        tupleElement(actor_row, 4) AS assist_events
+    FROM game_data_filtered.tl_champion_kill
     ARRAY JOIN arrayConcat(
         if(
-            ck.killerid > 0,
-            [(ck.killerid, 1, 0, 0)],
+            killerid > 0,
+            [(killerid, 1, 0, 0)],
             empty_champion_kill_actor_rows
         ),
         if(
-            ck.victimid > 0,
-            [(ck.victimid, 0, 1, 0)],
+            victimid > 0,
+            [(victimid, 0, 1, 0)],
             empty_champion_kill_actor_rows
         ),
         arrayMap(
             participant_id -> (participant_id, 0, 0, 1),
-            ck.assistingparticipantids
+            assistingparticipantids
         )
     ) AS actor_row
 ),
@@ -234,33 +234,44 @@ champion_kill_bins AS (
 
 payload_actor_rows AS (
     SELECT
-        payload_rows.matchid,
-        intDiv(payload_rows.timestamp, 60000) AS minute_bin,
-        payload_rows.participantid_raw AS participantid,
-        payload_rows.type
-    FROM (
-        SELECT
-            pe.matchid,
-            pe.timestamp,
-            pe.type,
-            multiIf(
-                pe.type = 'WARD_KILL',
-                JSONExtractInt(pe.payload, 'killerId'),
-                pe.type = 'WARD_PLACED',
-                JSONExtractInt(pe.payload, 'creatorId'),
-                JSONExtractInt(pe.payload, 'participantId')
-            ) AS participantid_raw
-        FROM game_data_filtered.tl_payload_event AS pe
-        WHERE
-            pe.type IN (
-                'WARD_KILL',
-                'WARD_PLACED',
-                'ITEM_DESTROYED',
-                'ITEM_PURCHASED',
-                'ITEM_UNDO'
-            )
-    ) AS payload_rows
-    WHERE payload_rows.participantid_raw > 0
+        wk.matchid,
+        intDiv(wk.timestamp, 60000) AS minute_bin,
+        wk.killerid AS participantid,
+        'WARD_KILL' AS type
+    FROM game_data_filtered.tl_ward_kill AS wk
+    WHERE wk.killerid > 0
+    UNION ALL
+    SELECT
+        wp.matchid,
+        intDiv(wp.timestamp, 60000) AS minute_bin,
+        wp.creatorid AS participantid,
+        'WARD_PLACED' AS type
+    FROM game_data_filtered.tl_ward_placed AS wp
+    WHERE wp.creatorid > 0
+    UNION ALL
+    SELECT
+        id.matchid,
+        intDiv(id.timestamp, 60000) AS minute_bin,
+        id.participantid,
+        'ITEM_DESTROYED' AS type
+    FROM game_data_filtered.tl_item_destroyed AS id
+    WHERE id.participantid > 0
+    UNION ALL
+    SELECT
+        ip.matchid,
+        intDiv(ip.timestamp, 60000) AS minute_bin,
+        ip.participantid,
+        'ITEM_PURCHASED' AS type
+    FROM game_data_filtered.tl_item_purchased AS ip
+    WHERE ip.participantid > 0
+    UNION ALL
+    SELECT
+        iu.matchid,
+        intDiv(iu.timestamp, 60000) AS minute_bin,
+        iu.participantid,
+        'ITEM_UNDO' AS type
+    FROM game_data_filtered.tl_item_undo AS iu
+    WHERE iu.participantid > 0
 ),
 
 payload_bins AS (
@@ -326,104 +337,156 @@ turret_plate_bins AS (
 
 frame_metrics AS (
     SELECT
-        p.matchid,
-        p.frame_timestamp,
-        p.participantid,
-        p.minute_bin,
-        p.totaldamagedonetochampions,
-        p.nonchampiondamagedone,
-        p.nonchampionphysicaldamagedone,
-        p.nonchampionmagicdamagedone,
-        p.nonchampiontruedamagedone,
-        p.spentgold,
-        p.totalfarm,
-        p.spentgoldratio,
-        p.championdamageshare,
-        p.nonchampiondamageshare,
-        p.physicalchampiondamageshare,
-        p.physicalnonchampiondamageshare,
-        p.magicchampiondamageshare,
-        p.magicnonchampiondamageshare,
-        p.truechampiondamageshare,
-        p.truenonchampiondamageshare,
-        p.championdamagetodamagetakenratio,
-        p.championdamagepergoldearned,
-        p.physicaldamageshare,
-        p.magicdamageshare,
-        p.truedamageshare,
-        p.physicalchampiondamagetypeshare,
-        p.magicchampiondamagetypeshare,
-        p.truechampiondamagetypeshare,
-        p.physicalnonchampiondamagetypeshare,
-        p.magicnonchampiondamagetypeshare,
-        p.truenonchampiondamagetypeshare,
-        p.physicaldamagetakenshare,
-        p.magicdamagetakenshare,
-        p.truedamagetakenshare,
-        p.lanefarmshare,
-        p.junglefarmshare,
-        ck.championkilleventsperminutebin,
-        ck.championdeatheventsperminutebin,
-        ck.championassisteventsperminutebin,
-        pb.wardskilledperminutebin,
-        pb.wardsplacedperminutebin,
-        pb.itemsdestroyedperminutebin,
-        pb.itemspurchasedperminutebin,
-        pb.itemundosperminutebin,
-        csk.firstbloodeventsperminutebin,
-        csk.aceeventsperminutebin,
-        csk.multikilleventsperminutebin,
-        csk.doublekilltotalkillsperminutesum,
-        csk.triplekilltotalkillsperminutesum,
-        csk.quadrakilltotalkillsperminutesum,
-        csk.pentakilltotalkillsperminutesum,
-        tpb.toplaneplatesdestroyedperminutesum,
-        tpb.midlaneplatesdestroyedperminutesum,
-        tpb.botlaneplatesdestroyedperminutesum,
-        ck.championkilleventsperminutebin
-        + ck.championassisteventsperminutebin AS killparticipationeventsperminutebin,
-        ck.championkilleventsperminutebin
-        + ck.championdeatheventsperminutebin
-        + ck.championassisteventsperminutebin AS kdaactivityperminutebin,
-        ck.championkilleventsperminutebin
-        + ck.championassisteventsperminutebin
-        - ck.championdeatheventsperminutebin AS nettakedownmarginperminutebin,
-        pb.wardskilledperminutebin
-        + pb.wardsplacedperminutebin AS visionactivityperminutebin,
-        pb.itemsdestroyedperminutebin
-        + pb.itemspurchasedperminutebin
-        + pb.itemundosperminutebin AS itemactivityperminutebin,
-        pb.itemspurchasedperminutebin
-        - pb.itemundosperminutebin AS netitempurchaseactionsperminutebin,
-        tpb.toplaneplatesdestroyedperminutesum
-        + tpb.midlaneplatesdestroyedperminutesum
-        + tpb.botlaneplatesdestroyedperminutesum AS totalplatesdestroyedperminutesum
+        -- Keep plain names after ClickHouse expands joined CTE columns.
+        -- noqa: disable=AL09
+        p.matchid AS matchid,
+        p.frame_timestamp AS frame_timestamp,
+        p.participantid AS participantid,
+        p.minute_bin AS minute_bin,
+        p.totaldamagedonetochampions AS totaldamagedonetochampions,
+        p.nonchampiondamagedone AS nonchampiondamagedone,
+        p.nonchampionphysicaldamagedone AS nonchampionphysicaldamagedone,
+        p.nonchampionmagicdamagedone AS nonchampionmagicdamagedone,
+        p.nonchampiontruedamagedone AS nonchampiontruedamagedone,
+        p.spentgold AS spentgold,
+        p.totalfarm AS totalfarm,
+        p.spentgoldratio AS spentgoldratio,
+        p.championdamageshare AS championdamageshare,
+        p.nonchampiondamageshare AS nonchampiondamageshare,
+        p.physicalchampiondamageshare AS physicalchampiondamageshare,
+        p.physicalnonchampiondamageshare AS physicalnonchampiondamageshare,
+        p.magicchampiondamageshare AS magicchampiondamageshare,
+        p.magicnonchampiondamageshare AS magicnonchampiondamageshare,
+        p.truechampiondamageshare AS truechampiondamageshare,
+        p.truenonchampiondamageshare AS truenonchampiondamageshare,
+        p.championdamagetodamagetakenratio AS championdamagetodamagetakenratio,
+        p.championdamagepergoldearned AS championdamagepergoldearned,
+        p.physicaldamageshare AS physicaldamageshare,
+        p.magicdamageshare AS magicdamageshare,
+        p.truedamageshare AS truedamageshare,
+        p.physicalchampiondamagetypeshare AS physicalchampiondamagetypeshare,
+        p.magicchampiondamagetypeshare AS magicchampiondamagetypeshare,
+        p.truechampiondamagetypeshare AS truechampiondamagetypeshare,
+        p.physicalnonchampiondamagetypeshare AS physicalnonchampiondamagetypeshare,
+        p.magicnonchampiondamagetypeshare AS magicnonchampiondamagetypeshare,
+        p.truenonchampiondamagetypeshare AS truenonchampiondamagetypeshare,
+        p.physicaldamagetakenshare AS physicaldamagetakenshare,
+        p.magicdamagetakenshare AS magicdamagetakenshare,
+        p.truedamagetakenshare AS truedamagetakenshare,
+        p.lanefarmshare AS lanefarmshare,
+        p.junglefarmshare AS junglefarmshare,
+        -- noqa: enable=AL09
+        coalesce(
+            ck.championkilleventsperminutebin,
+            0
+        ) AS championkilleventsperminutebin,
+        coalesce(
+            ck.championdeatheventsperminutebin,
+            0
+        ) AS championdeatheventsperminutebin,
+        coalesce(
+            ck.championassisteventsperminutebin,
+            0
+        ) AS championassisteventsperminutebin,
+        coalesce(pb.wardskilledperminutebin, 0) AS wardskilledperminutebin,
+        coalesce(pb.wardsplacedperminutebin, 0) AS wardsplacedperminutebin,
+        coalesce(pb.itemsdestroyedperminutebin, 0) AS itemsdestroyedperminutebin,
+        coalesce(pb.itemspurchasedperminutebin, 0) AS itemspurchasedperminutebin,
+        coalesce(pb.itemundosperminutebin, 0) AS itemundosperminutebin,
+        coalesce(csk.firstbloodeventsperminutebin, 0) AS firstbloodeventsperminutebin,
+        coalesce(csk.aceeventsperminutebin, 0) AS aceeventsperminutebin,
+        coalesce(csk.multikilleventsperminutebin, 0) AS multikilleventsperminutebin,
+        coalesce(
+            csk.doublekilltotalkillsperminutesum,
+            0
+        ) AS doublekilltotalkillsperminutesum,
+        coalesce(
+            csk.triplekilltotalkillsperminutesum,
+            0
+        ) AS triplekilltotalkillsperminutesum,
+        coalesce(
+            csk.quadrakilltotalkillsperminutesum,
+            0
+        ) AS quadrakilltotalkillsperminutesum,
+        coalesce(
+            csk.pentakilltotalkillsperminutesum,
+            0
+        ) AS pentakilltotalkillsperminutesum,
+        coalesce(
+            tpb.toplaneplatesdestroyedperminutesum,
+            0
+        ) AS toplaneplatesdestroyedperminutesum,
+        coalesce(
+            tpb.midlaneplatesdestroyedperminutesum,
+            0
+        ) AS midlaneplatesdestroyedperminutesum,
+        coalesce(
+            tpb.botlaneplatesdestroyedperminutesum,
+            0
+        ) AS botlaneplatesdestroyedperminutesum,
+        coalesce(ck.championkilleventsperminutebin, 0)
+        + coalesce(
+            ck.championassisteventsperminutebin,
+            0
+        ) AS killparticipationeventsperminutebin,
+        coalesce(ck.championkilleventsperminutebin, 0)
+        + coalesce(ck.championdeatheventsperminutebin, 0)
+        + coalesce(ck.championassisteventsperminutebin, 0)
+            AS kdaactivityperminutebin,
+        coalesce(ck.championkilleventsperminutebin, 0)
+        + coalesce(ck.championassisteventsperminutebin, 0)
+        - coalesce(ck.championdeatheventsperminutebin, 0)
+            AS nettakedownmarginperminutebin,
+        coalesce(pb.wardskilledperminutebin, 0)
+        + coalesce(pb.wardsplacedperminutebin, 0) AS visionactivityperminutebin,
+        coalesce(pb.itemsdestroyedperminutebin, 0)
+        + coalesce(pb.itemspurchasedperminutebin, 0)
+        + coalesce(pb.itemundosperminutebin, 0) AS itemactivityperminutebin,
+        coalesce(pb.itemspurchasedperminutebin, 0)
+        - coalesce(pb.itemundosperminutebin, 0)
+            AS netitempurchaseactionsperminutebin,
+        coalesce(tpb.toplaneplatesdestroyedperminutesum, 0)
+        + coalesce(tpb.midlaneplatesdestroyedperminutesum, 0)
+        + coalesce(tpb.botlaneplatesdestroyedperminutesum, 0)
+            AS totalplatesdestroyedperminutesum
     FROM p_stats_derived AS p
     LEFT JOIN champion_kill_bins AS ck
-        USING (matchid, participantid, minute_bin)
+        ON
+            p.matchid = ck.matchid
+            AND p.participantid = ck.participantid
+            AND p.minute_bin = ck.minute_bin
     LEFT JOIN payload_bins AS pb
-        USING (matchid, participantid, minute_bin)
+        ON
+            p.matchid = pb.matchid
+            AND p.participantid = pb.participantid
+            AND p.minute_bin = pb.minute_bin
     LEFT JOIN champion_special_kill_bins AS csk
-        USING (matchid, participantid, minute_bin)
+        ON
+            p.matchid = csk.matchid
+            AND p.participantid = csk.participantid
+            AND p.minute_bin = csk.minute_bin
     LEFT JOIN turret_plate_bins AS tpb
-        USING (matchid, participantid, minute_bin)
+        ON
+            p.matchid = tpb.matchid
+            AND p.participantid = tpb.participantid
+            AND p.minute_bin = tpb.minute_bin
 ),
 
 final_input AS (
     SELECT
-        fm.*,
-        fm.championdeatheventsperminutebin AS championdeath_denom,
-        fm.championassisteventsperminutebin AS championassist_denom,
-        fm.championkilleventsperminutebin AS championkill_denom,
-        fm.visionactivityperminutebin AS visionactivity_denom,
-        fm.totalplatesdestroyedperminutesum AS totalplates_denom,
+        *,
+        championdeatheventsperminutebin AS championdeath_denom,
+        championassisteventsperminutebin AS championassist_denom,
+        championkilleventsperminutebin AS championkill_denom,
+        visionactivityperminutebin AS visionactivity_denom,
+        totalplatesdestroyedperminutesum AS totalplates_denom,
         (
-            fm.doublekilltotalkillsperminutesum
-            + fm.triplekilltotalkillsperminutesum
-            + fm.quadrakilltotalkillsperminutesum
-            + fm.pentakilltotalkillsperminutesum
+            doublekilltotalkillsperminutesum
+            + triplekilltotalkillsperminutesum
+            + quadrakilltotalkillsperminutesum
+            + pentakilltotalkillsperminutesum
         ) AS multikilltotalkillsperminutesum
-    FROM frame_metrics AS fm
+    FROM frame_metrics
 )
 
 SELECT

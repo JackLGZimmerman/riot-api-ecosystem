@@ -37,6 +37,7 @@
 {"id":2524,"name":"Bandlepipes","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2524_tankasaura.png"}
 {"id":2525,"name":"Protoplasm Harness","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2525_tanklifeline.png"}
 {"id":2526,"name":"Whispering Circlet","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2526_enchantertearbase.png"}
+{"id":2530,"name":"Diadem of Songs","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/2530_enchantertearupgraded.png"}
 {"id":3002,"name":"Trailblazer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3002_trailblazer.png"}
 {"id":3003,"name":"Archangel's Staff","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3003_mage_t3_archangelstaff.png"}
 {"id":3004,"name":"Manamune","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3004_marksman_t3_manamune.png"}
@@ -50,7 +51,9 @@
 {"id":3033,"name":"Mortal Reminder","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3033_marksman_t3_mortalreminder.png"}
 {"id":3035,"name":"Last Whisper","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3035_marksman_t2_lastwhisper.png"}
 {"id":3036,"name":"Lord Dominik's Regards","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3036_marksman_t3_dominikregards.png"}
+{"id":3040,"name":"Seraph's Embrace","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3048_mage_t3_seraphsembrace.png"}
 {"id":3041,"name":"Mejai's Soulstealer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3041_mage_t2_mejaissoulstealer.png"}
+{"id":3042,"name":"Muramana","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3042_marksman_t3_muramana.png"}
 {"id":3044,"name":"Phage","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3044_fighter_t2_phage.png"}
 {"id":3046,"name":"Phantom Dancer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3046_marksman_t3_phantomdancer.png"}
 {"id":3047,"name":"Plated Steelcaps","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3047_class_t2_ninjatabi.png"}
@@ -94,6 +97,7 @@
 {"id":3116,"name":"Rylai's Crystal Scepter","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3116_mage_t3_rylajscrystalscepter.png"}
 {"id":3118,"name":"Malignance","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3118_malignance.png"}
 {"id":3119,"name":"Winter's Approach","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3119_wintersapproach.png"}
+{"id":3121,"name":"Fimbulwinter","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3121_fimbulwinter.png"}
 {"id":3123,"name":"Executioner's Calling","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3123_fighter_t2_executionerscalling.png"}
 {"id":3124,"name":"Guinsoo's Rageblade","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3124_marksman_t3_guinsoosrageblade.png"}
 {"id":3133,"name":"Caulfield's Warhammer","image":"https://raw.communitydragon.org/latest/game/assets/items/icons2d/3133_fighter_t2_caulfieldswarhammer.png"}

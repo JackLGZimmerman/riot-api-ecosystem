@@ -8,11 +8,9 @@
 --
 -- Memory note: the clickhouse container is capped at 5 GiB.  To stay under
 -- that cap we (1) pause background merges for the duration of the build so
--- they don't compete for RSS with the active INSERT, (2) drop mark/
+-- they don't compete for RSS with the active INSERT, and (2) drop mark/
 -- uncompressed/compiled caches and run SYSTEM JEMALLOC PURGE between
--- statements so freed memory is returned to the OS, and (3) chunk the
--- participant_challenges INSERT by cityHash64(matchid) because its dynamic
--- JSON payload column (~8.9 GiB uncompressed) cannot be streamed in one shot.
+-- statements so freed memory is returned to the OS.
 
 SYSTEM STOP MERGES;
 
@@ -88,54 +86,12 @@ SYSTEM DROP UNCOMPRESSED CACHE;
 SYSTEM DROP COMPILED EXPRESSION CACHE;
 SYSTEM JEMALLOC PURGE;
 
--- participant_challenges carries a dynamic JSON payload column whose
--- per-block working set blows the 5 GiB cap on a single streaming read.
--- Split the insert into 4 cityHash64(matchid) buckets so each chunk only
--- touches ~1/4 of the source, and purge caches between chunks.
 TRUNCATE TABLE game_data_filtered.participant_challenges;
-
 INSERT INTO game_data_filtered.participant_challenges
 SELECT t.*
 FROM game_data.participant_challenges AS t
 SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
-WHERE cityHash64(t.matchid) % 4 = 0
-SETTINGS max_threads = 1, max_block_size = 2048, max_insert_block_size = 8192;
-
-SYSTEM DROP MARK CACHE;
-SYSTEM DROP UNCOMPRESSED CACHE;
-SYSTEM DROP COMPILED EXPRESSION CACHE;
-SYSTEM JEMALLOC PURGE;
-
-INSERT INTO game_data_filtered.participant_challenges
-SELECT t.*
-FROM game_data.participant_challenges AS t
-SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
-WHERE cityHash64(t.matchid) % 4 = 1
-SETTINGS max_threads = 1, max_block_size = 2048, max_insert_block_size = 8192;
-
-SYSTEM DROP MARK CACHE;
-SYSTEM DROP UNCOMPRESSED CACHE;
-SYSTEM DROP COMPILED EXPRESSION CACHE;
-SYSTEM JEMALLOC PURGE;
-
-INSERT INTO game_data_filtered.participant_challenges
-SELECT t.*
-FROM game_data.participant_challenges AS t
-SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
-WHERE cityHash64(t.matchid) % 4 = 2
-SETTINGS max_threads = 1, max_block_size = 2048, max_insert_block_size = 8192;
-
-SYSTEM DROP MARK CACHE;
-SYSTEM DROP UNCOMPRESSED CACHE;
-SYSTEM DROP COMPILED EXPRESSION CACHE;
-SYSTEM JEMALLOC PURGE;
-
-INSERT INTO game_data_filtered.participant_challenges
-SELECT t.*
-FROM game_data.participant_challenges AS t
-SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
-WHERE cityHash64(t.matchid) % 4 = 3
-SETTINGS max_threads = 1, max_block_size = 2048, max_insert_block_size = 8192;
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
 
 SYSTEM DROP MARK CACHE;
 SYSTEM DROP UNCOMPRESSED CACHE;
@@ -178,8 +134,173 @@ SYSTEM DROP UNCOMPRESSED CACHE;
 SYSTEM DROP COMPILED EXPRESSION CACHE;
 SYSTEM JEMALLOC PURGE;
 
--- tl_payload_event skipped: ClickHouse LOGICAL_ERROR (Code 49) on Object-type
--- payload column serialization. Table is excluded from filtered dataset.
+TRUNCATE TABLE game_data_filtered.tl_ward_placed;
+INSERT INTO game_data_filtered.tl_ward_placed
+SELECT t.*
+FROM game_data.tl_ward_placed AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_ward_kill;
+INSERT INTO game_data_filtered.tl_ward_kill
+SELECT t.*
+FROM game_data.tl_ward_kill AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_item_purchased;
+INSERT INTO game_data_filtered.tl_item_purchased
+SELECT t.*
+FROM game_data.tl_item_purchased AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_item_sold;
+INSERT INTO game_data_filtered.tl_item_sold
+SELECT t.*
+FROM game_data.tl_item_sold AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_item_destroyed;
+INSERT INTO game_data_filtered.tl_item_destroyed
+SELECT t.*
+FROM game_data.tl_item_destroyed AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_item_undo;
+INSERT INTO game_data_filtered.tl_item_undo
+SELECT t.*
+FROM game_data.tl_item_undo AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_level_up;
+INSERT INTO game_data_filtered.tl_level_up
+SELECT t.*
+FROM game_data.tl_level_up AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_skill_level_up;
+INSERT INTO game_data_filtered.tl_skill_level_up
+SELECT t.*
+FROM game_data.tl_skill_level_up AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_pause_end;
+INSERT INTO game_data_filtered.tl_pause_end
+SELECT t.*
+FROM game_data.tl_pause_end AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_game_end;
+INSERT INTO game_data_filtered.tl_game_end
+SELECT t.*
+FROM game_data.tl_game_end AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_objective_bounty_prestart;
+INSERT INTO game_data_filtered.tl_objective_bounty_prestart
+SELECT t.*
+FROM game_data.tl_objective_bounty_prestart AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_objective_bounty_finish;
+INSERT INTO game_data_filtered.tl_objective_bounty_finish
+SELECT t.*
+FROM game_data.tl_objective_bounty_finish AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_feat_update;
+INSERT INTO game_data_filtered.tl_feat_update
+SELECT t.*
+FROM game_data.tl_feat_update AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
+
+TRUNCATE TABLE game_data_filtered.tl_champion_transform;
+INSERT INTO game_data_filtered.tl_champion_transform
+SELECT t.*
+FROM game_data.tl_champion_transform AS t
+SEMI JOIN game_data_filtered.valid_game_ids AS v ON t.matchid = v.matchid -- noqa: PRS
+SETTINGS max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768;
+
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+SYSTEM DROP COMPILED EXPRESSION CACHE;
+SYSTEM JEMALLOC PURGE;
 
 TRUNCATE TABLE game_data_filtered.tl_building_kill;
 INSERT INTO game_data_filtered.tl_building_kill

@@ -224,18 +224,6 @@ class Participant(BaseModel):
     PlayerScore9: NonNegativeInt | None = None
     PlayerScore10: NonNegativeInt | None = None
     PlayerScore11: NonNegativeInt | None = None
-    playerScore0: NonNegativeInt | None = None
-    playerScore1: NonNegativeInt | None = None
-    playerScore2: NonNegativeInt | None = None
-    playerScore3: NonNegativeInt | None = None
-    playerScore4: NonNegativeInt | None = None
-    playerScore5: NonNegativeInt | None = None
-    playerScore6: NonNegativeInt | None = None
-    playerScore7: NonNegativeInt | None = None
-    playerScore8: NonNegativeInt | None = None
-    playerScore9: NonNegativeInt | None = None
-    playerScore10: NonNegativeInt | None = None
-    playerScore11: NonNegativeInt | None = None
     allInPings: NonNegativeInt
     assistMePings: NonNegativeInt
     assists: NonNegativeInt

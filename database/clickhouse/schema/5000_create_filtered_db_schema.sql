@@ -53,11 +53,76 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.tl_participant_stats
 AS game_data.tl_participant_stats
 ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, participantid, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_payload_event;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_payload_event
-AS game_data.tl_payload_event
+DROP TABLE IF EXISTS game_data_filtered.tl_ward_placed;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_ward_placed
+AS game_data.tl_ward_placed
 ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, type, run_id);
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_ward_kill;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_ward_kill
+AS game_data.tl_ward_kill
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_item_purchased;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_item_purchased
+AS game_data.tl_item_purchased
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_item_sold;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_item_sold
+AS game_data.tl_item_sold
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_item_destroyed;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_item_destroyed
+AS game_data.tl_item_destroyed
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_item_undo;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_item_undo
+AS game_data.tl_item_undo
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_level_up;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_level_up
+AS game_data.tl_level_up
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_skill_level_up;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_skill_level_up
+AS game_data.tl_skill_level_up
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_pause_end;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_pause_end
+AS game_data.tl_pause_end
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_game_end;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_game_end
+AS game_data.tl_game_end
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_objective_bounty_prestart;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_objective_bounty_prestart
+AS game_data.tl_objective_bounty_prestart
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_objective_bounty_finish;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_objective_bounty_finish
+AS game_data.tl_objective_bounty_finish
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_feat_update;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_feat_update
+AS game_data.tl_feat_update
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+DROP TABLE IF EXISTS game_data_filtered.tl_champion_transform;
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_champion_transform
+AS game_data.tl_champion_transform
+ENGINE = MergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, run_id);
 DROP TABLE IF EXISTS game_data_filtered.tl_building_kill;
 CREATE TABLE IF NOT EXISTS game_data_filtered.tl_building_kill
 AS game_data.tl_building_kill
