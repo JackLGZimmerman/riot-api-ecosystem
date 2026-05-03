@@ -3,10 +3,12 @@
 --
 -- Flow:
 --   1a. player_winrates   (from game_data.players)
---   1b. team_flags        (from game_data.participant_stats, self-join on
+--   1b. player_role_rates (from game_data.participant_stats, GROUP BY puuid+role)
+--   1c. team_flags        (from game_data.participant_stats, self-join on
 --                          the per-team aggregate only)
 --   1.  participant_flags (stage 1 flags; single scan of participant_stats
---                          joined to player_winrates + team_flags + info)
+--                          joined to player_winrates + player_role_rates +
+--                          team_flags + info)
 --   1r. stage1_valid_matchids (cheap rollup of participant_flags)
 --   2.  rare_roles        (SEMI JOIN stage1_valid_matchids so the expensive
 --                          pick-count scans see only stage-1-clean games)
@@ -19,10 +21,11 @@
 --                          + rare_builds; avoids re-scanning participant_stats)
 --
 -- Key memory/CPU notes:
---   * participant_stats is scanned once in stage 1, once (SEMI-joined to ~66%)
---     in stage 2, and once (SEMI-joined to the even smaller stage-2 pool) in
---     stage 3.  No other scan of participant_stats in the pipeline.
---   * game_time_lte_18 is read directly from info.gameduration instead of a
+--   * participant_stats is scanned in stage 1b (GROUP BY puuid+role for
+--     off-role rates), once in stage 1 (main participant flags), once
+--     (SEMI-joined to ~66%) in stage 2, and once (SEMI-joined to the even
+--     smaller stage-2 pool) in stage 3.
+--   * game_time_lte_16_5 is read directly from info.gameduration instead of a
 --     max(timeplayed) aggregate.
 --   * SEMI JOIN on the small matchid helper tables keeps the hash-build side
 --     tiny and avoids materialising the full matchid set into memory.
@@ -44,7 +47,26 @@ FROM game_data.players
 GROUP BY puuid;
 
 -- =============================================================================
--- Stage 1b: team flags with enemy-relative stats (one row per matchid+teamid)
+-- Stage 1b: player role rates (per-puuid, per-teamposition game counts)
+-- Scans participant_stats once; the resulting table is tiny (one row per
+-- distinct puuid+teamposition) and fits in memory for the ANY LEFT JOIN in 1c.
+-- =============================================================================
+
+TRUNCATE TABLE game_data.filter_stg_player_role_rates;
+
+INSERT INTO game_data.filter_stg_player_role_rates (
+    puuid, teamposition, role_games, total_games
+)
+SELECT
+    puuid,
+    teamposition,
+    count() AS role_games,
+    sum(count()) OVER (PARTITION BY puuid) AS total_games
+FROM game_data.participant_stats
+GROUP BY puuid, teamposition;
+
+-- =============================================================================
+-- Stage 1c: team flags with enemy-relative stats (one row per matchid+teamid)
 -- =============================================================================
 
 TRUNCATE TABLE game_data.filter_stg_team_flags;
@@ -93,7 +115,7 @@ LEFT JOIN team_base AS enemy
 
 -- =============================================================================
 -- Stage 1: per-participant flags for all 13 cheap filters.
--- game_time_lte_18 is derived from info.gameduration; info has exactly one
+-- game_time_lte_16_5 is derived from info.gameduration; info has exactly one
 -- row per matchid, so ANY LEFT JOIN is safe.
 -- =============================================================================
 
@@ -115,15 +137,14 @@ INSERT INTO game_data.filter_stg_participant_flags
     low_minions_killed,
     team_non_utility_avg_cs_per_min_gt_2_5_below_enemy,
     team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy,
-    sold_all_items,
-    grief_build,
-    game_time_lte_18
+    off_role_low_experience,
+    game_time_lte_16_5
 )
 SELECT
     ps.matchid,
     ps.teamid,
     ps.participantid,
-    (ps.kills + ps.assists) * 5 < ps.deaths AS player_low_kda,
+    (ps.kills + ps.assists) * 6 < ps.deaths AS player_low_kda,
     ps.goldearned > 0 AND ps.goldspent * 100 < ps.goldearned * 50
         AS player_gold_spent,
     ps.kills + ps.assists = 0 AND ps.deaths > 4 AS no_contribution_kda,
@@ -145,15 +166,8 @@ SELECT
     ) AS low_minions_killed,
     tf.team_non_utility_avg_cs_per_min_gt_2_5_below_enemy,
     tf.team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy,
-    (
-        ps.item0 = 0 AND ps.item1 = 0 AND ps.item2 = 0
-        AND ps.item3 = 0 AND ps.item4 = 0 AND ps.item5 = 0
-    ) AS sold_all_items,
-    (
-        ps.item0 = ps.item1 AND ps.item1 = ps.item2 AND ps.item2 = ps.item3
-        AND ps.item3 = ps.item4 AND ps.item4 = ps.item5
-    ) AS grief_build,
-    i.gameduration <= 18 * 60 AS game_time_lte_18
+    toUInt8(0) AS off_role_low_experience, -- disabled
+    i.gameduration <= 16 * 60 + 30 AS game_time_lte_16_5
 FROM game_data.participant_stats AS ps
 ANY LEFT JOIN game_data.filter_stg_player_winrates AS pl ON ps.puuid = pl.puuid
 ANY LEFT JOIN game_data.filter_stg_team_flags AS tf
@@ -184,9 +198,8 @@ HAVING
     AND max(low_minions_killed) = 0
     AND max(team_non_utility_avg_cs_per_min_gt_2_5_below_enemy) = 0
     AND max(team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy) = 0
-    AND max(sold_all_items) = 0
-    AND max(grief_build) = 0
-    AND max(game_time_lte_18) = 0;
+    AND max(off_role_low_experience) = 0
+    AND max(game_time_lte_16_5) = 0;
 
 -- =============================================================================
 -- Stage 2: rare-role detection over stage-1-clean games only.
@@ -560,9 +573,8 @@ INSERT INTO game_data.filter_stg_game_flags
     low_minions_killed,
     team_non_utility_avg_cs_per_min_gt_2_5_below_enemy,
     team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy,
-    sold_all_items,
-    grief_build,
-    game_time_lte_18,
+    off_role_low_experience,
+    game_time_lte_16_5,
     has_rare_role,
     rare_build_label,
     any_filter_triggered
@@ -584,9 +596,8 @@ stage1_rollup AS (
             AS team_non_utility_avg_cs_per_min_gt_2_5_below_enemy,
         max(team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy)
             AS team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy,
-        max(sold_all_items) AS sold_all_items,
-        max(grief_build) AS grief_build,
-        max(game_time_lte_18) AS game_time_lte_18
+        max(off_role_low_experience) AS off_role_low_experience,
+        max(game_time_lte_16_5) AS game_time_lte_16_5
     FROM game_data.filter_stg_participant_flags
     GROUP BY matchid
 ),
@@ -612,9 +623,8 @@ SELECT
     s.low_minions_killed,
     s.team_non_utility_avg_cs_per_min_gt_2_5_below_enemy,
     s.team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy,
-    s.sold_all_items,
-    s.grief_build,
-    s.game_time_lte_18,
+    s.off_role_low_experience,
+    s.game_time_lte_16_5,
     COALESCE(rr.has_rare_role, toUInt8(0)) AS has_rare_role,
     COALESCE(rb.rare_build_label, toUInt8(0)) AS rare_build_label,
     (
@@ -629,9 +639,8 @@ SELECT
         OR s.low_minions_killed
         OR s.team_non_utility_avg_cs_per_min_gt_2_5_below_enemy
         OR s.team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy
-        OR s.sold_all_items
-        OR s.grief_build
-        OR s.game_time_lte_18
+        OR s.off_role_low_experience
+        OR s.game_time_lte_16_5
         OR COALESCE(rr.has_rare_role, toUInt8(0))
         OR COALESCE(rb.rare_build_label, toUInt8(0))
     ) AS any_filter_triggered
@@ -646,10 +655,11 @@ LEFT JOIN rare_build_rollup AS rb ON s.matchid = rb.matchid;
 --   Player:  0=player_low_kda  1=player_gold_spent  2=no_contribution_kda
 --            3=bad_summoner_usage  4=player_high_winrate  6=solo_carried
 --            7=too_little_damage  8=low_minions_killed
---            11=sold_all_items  12=grief_build  15=rare_build_label
+--            15=rare_build_label
+--            16=off_role_low_experience
 --   Team:    5=team_kills_to_deaths  9=team_non_utility_avg_cs_per_min
 --            10=team_non_utility_damage_to_champions_ratio
---   Game:    13=game_time_lte_18  14=has_rare_role
+--   Game:    13=game_time_lte_16_5  14=has_rare_role
 -- =============================================================================
 
 TRUNCATE TABLE game_data.filter_result;
@@ -677,14 +687,13 @@ SELECT
     + pf.solo_carried * 64
     + pf.too_little_damage * 128
     + pf.low_minions_killed * 256
-    + pf.sold_all_items * 2048
-    + pf.grief_build * 4096
-    + COALESCE(rb.rare_build_label, toUInt8(0)) * 32768 AS player_rule_mask,
+    + COALESCE(rb.rare_build_label, toUInt8(0)) * 32768
+    + pf.off_role_low_experience * 65536 AS player_rule_mask,
     pf.team_kills_to_deaths * 32
     + pf.team_non_utility_avg_cs_per_min_gt_2_5_below_enemy * 512
     + pf.team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy * 1024
         AS team_rule_mask,
-    gf.game_time_lte_18 * 8192
+    gf.game_time_lte_16_5 * 8192
     + gf.has_rare_role * 16384 AS game_rule_mask,
     gf.player_low_kda * 1
     + gf.player_gold_spent * 2
@@ -697,11 +706,10 @@ SELECT
     + gf.low_minions_killed * 256
     + gf.team_non_utility_avg_cs_per_min_gt_2_5_below_enemy * 512
     + gf.team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy * 1024
-    + gf.sold_all_items * 2048
-    + gf.grief_build * 4096
-    + gf.game_time_lte_18 * 8192
+    + gf.game_time_lte_16_5 * 8192
     + gf.has_rare_role * 16384
-    + gf.rare_build_label * 32768 AS rule_mask,
+    + gf.rare_build_label * 32768
+    + gf.off_role_low_experience * 65536 AS rule_mask,
     gf.any_filter_triggered = 0 AS is_valid
 FROM game_data.filter_stg_participant_flags AS pf
 INNER JOIN game_data.filter_stg_game_flags AS gf ON pf.matchid = gf.matchid

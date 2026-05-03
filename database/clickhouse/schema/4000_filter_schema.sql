@@ -25,6 +25,18 @@ CREATE TABLE game_data.filter_stg_player_winrates
 ENGINE = MergeTree
 ORDER BY puuid;
 
+DROP TABLE IF EXISTS game_data.filter_stg_player_role_rates;
+
+CREATE TABLE game_data.filter_stg_player_role_rates
+(
+    puuid FixedString (78),
+    teamposition LowCardinality (String),
+    role_games UInt32,
+    total_games UInt32
+)
+ENGINE = MergeTree
+ORDER BY (puuid, teamposition);
+
 DROP TABLE IF EXISTS game_data.filter_stg_team_flags;
 
 CREATE TABLE game_data.filter_stg_team_flags
@@ -63,9 +75,8 @@ CREATE TABLE game_data.filter_stg_participant_flags
     low_minions_killed UInt8,
     team_non_utility_avg_cs_per_min_gt_2_5_below_enemy UInt8,
     team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy UInt8,
-    sold_all_items UInt8,
-    grief_build UInt8,
-    game_time_lte_18 UInt8
+    off_role_low_experience UInt8,
+    game_time_lte_16_5 UInt8
 )
 ENGINE = MergeTree
 ORDER BY (matchid, teamid, participantid);
@@ -149,9 +160,8 @@ CREATE TABLE game_data.filter_stg_game_flags
     low_minions_killed UInt8,
     team_non_utility_avg_cs_per_min_gt_2_5_below_enemy UInt8,
     team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy UInt8,
-    sold_all_items UInt8,
-    grief_build UInt8,
-    game_time_lte_18 UInt8,
+    off_role_low_experience UInt8,
+    game_time_lte_16_5 UInt8,
     has_rare_role UInt8,
     rare_build_label UInt8,
     any_filter_triggered UInt8

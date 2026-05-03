@@ -25,6 +25,12 @@ from app.services.riot_api_client.parsers.schema_drift import (
 logger = logging.getLogger(__name__)
 
 
+def is_abort_payload(raw: dict[str, Any]) -> bool:
+    info = raw.get("info")
+    end_of_game_result = info.get("endOfGameResult") if isinstance(info, dict) else None
+    return isinstance(end_of_game_result, str) and end_of_game_result.startswith("Abort")
+
+
 class MatchIdRow(TypedDict, total=False):
     matchId: str | NonNegativeInt
 
@@ -253,8 +259,10 @@ class TabulatedParticipantStats(MatchIdRow):
 
     win: bool
     gameEndedInEarlySurrender: bool
+    gameEndedInIGNBSurrender: bool | None
     gameEndedInSurrender: bool
     teamEarlySurrendered: bool
+    teamIGNBSurrendered: bool | None
 
     kills: NonNegativeInt
     deaths: NonNegativeInt
@@ -466,7 +474,147 @@ class ParticipantStatsParser:
 class TabulatedParticipantChallenges(MatchIdRow):
     teamId: PositiveInt
     puuid: str
-    payload: dict[str, float]
+
+    x12AssistStreakCount: float | None
+    HealFromMapSources: float | None
+    InfernalScalePickup: float | None
+    abilityUses: float | None
+    acesBefore15Minutes: float | None
+    alliedJungleMonsterKills: float | None
+    baronBuffGoldAdvantageOverThreshold: float | None
+    baronTakedowns: float | None
+    blastConeOppositeOpponentCount: float | None
+    bountyGold: float | None
+    buffsStolen: float | None
+    completeSupportQuestInTime: float | None
+    controlWardTimeCoverageInRiverOrEnemyHalf: float | None
+    controlWardsPlaced: float | None
+    damagePerMinute: float | None
+    damageTakenOnTeamPercentage: float | None
+    dancedWithRiftHerald: float | None
+    deathsByEnemyChamps: float | None
+    dodgeSkillShotsSmallWindow: float | None
+    doubleAces: float | None
+    dragonTakedowns: float | None
+    earliestBaron: float | None
+    earliestDragonTakedown: float | None
+    earliestElderDragon: float | None
+    earlyLaningPhaseGoldExpAdvantage: float | None
+    effectiveHealAndShielding: float | None
+    elderDragonKillsWithOpposingSoul: float | None
+    elderDragonMultikills: float | None
+    enemyChampionImmobilizations: float | None
+    enemyJungleMonsterKills: float | None
+    epicMonsterKillsNearEnemyJungler: float | None
+    epicMonsterKillsWithin30SecondsOfSpawn: float | None
+    epicMonsterSteals: float | None
+    epicMonsterStolenWithoutSmite: float | None
+    firstTurretKilled: float | None
+    firstTurretKilledTime: float | None
+    fasterSupportQuestCompletion: float | None
+    fastestLegendary: float | None
+    fistBumpParticipation: float | None
+    flawlessAces: float | None
+    fullTeamTakedown: float | None
+    gameLength: float | None
+    getTakedownsInAllLanesEarlyJungleAsLaner: float | None
+    goldPerMinute: float | None
+    hadOpenNexus: float | None
+    hadAfkTeammate: float | None
+    highestChampionDamage: float | None
+    highestCrowdControlScore: float | None
+    highestWardKills: float | None
+    immobilizeAndKillWithAlly: float | None
+    initialBuffCount: float | None
+    initialCrabCount: float | None
+    jungleCsBefore10Minutes: float | None
+    junglerKillsEarlyJungle: float | None
+    junglerTakedownsNearDamagedEpicMonster: float | None
+    kTurretsDestroyedBeforePlatesFall: float | None
+    kda: float | None
+    killAfterHiddenWithAlly: float | None
+    killParticipation: float | None
+    killedChampTookFullTeamDamageSurvived: float | None
+    killingSprees: float | None
+    killsNearEnemyTurret: float | None
+    killsOnLanersEarlyJungleAsJungler: float | None
+    killsOnOtherLanesEarlyJungleAsLaner: float | None
+    killsOnRecentlyHealedByAramPack: float | None
+    killsUnderOwnTurret: float | None
+    killsWithHelpFromEpicMonster: float | None
+    knockEnemyIntoTeamAndKill: float | None
+    landSkillShotsEarlyGame: float | None
+    laneMinionsFirst10Minutes: float | None
+    laningPhaseGoldExpAdvantage: float | None
+    legendaryCount: float | None
+    legendaryItemUsed: list[int]
+    lostAnInhibitor: float | None
+    maxCsAdvantageOnLaneOpponent: float | None
+    maxKillDeficit: float | None
+    maxLevelLeadLaneOpponent: float | None
+    mejaisFullStackInTime: float | None
+    moreEnemyJungleThanOpponent: float | None
+    multiKillOneSpell: float | None
+    multiTurretRiftHeraldCount: float | None
+    multikills: float | None
+    multikillsAfterAggressiveFlash: float | None
+    outerTurretExecutesBefore10Minutes: float | None
+    outnumberedKills: float | None
+    outnumberedNexusKill: float | None
+    perfectDragonSoulsTaken: float | None
+    perfectGame: float | None
+    pickKillWithAlly: float | None
+    playedChampSelectPosition: float | None
+    poroExplosions: float | None
+    quickCleanse: float | None
+    quickFirstTurret: float | None
+    quickSoloKills: float | None
+    riftHeraldTakedowns: float | None
+    saveAllyFromDeath: float | None
+    scuttleCrabKills: float | None
+    shortestTimeToAceFromFirstTakedown: float | None
+    skillshotsDodged: float | None
+    skillshotsHit: float | None
+    snowballsHit: float | None
+    soloBaronKills: float | None
+    soloKills: float | None
+    soloTurretsLategame: float | None
+    stealthWardsPlaced: float | None
+    survivedSingleDigitHpCount: float | None
+    survivedThreeImmobilizesInFight: float | None
+    takedownOnFirstTurret: float | None
+    takedowns: float | None
+    takedownsAfterGainingLevelAdvantage: float | None
+    takedownsBeforeJungleMinionSpawn: float | None
+    takedownsFirstXMinutes: float | None
+    takedownsInAlcove: float | None
+    takedownsInEnemyFountain: float | None
+    teleportTakedowns: float | None
+    teamBaronKills: float | None
+    teamDamagePercentage: float | None
+    teamElderDragonKills: float | None
+    teamRiftHeraldKills: float | None
+    thirdInhibitorDestroyedTime: float | None
+    tookLargeDamageSurvived: float | None
+    turretPlatesTaken: float | None
+    turretTakedowns: float | None
+    turretsTakenWithRiftHerald: float | None
+    twentyMinionsIn3SecondsCount: float | None
+    twoWardsOneSweeperCount: float | None
+    unseenRecalls: float | None
+    visionScoreAdvantageLaneOpponent: float | None
+    visionScorePerMinute: float | None
+    voidMonsterKill: float | None
+    wardTakedowns: float | None
+    wardTakedownsBefore20M: float | None
+    wardsGuarded: float | None
+
+
+_CHALLENGE_NUMERIC_FIELDS: tuple[str, ...] = tuple(
+    k
+    for k in TabulatedParticipantChallenges.__annotations__
+    if k not in {"matchId", "teamId", "puuid", "legendaryItemUsed"}
+)
 
 
 class ParticipantChallengesParser:
@@ -475,24 +623,24 @@ class ParticipantChallengesParser:
     ) -> list[TabulatedParticipantChallenges]:
         rows: list[TabulatedParticipantChallenges] = []
         for p in participants:
-            teamId: PositiveInt = p.teamId
-            puuid: str = p.puuid
-            raw = p.challenges.model_dump(by_alias=True, exclude_none=True)
-            payload: dict[str, float] = {}
-            for k, v in raw.items():
-                if k.startswith("SWARM"):
-                    continue
-                if isinstance(v, (int, float)):
-                    payload[k] = float(v)
-
-            rows.append(
-                {
-                    "matchId": matchId,
-                    "teamId": teamId,
-                    "puuid": puuid,
-                    "payload": payload,
-                }
+            dump = p.challenges.model_dump()
+            row: dict[str, Any] = {
+                "matchId": matchId,
+                "teamId": p.teamId,
+                "puuid": p.puuid,
+            }
+            for field_name in _CHALLENGE_NUMERIC_FIELDS:
+                value = dump.get(field_name)
+                row[field_name] = (
+                    float(value) if isinstance(value, (int, float)) else None
+                )
+            legendary = dump.get("legendaryItemUsed")
+            row["legendaryItemUsed"] = (
+                [int(v) for v in legendary if isinstance(v, (int, float))]
+                if isinstance(legendary, list)
+                else []
             )
+            rows.append(cast(TabulatedParticipantChallenges, row))
         return rows
 
 
@@ -689,12 +837,33 @@ class MatchDataNonTimelineParsingOrchestrator:
         return datetime.now(tz=UTC).date().isoformat()
 
     @staticmethod
-    def _is_abort_unexpected_payload(raw: dict[str, Any]) -> bool:
+    def _is_unsupported_game_mode(raw: dict[str, Any]) -> bool:
+        # SWARM (gameMode=STRAWBERRY) ships a different challenges schema and is
+        # never collected — short-circuit before drift detection so it does not
+        # surface as drift noise.
         info = raw.get("info")
-        end_of_game_result = info.get("endOfGameResult") if isinstance(info, dict) else None
-        return isinstance(end_of_game_result, str) and end_of_game_result.startswith(
-            "Abort"
-        )
+        game_mode = info.get("gameMode") if isinstance(info, dict) else None
+        return game_mode == "STRAWBERRY"
+
+    @staticmethod
+    def _strip_excluded_challenge_keys(raw: dict[str, Any]) -> None:
+        # Some ranked matches include SWARM_* challenge keys (value 0) because Riot
+        # attaches mode-specific challenges globally. We don't want them — strip
+        # before drift check and model validation so they never surface as errors.
+        info = raw.get("info")
+        if not isinstance(info, dict):
+            return
+        participants = info.get("participants")
+        if not isinstance(participants, list):
+            return
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            challenges = participant.get("challenges")
+            if not isinstance(challenges, dict):
+                continue
+            for key in [k for k in challenges if k.startswith("SWARM_")]:
+                del challenges[key]
 
     def run(self, raw: dict[str, Any]) -> NonTimelineTables:
         metadata_raw = raw.get("metadata", {})
@@ -703,10 +872,30 @@ class MatchDataNonTimelineParsingOrchestrator:
             if isinstance(metadata_raw, dict)
             else "unknown"
         )
+
+        self._strip_excluded_challenge_keys(raw)
+
+        if self._is_unsupported_game_mode(raw):
+            logger.info(
+                "NonTimelineSkip match_id=%s reason=unsupported_game_mode mode=STRAWBERRY",
+                match_id,
+            )
+            return NonTimelineTables(
+                metadata=[],
+                game_info=[],
+                bans=[],
+                feats=[],
+                objectives=[],
+                participant_stats=[],
+                participant_challenges=[],
+                participant_perk_values=[],
+                participant_perk_ids=[],
+            )
+
         drift_date = self._drift_date(raw)
         non_timeline(raw, match_id=match_id, drift_date=drift_date)
 
-        if self._is_abort_unexpected_payload(raw):
+        if is_abort_payload(raw):
             logger.warning(
                 "NonTimelineAbort match_id=%s date=%s; skipping non-timeline rows.",
                 match_id,

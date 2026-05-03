@@ -15,21 +15,12 @@ class Metadata(BaseModel):
 
 
 class Challenges(BaseModel):
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    # Keep explicit fields aligned with the typed participant_challenges table.
+    # Unmodelled keys must fail loudly so we can decide whether to add or ignore them.
     x12AssistStreakCount: ChallengeValue = Field(default=None, alias="12AssistStreakCount")
     HealFromMapSources: ChallengeValue = None
     InfernalScalePickup: ChallengeValue = None
-    PlayerBehavior: ChallengeValue = None
-    SWARM_DefeatAatrox: ChallengeValue = None
-    SWARM_DefeatBriar: ChallengeValue = None
-    SWARM_DefeatMiniBosses: ChallengeValue = None
-    SWARM_EvolveWeapon: ChallengeValue = None
-    SWARM_Have3Passives: ChallengeValue = None
-    SWARM_KillEnemy: ChallengeValue = None
-    SWARM_PickupGold: ChallengeValue = None
-    SWARM_ReachLevel50: ChallengeValue = None
-    SWARM_Survive15Min: ChallengeValue = None
-    SWARM_WinWith5EvolvedWeapons: ChallengeValue = None
     abilityUses: ChallengeValue = None
     acesBefore15Minutes: ChallengeValue = None
     alliedJungleMonsterKills: ChallengeValue = None
@@ -255,6 +246,7 @@ class Participant(BaseModel):
     firstTowerAssist: bool
     firstTowerKill: bool
     gameEndedInEarlySurrender: bool
+    gameEndedInIGNBSurrender: bool | None = None  # Schema drift, new IGNB surrender variant.
     gameEndedInSurrender: bool
     getBackPings: NonNegativeInt
     goldEarned: NonNegativeInt
@@ -330,6 +322,7 @@ class Participant(BaseModel):
     summonerLevel: NonNegativeInt
     summonerName: str
     teamEarlySurrendered: bool
+    teamIGNBSurrendered: bool | None = None  # Schema drift, new IGNB surrender variant.
     teamId: PositiveInt
     teamPosition: str
     timeCCingOthers: NonNegativeInt

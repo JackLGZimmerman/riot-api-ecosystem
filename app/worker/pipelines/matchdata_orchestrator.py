@@ -12,11 +12,11 @@ from uuid import UUID, uuid4
 
 from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
 
+from app.core.config.constants.generic import RETRYABLE
 from app.core.config.settings import settings
 from app.services.riot_api_client.base import RiotAPI
-from app.services.riot_api_client.match_data import stream_match_data
+from app.services.riot_api_client.match_data import MatchFetchResult, stream_match_data
 from app.services.riot_api_client.parsers.non_timeline import (
-    NonTimelineTables,
     TabulatedBan,
     TabulatedFeat,
     TabulatedInfo,
@@ -26,6 +26,7 @@ from app.services.riot_api_client.parsers.non_timeline import (
     TabulatedParticipantPerkIds,
     TabulatedParticipantPerkValues,
     TabulatedParticipantStats,
+    is_abort_payload,
 )
 from app.services.riot_api_client.parsers.timeline import (
     BuildingKillRow,
@@ -47,7 +48,6 @@ from app.services.riot_api_client.parsers.timeline import (
     ParticipantStatsRow,
     PauseEndRow,
     SkillLevelUpRow,
-    TimelineTables,
     TurretPlateDestroyedRow,
     WardKillRow,
     WardPlacedRow,
@@ -67,7 +67,6 @@ from database.clickhouse.operations.matchdata import (
 from database.clickhouse.operations.utils import delete_by_run_id, persist_data
 from database.clickhouse.operations.work_state import (
     claim_pending_matchids,
-    ensure_matchdata_state_schema,
     mark_matchids_finished,
     seed_from_latest_matchids,
 )
@@ -218,9 +217,8 @@ TIMELINE_TABLE_SPECS = (
     ),
 )
 
-NON_TIMELINE_DELETE_TABLES = tuple(spec.table for spec in NON_TIMELINE_TABLE_SPECS)
-TIMELINE_DELETE_TABLES = tuple(spec.table for spec in TIMELINE_TABLE_SPECS)
 ALL_TABLE_SPECS = (*NON_TIMELINE_TABLE_SPECS, *TIMELINE_TABLE_SPECS)
+ALL_DELETE_TABLES = tuple(spec.table for spec in ALL_TABLE_SPECS)
 
 type StreamName = Literal["non_timeline", "timeline"]
 
@@ -337,18 +335,17 @@ class MatchDataLoader(Loader):
     def load(self, ctx: OrchestrationContext) -> MatchDataCollectorState:
         _ = ctx
         if not self._initialized:
-            ensure_matchdata_state_schema()
             seeded_pending = seed_from_latest_matchids()
             if seeded_pending:
                 logger.info("MatchData loader seeded pending=%d", seeded_pending)
             self._initialized = True
 
         claimed = claim_pending_matchids(batch_size=self.batch_size)
-        if not claimed:
-            logger.info("MatchData loader source=none size=0")
-            return MatchDataCollectorState(matchids=[])
-
-        logger.info("MatchData loader source=state_queue size=%d", len(claimed))
+        logger.info(
+            "MatchData loader source=%s size=%d",
+            "state_queue" if claimed else "none",
+            len(claimed),
+        )
         return MatchDataCollectorState(matchids=claimed)
 
 
@@ -359,7 +356,7 @@ class MatchDataStreamCollector(Collector):
 
     async def collect(
         self, state: MatchDataCollectorState, ctx: OrchestrationContext
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> AsyncIterator[MatchFetchResult]:
         _ = ctx
         endpoint_type = (
             "by_match_id" if self.stream == "non_timeline" else "timeline_by_match_id"
@@ -404,47 +401,45 @@ class MatchDataSaver(Saver):
         if not state.matchids:
             return
 
-        # RECOVERY-SYSTEM: keep successful rows, requeue only failed match IDs.
         stream_successes: dict[str, set[StreamName]] = defaultdict(set)
+        stream_terminals: dict[str, set[StreamName]] = defaultdict(set)
+        aborted_match_ids: set[str] = set()
         buffers: dict[str, list[dict[str, Any]]] = defaultdict(list)
         last_flush = time.monotonic()
 
+        parsers: dict[StreamName, tuple[Any, tuple[TableSpec, ...]]] = {
+            "non_timeline": (self.non_timeline_parser, NON_TIMELINE_TABLE_SPECS),
+            "timeline": (self.timeline_parser, TIMELINE_TABLE_SPECS),
+        }
+
         try:
-            async for item_any in items:
+            async for item in items:
                 raise_if_stop_requested(stage="match_data:save")
-                item: StreamItem = item_any
-                match_id = self._extract_match_id(item.raw)
+                fetch: MatchFetchResult = item.raw
+                stream: StreamName = item.stream
+                match_id = fetch.match_id
 
-                if item.stream == "non_timeline":
-                    nt: NonTimelineTables = await asyncio.to_thread(
-                        self.non_timeline_parser.run, item.raw
-                    )
-                    self._attach_match_id(nt, match_id)
-                    if match_id != "unknown":
-                        stream_successes[match_id].add("non_timeline")
-                    await self._buffer_inserts(
-                        NON_TIMELINE_TABLE_SPECS,
-                        nt,
-                        buffers,
-                        ctx.run_id,
-                    )
+                if fetch.data is None:
+                    if fetch.status is not None and fetch.status not in RETRYABLE:
+                        stream_terminals[match_id].add(stream)
+                        logger.warning(
+                            "MatchDataTerminal match_id=%s stream=%s status=%s",
+                            match_id,
+                            stream,
+                            fetch.status,
+                        )
+                    continue
 
-                elif item.stream == "timeline":
-                    tl: TimelineTables = await asyncio.to_thread(
-                        self.timeline_parser.run, item.raw
-                    )
-                    self._attach_match_id(tl, match_id)
-                    if match_id != "unknown":
-                        stream_successes[match_id].add("timeline")
-                    await self._buffer_inserts(
-                        TIMELINE_TABLE_SPECS,
-                        tl,
-                        buffers,
-                        ctx.run_id,
-                    )
+                if stream == "non_timeline" and is_abort_payload(fetch.data):
+                    aborted_match_ids.add(match_id)
+                    logger.info("MatchDataAbort match_id=%s; retiring.", match_id)
+                    continue
 
-                else:
-                    raise ValueError(f"Unknown stream: {item.stream!r}")
+                parser, specs = parsers[stream]
+                parsed = await asyncio.to_thread(parser.run, fetch.data)
+                self._attach_match_id(parsed, match_id)
+                stream_successes[match_id].add(stream)
+                await self._buffer_inserts(specs, parsed, buffers, ctx.run_id)
 
                 now = time.monotonic()
                 if (now - last_flush) >= self.flush_interval_s:
@@ -454,32 +449,50 @@ class MatchDataSaver(Saver):
             await self._flush_all_buffers(buffers, ctx.run_id)
 
             both: set[StreamName] = {"non_timeline", "timeline"}
-            successful_match_ids: list[str] = []
-            failed_match_ids: list[str] = []
+            finished: list[str] = []
+            retired: list[str] = list(aborted_match_ids)
+            requeued: list[str] = []
             for mid in state.matchids:
-                (
-                    successful_match_ids
-                    if stream_successes.get(mid) == both
-                    else failed_match_ids
-                ).append(mid)
+                if mid in aborted_match_ids:
+                    continue
+                successes = stream_successes.get(mid, set())
+                terminals = stream_terminals.get(mid, set())
+                if successes | terminals != both:
+                    requeued.append(mid)
+                elif successes:
+                    finished.append(mid)
+                else:
+                    retired.append(mid)
 
-            if failed_match_ids:
+            if requeued:
                 logger.warning(
-                    "MatchData partial failure run_id=%s failed=%d sample=%s",
+                    "MatchData retryable failure run_id=%s count=%d sample=%s",
                     ctx.run_id,
-                    len(failed_match_ids),
-                    failed_match_ids[:20],
+                    len(requeued),
+                    requeued[:20],
                 )
-                await self.delete_failed_matchids(failed_match_ids)
+                await self.delete_failed_matchids(requeued)
 
-            await self.mark_finished_matchids(successful_match_ids)
+            if retired:
+                logger.warning(
+                    "MatchData retired run_id=%s count=%d aborts=%d sample=%s",
+                    ctx.run_id,
+                    len(retired),
+                    len(aborted_match_ids),
+                    retired[:20],
+                )
+                await self.delete_failed_matchids(retired)
+                await self.delete_source_matchids(retired)
+
+            await self.mark_finished_matchids([*finished, *retired])
 
             logger.info(
-                "MatchData completion run_id=%s total=%d finished=%d requeued=%d",
+                "MatchData done run_id=%s total=%d ok=%d retired=%d requeued=%d",
                 ctx.run_id,
                 len(state.matchids),
-                len(successful_match_ids),
-                len(failed_match_ids),
+                len(finished),
+                len(retired),
+                len(requeued),
             )
 
         except Exception as exc:
@@ -508,8 +521,7 @@ class MatchDataSaver(Saver):
             )
 
     async def delete_failed_matchids(self, match_ids: list[str]) -> None:
-        for tables in (NON_TIMELINE_DELETE_TABLES, TIMELINE_DELETE_TABLES):
-            await self._delete_tables(tables, delete_by_matchids, match_ids)
+        await self._delete_tables(ALL_DELETE_TABLES, delete_by_matchids, match_ids)
 
     async def mark_finished_matchids(self, match_ids: list[str]) -> None:
         await run_sync_with_retry(
@@ -520,24 +532,20 @@ class MatchDataSaver(Saver):
             kwargs={"match_ids": match_ids},
         )
 
-    async def rollback_run(self, run_id: UUID) -> None:
-        for tables in (NON_TIMELINE_DELETE_TABLES, TIMELINE_DELETE_TABLES):
-            await self._delete_tables(tables, delete_by_run_id, run_id)
+    async def delete_source_matchids(self, match_ids: list[str]) -> None:
+        await run_sync_with_retry(
+            logger=logger,
+            component="MatchData",
+            op_name="delete_source_matchids",
+            func=delete_by_matchids,
+            args=("game_data.matchids", match_ids),
+        )
 
-    @staticmethod
-    def _extract_match_id(raw: Any) -> str:
-        if not isinstance(raw, dict):
-            return "unknown"
-        metadata = raw.get("metadata")
-        if not isinstance(metadata, dict):
-            return "unknown"
-        match_id = metadata.get("matchId")
-        return match_id if isinstance(match_id, str) else "unknown"
+    async def rollback_run(self, run_id: UUID) -> None:
+        await self._delete_tables(ALL_DELETE_TABLES, delete_by_run_id, run_id)
 
     @staticmethod
     def _attach_match_id(parsed: Any, match_id: str) -> None:
-        if not match_id:
-            return
         for rows in vars(parsed).values():
             for row in rows:
                 row["matchId"] = match_id

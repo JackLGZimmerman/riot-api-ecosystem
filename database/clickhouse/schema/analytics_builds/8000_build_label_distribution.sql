@@ -51,8 +51,6 @@ GROUP BY
 HAVING instances > 40
 ORDER BY
     avg_win_rate DESC,
-    instances DESC,
     ivt.championid ASC,
     ivt.teamposition ASC,
     ivt.highest_value_label ASC
-SETTINGS join_algorithm = 'grace_hash', max_bytes_in_join = 2000000000

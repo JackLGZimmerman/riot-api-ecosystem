@@ -2,9 +2,9 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse
-    mem_limit: 10g
-    memswap_limit: 10g
-    cpus: 2
+    mem_limit: 14g
+    memswap_limit: 14g
+    cpus: 6
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
@@ -61,7 +61,8 @@ services:
       dockerfile: Dockerfile.prefect-worker
     container_name: prefect-worker
     depends_on:
-      - prefect-server
+      prefect-server:
+        condition: service_healthy
     environment:
       PREFECT_API_URL: http://prefect-server:4200/api
     volumes:

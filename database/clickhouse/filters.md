@@ -15,7 +15,7 @@ build-side hash table.
 ```text
 game_data.participant_stats
   │
-  ├─► STAGE 1 — filter_stg_participant_flags         (13 cheap per-participant flags, 1 scan)
+  ├─► STAGE 1 — filter_stg_participant_flags         (11 cheap per-participant flags, 1 scan)
   │     └─► filter_stg_stage1_valid_matchids
   │
   ├─► STAGE 2 — filter_stg_rare_roles                (rare (champion, role) in stage-1 pool)
@@ -57,7 +57,7 @@ stripped.
   self-joined against the enemy team for relative stats.
 
 **Stage 1 — `filter_stg_participant_flags`** — one row per
-`(matchid, teamid, participantid)`, 13 flag columns. Built from a single scan of
+`(matchid, teamid, participantid)`, 11 flag columns. Built from a single scan of
 `participant_stats` joined to the two helpers plus `game_data.info.gameduration`
 (no `max(timeplayed)` aggregate). Rolled up into
 `filter_stg_stage1_valid_matchids` (matchids where every flag is 0).
@@ -76,7 +76,7 @@ build label appears < 8 times in the stage-2 pool for their (champion, role).
 
 ### Rollups
 
-- `filter_stg_game_flags` — one row per matchid, 16 flag columns +
+- `filter_stg_game_flags` — one row per matchid, 14 flag columns +
   `any_filter_triggered`.
 - `filter_result` — one row per participant; `rule_mask` is a bitmask packed
   from the player/team/game masks. `rule_mask = 0 ↔ is_valid = 1`.
@@ -191,7 +191,7 @@ Either way, the 4-way hash chunking loop in `5003` collapses into a single
 
 | Bit | Weight | Column | Rule |
 |-----|--------|--------|------|
-| 0 | 1 | `player_low_kda` | `(kills + assists) * 5 < deaths` |
+| 0 | 1 | `player_low_kda` | `(kills + assists) * 6 < deaths` |
 | 1 | 2 | `player_gold_spent` | `goldspent * 100 < goldearned * 50` (spent < 50% earned) |
 | 2 | 4 | `no_contribution_kda` | `kills + assists = 0 AND deaths > 4` |
 | 3 | 8 | `bad_summoner_usage` | `summoner1casts = 0 OR summoner2casts = 0` |
@@ -199,8 +199,6 @@ Either way, the 4-way hash chunking loop in `5003` collapses into a single
 | 6 | 64 | `solo_carried` | `kills > 75% of team kills` |
 | 7 | 128 | `too_little_damage` | non-UTILITY player damage share < 5% |
 | 8 | 256 | `low_minions_killed` | non-UTILITY CS/min < 4 |
-| 11 | 2048 | `sold_all_items` | all of `item0`–`item5` are 0 |
-| 12 | 4096 | `grief_build` | all of `item0`–`item5` are equal |
 | 15 | 32768 | `rare_build_label` | `(championid, teamposition, build_label)` has < 8 games in stage-2 pool |
 
 ### Team-level
@@ -215,7 +213,7 @@ Either way, the 4-way hash chunking loop in `5003` collapses into a single
 
 | Bit | Weight | Column | Rule |
 |-----|--------|--------|------|
-| 13 | 8192 | `game_time_lte_18` | `info.gameduration <= 18 * 60` |
+| 13 | 8192 | `game_time_lte_16_5` | `info.gameduration <= 16 * 60 + 30` |
 | 14 | 16384 | `has_rare_role` | `(championid, teamposition)` < 0.4% of champion picks AND player has < 30 picks on it, both measured on stage-1 pool |
 
 ## Rebuild procedure
@@ -223,23 +221,26 @@ Either way, the 4-way hash chunking loop in `5003` collapses into a single
 ```bash
 CH="docker exec -i clickhouse clickhouse-client --multiquery --receive_timeout=3600 --send_timeout=3600"
 
-# 1. filter_stg_* + filter_result
+# 1. filter_stg_* + filter_result schema
+$CH < database/clickhouse/schema/4000_filter_schema.sql
+
+# 2. filter_stg_* + filter_result data
 $CH < database/clickhouse/schema/4001_filter_build.sql
 
-# 2. valid_game_ids
+# 3. valid_game_ids
 $CH < database/clickhouse/schema/5002_valid_game_ids_build.sql
 
-# 3. Persistent game_data_filtered.* copies
+# 4. Persistent game_data_filtered.* copies
 $CH < database/clickhouse/schema/5003_filtered_tables_build.sql
 
-# 4. Derived analytical tables
+# 5. Derived analytical tables
 $CH < database/clickhouse/schema/5131_tl_participant_per_minute_stats_build.sql
 $CH < database/clickhouse/schema/5133_participant_item_value_totals_build.sql
 ```
 
-To rebuild from scratch (drops everything first), run `4000` and `5000`
-before the sequence above. Run `5001` only if `valid_game_ids` itself was
-dropped — `5000` deliberately does not touch it.
+To rebuild from scratch (drops everything first), run `5000` before the
+sequence above. Run `5001` only if `valid_game_ids` itself was dropped —
+`5000` deliberately does not touch it.
 
 Memory note: `5003` currently carries `max_threads=1, max_block_size=8192,
 max_insert_block_size=32768` and a 4-way hash split on `participant_challenges`
@@ -341,30 +342,29 @@ FROM bucket_counts;
 under the new mapping. See `analytics_builds/8000_build_label_distribution.sql`
 for the per-champion breakdown.
 
-## Sample figures (650,692 total games, post 3-stage refactor)
+## Sample figures (1,858,577 total games, post item-filter removal)
 
-| Filter | Games | % |
-|---|---:|---:|
-| `01-kda-lt-0.2` | 68,460 | 10.52 |
-| `02-spent-lt-60%-earned` | 13,166 | 2.02 |
-| `03-kills+assists-is-0-and-deaths-gt-4` | 17,848 | 2.74 |
-| `04-either-summoner-not-cast` | 36,384 | 5.59 |
-| `05-player-games-gr-40-winrate-gt-70%` | 9,952 | 1.53 |
-| `06-team-kd-ratio-lt-0.33-vs-enemy` | 59,512 | 9.15 |
-| `07-player-kills-gt-65%-team-kills` | 27,806 | 4.27 |
-| `08-non-utility-dmg-share-lt-7.5%` | 29,623 | 4.55 |
-| `09-non-utility-cs-per-min-lt-4.5` | 60,882 | 9.36 |
-| `10-team-non-utility-avg-cs-per-min-gt-2.5-below-enemy` | 6,523 | 1.00 |
-| `11-team-non-utility-dmg-to-champs-ratio-lt-1/3-vs-enemy` | 1,285 | 0.20 |
-| `12-all-items-0` | 10,033 | 1.54 |
-| `13-all-items-same` | 11,730 | 1.80 |
-| `14-game-time-lte-18` | 77,375 | 11.89 |
-| `15-rare-role-champion-position-lt-0.4-pct-lt-30-games` | 8,920 | 1.37 |
-| `16-rare-build-label-lt-8-games` | 3,965 | 0.61 |
-| `17-any-filter-triggered` | 217,942 | 33.49 |
-| stage1-survivors | 445,635 | 68.49 |
-| stage2-survivors | 436,715 | 67.12 |
-| stage3-survivors | 432,750 | 66.51 |
+| Filter | Games | Total games | % |
+|---|---:|---:|---:|
+| `17-any-filter-triggered` | 461,482 | 1,858,577 | 24.83 |
+| `stage3-survivors` | 1,397,095 | 1,858,577 | 75.17 |
+| `stage1-survivors` | 1,429,130 | 1,858,577 | 76.89 |
+| `stage2-survivors` | 1,402,278 | 1,858,577 | 75.45 |
+| `01-kda-lt-1/6` | 160,687 | 1,858,577 | 8.65 |
+| `02-spent-lt-50%-earned` | 27,587 | 1,858,577 | 1.48 |
+| `03-kills+assists-is-0-and-deaths-gt-4` | 49,281 | 1,858,577 | 2.65 |
+| `04-either-summoner-not-cast` | 106,069 | 1,858,577 | 5.71 |
+| `05-player-games-gr-40-winrate-gt-70%` | 30,786 | 1,858,577 | 1.66 |
+| `06-team-kd-ratio-lt-0.33-vs-enemy` | 164,607 | 1,858,577 | 8.86 |
+| `07-player-kills-gt-75%-team-kills` | 24,590 | 1,858,577 | 1.32 |
+| `08-non-utility-dmg-share-lt-5%` | 40,908 | 1,858,577 | 2.20 |
+| `09-non-utility-cs-per-min-lt-4` | 88,053 | 1,858,577 | 4.74 |
+| `10-team-non-utility-avg-cs-per-min-gt-2.5-below-enemy` | 18,287 | 1,858,577 | 0.98 |
+| `11-team-non-utility-dmg-to-champs-ratio-lt-1/3-vs-enemy` | 4,335 | 1,858,577 | 0.23 |
+| `14-game-time-lte-16.5` | 190,145 | 1,858,577 | 10.23 |
+| `15-rare-role-champion-position-lt-0.4-pct-lt-30-games` | 26,852 | 1,858,577 | 1.44 |
+| `16-rare-build-label-lt-8-games` | 5,183 | 1,858,577 | 0.28 |
+| `17-off-role-low-experience` | 0 | 1,858,577 | 0.00 |
 
 ## Future considerations
 

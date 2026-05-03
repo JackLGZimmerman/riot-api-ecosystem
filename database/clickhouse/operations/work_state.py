@@ -12,15 +12,11 @@ from database.clickhouse.operations.utils import _as_text
 
 MATCHDATA_STATE_TABLE = "game_data.matchdata_matchids"
 MATCHDATA_SEEDED_RUN_NAME = "matchdata_seeded_matchids_run"
-CONTINENTS: tuple[str, ...] = tuple(continent.value for continent in Continent)
+CONTINENTS: tuple[str, ...] = tuple(c.value for c in Continent)
 CONTINENT_SHARDS: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
-    (
-        continent.value,
-        tuple(region.value for region in CONTINENT_TO_REGIONS[continent]),
-    )
-    for continent in Continent
+    (c.value, tuple(r.value for r in CONTINENT_TO_REGIONS[c])) for c in Continent
 )
-SHARD_TO_CONTINENT = {
+SHARD_TO_CONTINENT: dict[str, str] = {
     shard: continent for continent, shards in CONTINENT_SHARDS for shard in shards
 }
 
@@ -29,19 +25,16 @@ logger = logging.getLogger(__name__)
 
 def _sql_strings(values: Iterable[str], *, brackets: str = "()") -> str:
     left, right = brackets
-    quoted = ", ".join(f"'{value}'" for value in values)
-    return f"{left}{quoted}{right}"
+    return f"{left}{', '.join(f'\'{v}\'' for v in values)}{right}"
 
 
-def _continent_alias_sql(matchid_column: str = "matchid") -> str:
-    shard_expr = f"lower(splitByChar('_', {matchid_column})[1])"
-    cases = ",\n                ".join(
-        f"{shard_expr} IN {_sql_strings(shards)}, '{continent}'"
+def _continent_expr(matchid_column: str = "matchid") -> str:
+    shard = f"lower(splitByChar('_', {matchid_column})[1])"
+    cases = ",\n            ".join(
+        f"{shard} IN {_sql_strings(shards)}, '{continent}'"
         for continent, shards in CONTINENT_SHARDS
     )
-    return (
-        f"multiIf(\n                {cases},\n                'unknown'\n            )"
-    )
+    return f"multiIf(\n            {cases},\n            'unknown'\n        )"
 
 
 def _load_latest_run_id(*, client, name: str) -> UUID | None:
@@ -64,36 +57,6 @@ def _mark_seeded(client, run_id: UUID) -> None:
     )
 
 
-# RECOVERY-SYSTEM: basic matchdata queue helpers.
-def ensure_matchdata_state_schema() -> None:
-    client = get_client()
-    client.command(
-        f"""
-        CREATE TABLE IF NOT EXISTS {MATCHDATA_STATE_TABLE}
-        (
-            run_id UUID,
-            matchid String,
-            continent LowCardinality(String) ALIAS {_continent_alias_sql()},
-            shuffle_key UInt64 ALIAS cityHash64(matchid)
-        )
-        ENGINE = MergeTree
-        ORDER BY (matchid, run_id)
-        """
-    )
-    client.command(
-        f"""
-        ALTER TABLE {MATCHDATA_STATE_TABLE}
-        ADD COLUMN IF NOT EXISTS continent LowCardinality(String) ALIAS {_continent_alias_sql()}
-        """
-    )
-    client.command(
-        f"""
-        ALTER TABLE {MATCHDATA_STATE_TABLE}
-        ADD COLUMN IF NOT EXISTS shuffle_key UInt64 ALIAS cityHash64(matchid)
-        """
-    )
-
-
 def seed_from_latest_matchids() -> int:
     client = get_client()
     latest_run_id = _load_latest_run_id(client=client, name=PUUID_DATA_TIMESTAMP_NAME)
@@ -113,14 +76,9 @@ def seed_from_latest_matchids() -> int:
         f"""
         WITH completed_matchids AS
         (
-            SELECT DISTINCT matchid
-            FROM game_data.info
-            WHERE matchid != ''
-              AND endofgameresult LIKE 'Abort%%'
+            SELECT DISTINCT matchid FROM game_data.info WHERE matchid != ''
             UNION DISTINCT
-            SELECT DISTINCT matchid
-            FROM game_data.tl_game_end
-            WHERE matchid != ''
+            SELECT DISTINCT matchid FROM game_data.tl_game_end WHERE matchid != ''
         )
         SELECT DISTINCT
             m.run_id AS run_id,
@@ -128,10 +86,8 @@ def seed_from_latest_matchids() -> int:
         FROM game_data.matchids AS m
         WHERE m.run_id = %(run_id)s
           AND toString(m.matchid) NOT IN completed_matchids
-          AND toString(m.matchid) NOT IN
-          (
-              SELECT DISTINCT matchid
-              FROM {MATCHDATA_STATE_TABLE}
+          AND toString(m.matchid) NOT IN (
+              SELECT DISTINCT matchid FROM {MATCHDATA_STATE_TABLE}
           )
         """,
         parameters={"run_id": latest_run_id},
@@ -140,23 +96,16 @@ def seed_from_latest_matchids() -> int:
         _mark_seeded(client, latest_run_id)
         return 0
 
-    data: list[tuple[UUID, str]] = [
-        (
-            run_id,
-            _as_text(matchid),
-        )
-        for run_id, matchid in rows
-    ]
     client.insert(
         table=MATCHDATA_STATE_TABLE,
-        data=data,
+        data=[(run_id, _as_text(matchid)) for run_id, matchid in rows],
         column_names=("run_id", "matchid"),
     )
     _mark_seeded(client, latest_run_id)
     logger.debug(
-        "Seeded matchdata queue rows=%d latest_run_id=%s", len(data), latest_run_id
+        "Seeded matchdata queue rows=%d latest_run_id=%s", len(rows), latest_run_id
     )
-    return len(data)
+    return len(rows)
 
 
 def claim_pending_matchids(*, batch_size: int) -> list[str]:
@@ -166,59 +115,57 @@ def claim_pending_matchids(*, batch_size: int) -> list[str]:
         get_client()
         .query(
             f"""
-        WITH
-        limited AS
-        (
-            SELECT
-                matchid,
-                continent,
-                shuffle_key
-            FROM {MATCHDATA_STATE_TABLE}
-            ORDER BY continent, shuffle_key, matchid
-            LIMIT %(limit)s BY continent
-        ),
-        ranked AS
-        (
-            SELECT
-                matchid,
-                shuffle_key,
-                row_number() OVER (
-                    PARTITION BY continent
-                    ORDER BY shuffle_key, matchid
-                ) AS row_n,
-                transform(
-                    continent,
-                    {_sql_strings(CONTINENTS, brackets="[]")},
-                    [1, 2, 3, 4],
-                    5
-                ) AS continent_order
-            FROM limited
-        )
-        SELECT matchid
-        FROM ranked
-        ORDER BY row_n, continent_order, shuffle_key, matchid
-        LIMIT %(limit)s
-        """,
+            WITH limited AS (
+                SELECT
+                    matchid,
+                    {_continent_expr()} AS continent,
+                    cityHash64(matchid) AS shuffle_key
+                FROM {MATCHDATA_STATE_TABLE}
+                ORDER BY continent, shuffle_key, matchid
+                LIMIT %(limit)s BY continent
+            ),
+            ranked AS (
+                SELECT
+                    matchid,
+                    shuffle_key,
+                    row_number() OVER (
+                        PARTITION BY continent
+                        ORDER BY shuffle_key, matchid
+                    ) AS row_n,
+                    transform(
+                        continent,
+                        {_sql_strings(CONTINENTS, brackets="[]")},
+                        [1, 2, 3, 4],
+                        5
+                    ) AS continent_order
+                FROM limited
+            )
+            SELECT matchid
+            FROM ranked
+            ORDER BY row_n, continent_order, shuffle_key, matchid
+            LIMIT %(limit)s
+            """,
             parameters={"limit": batch_size},
         )
         .result_rows
     )
     claimed = _dedupe(_as_text(row[0]) for row in rows)
 
-    per_continent_counts: dict[str, int] = {continent: 0 for continent in CONTINENTS}
-    unknown_count = 0
+    counts: dict[str, int] = {c: 0 for c in CONTINENTS}
+    unknown = 0
     for matchid in claimed:
-        continent = _continent_for_matchid(matchid)
-        if continent in per_continent_counts:
-            per_continent_counts[continent] += 1
+        shard = matchid.split("_", 1)[0].lower()
+        c = SHARD_TO_CONTINENT.get(shard)
+        if c is None:
+            unknown += 1
         else:
-            unknown_count += 1
+            counts[c] += 1
 
     logger.debug(
         "Claimed matchdata queue rows=%d counts=%s unknown=%d",
         len(claimed),
-        per_continent_counts,
-        unknown_count,
+        counts,
+        unknown,
     )
     return claimed
 
@@ -244,13 +191,7 @@ def _dedupe(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     for value in values:
         text = _as_text(value)
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        out.append(text)
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
     return out
-
-
-def _continent_for_matchid(matchid: str) -> str:
-    shard = matchid.split("_", 1)[0].lower()
-    return SHARD_TO_CONTINENT.get(shard, "unknown")

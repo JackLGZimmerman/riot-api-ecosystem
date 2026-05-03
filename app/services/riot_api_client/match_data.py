@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
 from app.core.config.constants import (
@@ -21,11 +22,18 @@ class MatchWork(NamedTuple):
     continent: Continent
 
 
+@dataclass(frozen=True)
+class MatchFetchResult:
+    match_id: str
+    data: dict[str, Any] | None
+    status: int | None
+
+
 async def stream_match_data(
     matchids: list[str],
     endpoint_type: MatchEndpointType,
     riot_api: RiotAPI,
-) -> AsyncIterator[dict[str, Any]]:
+) -> AsyncIterator[MatchFetchResult]:
     endpoint = ENDPOINTS["match"][endpoint_type]
 
     work_items: list[MatchWork] = []
@@ -48,19 +56,24 @@ async def stream_match_data(
 
     shuffled = spreading(work_items, lambda w: w.continent)
 
-    async def fetch_one(work: MatchWork) -> Any:
-        return await riot_api.fetch_json(
+    async def fetch_one(work: MatchWork) -> MatchFetchResult:
+        result = await riot_api.fetch_json_detailed(
             url=endpoint.format(
                 continent=work.continent,
                 matchId=work.match_id,
             ),
             location=work.continent,
         )
+        data = result.data if isinstance(result.data, dict) else None
+        return MatchFetchResult(
+            match_id=work.match_id,
+            data=data,
+            status=result.status,
+        )
 
-    async for data in iter_in_flight(
+    async for result in iter_in_flight(
         shuffled,
         fetch_one,
         max_in_flight=MAX_IN_FLIGHT,
     ):
-        if isinstance(data, dict):
-            yield data
+        yield result

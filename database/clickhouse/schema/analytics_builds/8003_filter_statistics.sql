@@ -16,7 +16,7 @@ rules AS (
     FROM (
         SELECT
             arrayJoin([
-                tuple(1, '01-kda-lt-0.2', countIf(player_low_kda)),
+                tuple(1, '01-kda-lt-1/6', countIf(player_low_kda)),
                 tuple(2, '02-spent-lt-50%-earned', countIf(player_gold_spent)),
                 tuple(
                     3,
@@ -51,9 +51,7 @@ rules AS (
                     '11-team-non-utility-dmg-to-champs-ratio-lt-1/3-vs-enemy',
                     countIf(team_non_utility_damage_to_champions_ratio_lt_1_3_vs_enemy)
                 ),
-                tuple(12, '12-all-items-0', countIf(sold_all_items)),
-                tuple(13, '13-all-items-same', countIf(grief_build)),
-                tuple(14, '14-game-time-lte-18', countIf(game_time_lte_18)),
+                tuple(14, '14-game-time-lte-16.5', countIf(game_time_lte_16_5)),
                 tuple(
                     15,
                     '15-rare-role-champion-position-lt-0.4-pct-lt-30-games',
@@ -63,6 +61,11 @@ rules AS (
                     16,
                     '16-rare-build-label-lt-8-games',
                     countIf(rare_build_label)
+                ),
+                tuple(
+                    17,
+                    '17-off-role-low-experience',
+                    countIf(off_role_low_experience)
                 )
             ]) AS rule
         FROM game_data.filter_stg_game_flags

@@ -1,53 +1,10 @@
 -- noqa: disable=LT05
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_participant_per_minute_stats
+CREATE TABLE IF NOT EXISTS game_data_filtered.tl_participant_comparison_features
 (
     matchid String,
     frame_timestamp UInt32,
-    participantid UInt8,
     teamid UInt8,
-
-    totalgold UInt16,
-    xp UInt16,
-    abilitypower Int16,
-    armor Int16,
-    armorpen Int16,
-    armorpenpercent Int16,
-    attackdamage Int16,
-    attackspeed Int16,
-    healthmax Int16,
-    magicpen Int16,
-    magicpenpercent Int16,
-    magicresist Int16,
-    movementspeed Int16,
-    currentgold Int32,
-    minionskilled UInt16,
-    jungleminionskilled UInt16,
-    magicdamagedonetochampions UInt32,
-    magicdamagetaken UInt32,
-    physicaldamagedonetochampions UInt32,
-    physicaldamagetaken UInt32,
-    totaldamagedonetochampions UInt32,
-    totaldamagetaken UInt32,
-    timeenemyspentcontrolled UInt32,
-
-    kills UInt8,
-    deaths UInt8,
-    assists UInt8,
-    champion_kill_bounty_gold UInt32,
-    shutdown_bounty_gold UInt32,
-    tower_takedowns UInt8,
-    inhibitor_takedowns UInt8,
-    building_kill_bounty_gold UInt32,
-    elite_monster_takedowns_dragon UInt8,
-    elite_monster_takedowns_rift_herald UInt8,
-    elite_monster_takedowns_horde UInt8,
-    elite_monster_takedowns_baron UInt8,
-    wards_killed UInt8,
-    wards_placed UInt8,
-    turret_plates_top UInt8,
-    turret_plates_mid UInt8,
-    turret_plates_bot UInt8,
-    legendary_item_delta Int16,
+    participantid UInt8,
 
     totalgold_team_ratio Float32,
     totalgold_role_diff Int64,
@@ -93,4 +50,4 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.tl_participant_per_minute_stats
     baron_deficit UInt8
 )
 ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, participantid);
+ORDER BY (matchid, frame_timestamp, teamid, participantid);

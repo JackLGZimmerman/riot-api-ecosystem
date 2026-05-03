@@ -63,19 +63,28 @@ class ParticipantStatsRow(MatchIdentityRow):
     abilityHaste: int
     abilityPower: int
     armor: int
+    armorPen: int
+    armorPenPercent: int
     attackDamage: int
     attackSpeed: int
+    bonusArmorPenPercent: int
+    bonusMagicPenPercent: int
     ccReduction: int
     cooldownReduction: int
     health: int
     healthMax: int
     healthRegen: int
+    lifesteal: int
+    magicPen: int
+    magicPenPercent: int
     magicResist: int
     movementSpeed: int
+    omnivamp: int
+    physicalVamp: int
     power: int
     powerMax: int
     powerRegen: int
-    payload: dict[str, int]
+    spellVamp: int
 
     currentGold: NonNegativeInt
 
@@ -113,25 +122,11 @@ class ParticipantStatsParser:
             )
 
             for pf in frame.participantFrames.root.values():
-                champion_stats = pf.championStats.model_dump()
-                payload = {
-                    "armorPen": champion_stats.pop("armorPen"),
-                    "armorPenPercent": champion_stats.pop("armorPenPercent"),
-                    "bonusArmorPenPercent": champion_stats.pop("bonusArmorPenPercent"),
-                    "bonusMagicPenPercent": champion_stats.pop("bonusMagicPenPercent"),
-                    "magicPen": champion_stats.pop("magicPen"),
-                    "magicPenPercent": champion_stats.pop("magicPenPercent"),
-                    "lifesteal": champion_stats.pop("lifesteal"),
-                    "omnivamp": champion_stats.pop("omnivamp"),
-                    "physicalVamp": champion_stats.pop("physicalVamp"),
-                    "spellVamp": champion_stats.pop("spellVamp"),
-                }
                 row_dict: dict[str, Any] = {
                     "matchId": matchId,
                     "frame_timestamp": frame_timestamp,
                     "participantId": pf.participantId,
-                    **champion_stats,
-                    "payload": payload,
+                    **pf.championStats.model_dump(),
                     "currentGold": pf.currentGold,
                     **pf.damageStats.model_dump(),
                     "goldPerSecond": pf.goldPerSecond,
@@ -776,6 +771,15 @@ class MatchDataTimelineParsingOrchestrator:
             and first_frame.get("participantFrames") is None
         )
 
+    @staticmethod
+    def _is_unsupported_game_mode(raw: dict[str, Any]) -> bool:
+        # Timeline payloads omit gameMode, so detect SWARM (and any other small-team
+        # PvE mode) by participant count: every supported standard/Arena mode has
+        # >=5 puuids in metadata.participants; SWARM is 1-4.
+        metadata = raw.get("metadata")
+        participants = metadata.get("participants") if isinstance(metadata, dict) else None
+        return isinstance(participants, list) and 0 < len(participants) < 5
+
     def run(self, raw: dict[str, Any]) -> TimelineTables:
         metadata_raw = raw.get("metadata", {})
         match_id = (
@@ -783,6 +787,38 @@ class MatchDataTimelineParsingOrchestrator:
             if isinstance(metadata_raw, dict)
             else "unknown"
         )
+
+        if self._is_unsupported_game_mode(raw):
+            logger.info(
+                "TimelineSkip match_id=%s reason=unsupported_game_mode (participant_count<5)",
+                match_id,
+            )
+            return TimelineTables(
+                participantStats=[],
+                buildingKill=[],
+                championKill=[],
+                championSpecialKill=[],
+                dragonSoulGiven=[],
+                eliteMonsterKill=[],
+                wardPlaced=[],
+                wardKill=[],
+                itemPurchased=[],
+                itemSold=[],
+                itemDestroyed=[],
+                itemUndo=[],
+                levelUp=[],
+                skillLevelUp=[],
+                pauseEnd=[],
+                gameEnd=[],
+                objectiveBountyPrestart=[],
+                objectiveBountyFinish=[],
+                featUpdate=[],
+                championTransform=[],
+                turretPlateDestroyed=[],
+                championKillVictimDamageDealt=[],
+                championKillVictimDamageReceived=[],
+            )
+
         drift_date = self._drift_date()
         timeline_drift(raw, match_id=match_id, drift_date=drift_date)
 
