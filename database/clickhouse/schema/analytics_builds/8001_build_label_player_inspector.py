@@ -25,7 +25,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 import os
 
-os.environ.setdefault("CLICKHOUSE_HOST", "localhost")
+
+def configure_local_clickhouse_host():
+    host = os.environ.get("CLICKHOUSE_HOST")
+    if host in (None, "", "clickhouse"):
+        os.environ["CLICKHOUSE_HOST"] = "localhost"
+
+
+configure_local_clickhouse_host()
 
 from database.clickhouse.client import get_client
 
@@ -43,17 +50,17 @@ SELECT
     ps.teamid,
     ps.championid,
     dictGet('game_data.championid_name_map_dict', 'name', toInt32(ps.championid)) AS champion_name,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item0)) AS item0,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item1)) AS item1,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item2)) AS item2,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item3)) AS item3,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item4)) AS item4,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item5)) AS item5,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item6)) AS item6,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item0)) AS item0,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item1)) AS item1,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item2)) AS item2,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item3)) AS item3,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item4)) AS item4,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item5)) AS item5,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item6)) AS item6,
     if(
         isNull(ps.rolebounditem),
         '',
-        dictGet('game_data.item_image_map_dict', 'image', toUInt32(assumeNotNull(ps.rolebounditem)))
+        dictGet('game_data.item_info_dict', 'image', toUInt32(assumeNotNull(ps.rolebounditem)))
     ) AS roleBoundItem,
     ps.kills,
     ps.deaths,

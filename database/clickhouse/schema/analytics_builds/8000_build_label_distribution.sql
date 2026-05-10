@@ -3,7 +3,7 @@
 -- build threshold (stage 3 of the filter pipeline).
 --
 -- Requires game_data_filtered.participant_item_value_totals to be populated
--- (See .../5133_participant_item_value_totals_build.sql).
+-- (See .../5132_participant_item_value_totals_build.sql).
 
 WITH ps AS (
     SELECT
@@ -48,7 +48,7 @@ GROUP BY
     ivt.championid,
     ivt.teamposition,
     ivt.highest_value_label
-HAVING instances > 40
+HAVING instances > 20
 ORDER BY
     avg_win_rate DESC,
     ivt.championid ASC,

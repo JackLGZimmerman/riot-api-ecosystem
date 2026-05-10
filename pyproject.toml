@@ -72,10 +72,21 @@ dependencies = [
     "websockets==15.0.1",
     "yarl==1.20.1",
     "zstandard==0.23.0",
+    "numpy>=2.0.0",
+    "torch==2.7.1",
+    "pyarrow>=17.0.0",
 ]
 
 [tool.pyright]
 reportMissingTypeStubs = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
 
 [dependency-groups]
 dev = [

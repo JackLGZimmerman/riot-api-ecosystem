@@ -1,85 +1,57 @@
-CREATE VIEW IF NOT EXISTS game_data_filtered.v_matchup_1v1_source AS
-WITH players AS (
-    SELECT
-        matchid,
-        teamid,
-        championid,
-        toString(teamposition) AS team_position,
-        toString(build) AS build,
-        win > 0 AS win,
-        map(
-            'kills', kills,
-            'deaths', deaths,
-            'assists', assists,
-            'goldearned', goldearned,
-            'totaldamagedealttochampions',
-            totaldamagedealttochampions,
-            'totaldamagetaken',
-            totaldamagetaken,
-            'totalminionskilled',
-            totalminionskilled,
-            'visionscore', visionscore,
-            'timeplayed', timeplayed
-            -- add further metrics here as needed
-        ) AS metrics,
-        map(
-            'win', win > 0,
-            'firstbloodkill', firstbloodkill > 0,
-            'firstbloodassist', firstbloodassist > 0,
-            'firsttowerkill', firsttowerkill > 0,
-            'firsttowerassist', firsttowerassist > 0,
-            'gameendedinsurrender', gameendedinsurrender > 0,
-            'gameendedinearlysurrender', gameendedinearlysurrender > 0
-        ) AS flags
-    FROM game_data_filtered.participant_stats
-),
+-- noqa: disable=AL09,LT02,LT05,RF02,ST09
+-- 1v1 (champion, teamposition, build) cross-team matchup win rates.
+-- Canonicalised so the smaller (championid, teamposition, build) tuple is on the left.
+-- left_win_rate + right_win_rate = 1.0.
+-- Built from ml_game_player_pivot so participant/item labels are joined and
+-- role-pivoted once for all matchup aggregate builders.
+-- Leakage-safe training prior: only train games contribute outcome counts.
+-- Validation/test rows should join against split = 'train'; train feature rows
+-- must subtract their current match contribution at feature-build time.
 
+TRUNCATE TABLE game_data_filtered.matchup_1v1;
+
+INSERT INTO game_data_filtered.matchup_1v1
+WITH
 cross_pairs AS (
     SELECT
-        l.matchid,
-        l.teamid AS left_teamid,
-        r.teamid AS right_teamid,
-        l.championid AS left_champion,
-        r.championid AS right_champion,
-        l.team_position AS left_team_position,
-        r.team_position AS right_team_position,
-        l.build AS left_build,
-        r.build AS right_build,
-        l.win AS left_win,
-        r.win AS right_win,
-        l.metrics AS left_metrics,
-        r.metrics AS right_metrics,
-        l.flags AS left_flags,
-        r.flags AS right_flags
-    FROM players AS l
-    INNER JOIN players AS r
-        ON
-            l.matchid = r.matchid
-            AND l.teamid != r.teamid
+        p.split AS split,
+        p.blue_players[bn.number + 1] AS bp,
+        p.red_players[rn.number + 1] AS rp,
+        p.blue_win AS blue_win
+    FROM game_data_filtered.ml_game_player_pivot AS p
+    CROSS JOIN numbers(5) AS bn
+    CROSS JOIN numbers(5) AS rn
+    WHERE p.split = 'train'
+),
+
+canonical AS (
+    SELECT
+        split,
+        bp <= rp AS blue_is_left,
+        if(blue_is_left, bp, rp) AS left_p,
+        if(blue_is_left, rp, bp) AS right_p,
+        if(blue_is_left, blue_win, toUInt8(1 - blue_win)) AS left_win,
+        if(blue_is_left, toUInt8(1 - blue_win), blue_win) AS right_win
+    FROM cross_pairs
 )
 
--- Canonicalise: left_champion <= right_champion
--- When swapped, all columns flip so "left" always means
--- the side with the lower champion id
 SELECT
-    matchid,
-    if(needs_swap, right_teamid, left_teamid) AS left_teamid,
-    if(needs_swap, left_teamid, right_teamid) AS right_teamid,
-    if(needs_swap, right_champion, left_champion) AS left_champion,
-    if(needs_swap, left_champion, right_champion) AS right_champion,
-    if(needs_swap, right_team_position, left_team_position) AS left_team_position,
-    if(needs_swap, left_team_position, right_team_position) AS right_team_position,
-    if(needs_swap, right_build, left_build) AS left_build,
-    if(needs_swap, left_build, right_build) AS right_build,
-    if(needs_swap, right_win, left_win) AS left_win,
-    if(needs_swap, left_win, right_win) AS right_win,
-    if(needs_swap, right_metrics, left_metrics) AS left_metrics,
-    if(needs_swap, left_metrics, right_metrics) AS right_metrics,
-    if(needs_swap, right_flags, left_flags) AS left_flags,
-    if(needs_swap, left_flags, right_flags) AS right_flags
-FROM (
-    SELECT
-        *,
-        right_champion < left_champion AS needs_swap
-    FROM cross_pairs
-);
+    split,
+    tupleElement(left_p, 1) AS left_championid,
+    dictGetOrDefault('game_data.championid_name_map_dict', 'name', toString(left_championid), '') AS left_championname,
+    tupleElement(left_p, 2) AS left_teamposition,
+    tupleElement(left_p, 3) AS left_build,
+    tupleElement(right_p, 1) AS right_championid,
+    dictGetOrDefault('game_data.championid_name_map_dict', 'name', toString(right_championid), '') AS right_championname,
+    tupleElement(right_p, 2) AS right_teamposition,
+    tupleElement(right_p, 3) AS right_build,
+    count() AS matchups,
+    sum(left_win) AS left_wins,
+    sum(right_win) AS right_wins,
+    toFloat32(left_wins / matchups) AS left_win_rate,
+    toFloat32(right_wins / matchups) AS right_win_rate
+FROM canonical
+GROUP BY
+    split,
+    left_championid, left_championname, left_teamposition, left_build,
+    right_championid, right_championname, right_teamposition, right_build;

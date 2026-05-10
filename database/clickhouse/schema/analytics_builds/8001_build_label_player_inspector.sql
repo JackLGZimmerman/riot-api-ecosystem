@@ -1,6 +1,6 @@
 -- Inspect individual players matching a specific (championid, teamposition,
 -- highest_value_label) combination.  Item slot values are replaced with their
--- Community Dragon image URLs (via game_data.item_image_map_dict), and
+-- Community Dragon image URLs (via game_data.item_info_dict), and
 -- championid is joined with game_data.championid_name_map_dict for a readable
 -- champion name.
 --
@@ -14,7 +14,7 @@
 --     < .../analytics_builds/8001_build_label_player_inspector.sql
 --
 -- Requires game_data_filtered.participant_item_value_totals to be populated
--- (see analytics_builds/5133_participant_item_value_totals_build.sql).
+-- (see analytics_builds/5132_participant_item_value_totals_build.sql).
 --
 -- The upstream totals are built against item_value_map_dict using the
 -- composite key (championid, teamposition, itemid): rows with a specific
@@ -37,13 +37,13 @@ SELECT
     ps.championid,
     dictGet('game_data.championid_name_map_dict', 'name', toInt32(ps.championid))
         AS champion_name,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item0)) AS item0,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item1)) AS item1,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item2)) AS item2,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item3)) AS item3,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item4)) AS item4,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item5)) AS item5,
-    dictGet('game_data.item_image_map_dict', 'image', toUInt32(ps.item6)) AS item6,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item0)) AS item0,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item1)) AS item1,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item2)) AS item2,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item3)) AS item3,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item4)) AS item4,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item5)) AS item5,
+    dictGet('game_data.item_info_dict', 'image', toUInt32(ps.item6)) AS item6,
     ps.kills,
     ps.assists,
     ps.deaths,

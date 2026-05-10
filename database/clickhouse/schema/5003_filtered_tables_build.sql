@@ -5,7 +5,7 @@
 -- Derived analytical tables (participant_item_value_totals, the per-minute
 -- tl_* aggregates) are NOT populated here -- see
 -- database/clickhouse/schema/analytics_builds/ for those builds.
--- Run after 5002_valid_game_ids_build.sql.
+-- Run after 5001_valid_game_ids_build.sql.
 --
 -- Runtime note: the clickhouse container is currently capped at 10 GiB and
 -- 2 CPUs. We pause background merges for the duration of the build, use

@@ -1,0 +1,186 @@
+# Filter & Filtered-DB Refresh Commands
+
+Refresh procedures for the filter pipeline and the downstream
+`game_data_filtered.*` copies. This file is operational only — for rule
+semantics, win-rate analysis, threshold history, and bitmask layout, see
+[`filter_evidence.md`](filter_evidence.md).
+
+## Pipeline at a glance
+
+```text
+game_data.participant_stats
+  │
+  ├─► 3139 — participant_stats_corrected          (remove end-of-game stat padding)
+  │
+  ├─► STAGE 1 — filter_stg_participant_flags         (cheap per-participant flags, 1 scan)
+  │     └─► filter_stg_stage1_valid_matchids
+  │
+  ├─► STAGE 2 — filter_stg_participant_labels        (build label + highest_value + low_build_value)
+  │
+  ├─► filter_stg_game_flags                          (rollup: stage1 + low_build_value)
+  ├─► filter_result                                  (bitmask, one row per participant)
+  │
+  └─► game_data_filtered.valid_game_ids
+        └─► game_data_filtered.*                     (SEMI JOIN copy of every game_data.* table)
+```
+
+## Files
+
+| File | Role |
+| --- | --- |
+| `3139_participant_stats_corrected_schema.sql` | DROP + CREATE for `game_data.participant_stats_corrected` |
+| `3139_participant_stats_corrected_build.sql` | Populate `participant_stats_corrected` (run before filter) |
+| `4000_filter_schema.sql` | DROP + CREATE for all `filter_stg_*` + `filter_result` tables |
+| `4000_filter_build.sql` | Populate all three stages, rollups, and `filter_result` |
+| `5000_create_filtered_db_schema.sql` | `game_data_filtered` database + DROP/CREATE for persistent copies |
+| `5001_valid_game_ids_schema.sql` | `game_data_filtered.valid_game_ids` (not dropped by 5000) |
+| `5001_valid_game_ids_build.sql` | Populate `valid_game_ids` from `filter_stg_game_flags` |
+| `5003_filtered_tables_build.sql` | Populate every `game_data_filtered.*` via `SEMI JOIN valid_game_ids` |
+| `5003_participant_stats_only_build.sql` | Fast iteration copy for only `game_data_filtered.participant_stats` |
+| `5130`, `5132`, `5134` | Derived analytical tables on top of `game_data_filtered.*` |
+| `5900_ml_game_split_schema.sql` | Persistent chronological train/validation/test label table |
+| `5900_ml_game_split_build.sql` | Populate the 80/10/10 split labels used by 6000+ aggregate builds |
+| `analytics_builds/8xxx_*.sql` | Human-facing inspection / reporting queries |
+
+## Standard rebuild
+
+After a fresh ingest, or after editing any rule in `4000_filter_build.sql`:
+
+```bash
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/3139_participant_stats_corrected_schema.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/3139_participant_stats_corrected_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/4000_filter_schema.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/4000_filter_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5001_valid_game_ids_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5003_filtered_tables_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5130_tl_participant_per_minute_stats_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5132_participant_item_value_totals_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5900_ml_game_split_schema.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5900_ml_game_split_build.sql
+```
+
+To rebuild from scratch (drops `game_data_filtered.*` first), run `5000`
+before the sequence above. Run `5001` only if `valid_game_ids` itself was
+dropped — `5000` deliberately does not touch it.
+
+Memory note: `5003` carries `max_threads=1, max_block_size=8192,
+max_insert_block_size=32768` and a 4-way hash split on
+`participant_challenges` to stay under the 4.5 GiB container cap.
+
+## Fast filter iteration (participant_stats only)
+
+Use when validating filter changes and checks only need `filter_stg_*`,
+`valid_game_ids`, and `game_data_filtered.participant_stats`. Skips the
+expensive `tl_*` copies and derived analytical rebuilds.
+
+```bash
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/3139_participant_stats_corrected_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/4000_filter_schema.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/4000_filter_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5001_valid_game_ids_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5003_participant_stats_only_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5132_participant_item_value_totals_build.sql
+```
+
+For stage survivor counts after this path:
+
+```bash
+docker exec -i clickhouse clickhouse-client \
+  < database/clickhouse/schema/analytics_builds/8003_filter_statistics.sql
+```
+
+Run the standard rebuild later when timeline tables or other derived
+artifacts need to reflect the new valid-game pool.
+
+## Rule-only re-measurement
+
+When iterating on a threshold and re-running win-rate queries from
+[`filter_evidence.md`](filter_evidence.md), stop after the filter stages:
+
+```bash
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/4000_filter_schema.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/4000_filter_build.sql
+```
+
+## Item-value dictionary refresh
+
+The item-value dictionary (`game_data.item_value_map_dict`, from
+`database/clickhouse/support/item_value_map.jsonl`) feeds stage 2 (`4000`)
+and the downstream label totals (`5132`). The file is bind-mounted at
+`/var/lib/clickhouse/user_files/clickhouse_support/item_value_map.jsonl`, so
+host edits are immediately visible.
+
+**Value-only edits** (numeric weights changed, keys unchanged):
+
+```bash
+docker exec clickhouse clickhouse-client \
+  -q "SYSTEM RELOAD DICTIONARY 'game_data.item_value_map_dict'"
+# then re-run the standard rebuild from 4000.
+```
+
+**Reload both item dictionaries** — after editing support JSONL files directly:
+
+```bash
+docker exec clickhouse clickhouse-client --multiquery \
+  -q "SYSTEM RELOAD DICTIONARY 'game_data.item_info_dict';
+      SYSTEM RELOAD DICTIONARY 'game_data.item_value_map_dict';"
+```
+
+**Structural edits** (keys added / removed / renamed) — every dictionary
+consumer must be updated to match the new key set:
+
+- `7000_item_value_map_dictionary_schema.sql` — dictionary column list.
+- `5000_create_filtered_db_schema.sql` + `5132_participant_item_value_totals_schema.sql` — totals column list.
+- `4000_filter_build.sql` — `dictGet` tuples, `greatest(...)`, `multiIf(...)`.
+- `5132_participant_item_value_totals_build.sql` — column list, `dictGet` tuples, `greatest(...)`, `multiIf(...)`.
+
+The `multiIf` tie-break order in `4000` and `5132` must match exactly so
+the same participant receives the same label in both tables.
+
+After code changes, recreate the dictionary and totals schema, then run
+the standard rebuild:
+
+```bash
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/7000_item_value_map_dictionary_schema.sql
+
+docker exec clickhouse clickhouse-client \
+  -q "SYSTEM RELOAD DICTIONARY 'game_data.item_value_map_dict'"
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5132_participant_item_value_totals_schema.sql
+# then the standard rebuild sequence.
+```
