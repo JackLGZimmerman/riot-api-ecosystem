@@ -30,6 +30,7 @@ game_data.participant_stats
 | --- | --- |
 | `3139_participant_stats_corrected_schema.sql` | DROP + CREATE for `game_data.participant_stats_corrected` |
 | `3139_participant_stats_corrected_build.sql` | Populate `participant_stats_corrected` (run before filter) |
+| `3140_migrate_raw_tables_to_replacing_merge_tree.sql` | One-shot migration for existing raw `3xxx` tables to `ReplacingMergeTree` natural keys |
 | `4000_filter_schema.sql` | DROP + CREATE for all `filter_stg_*` + `filter_result` tables |
 | `4000_filter_build.sql` | Populate all three stages, rollups, and `filter_result` |
 | `5000_create_filtered_db_schema.sql` | `game_data_filtered` database + DROP/CREATE for persistent copies |
@@ -41,6 +42,28 @@ game_data.participant_stats
 | `5900_ml_game_split_schema.sql` | Persistent chronological train/validation/test label table |
 | `5900_ml_game_split_build.sql` | Populate the 80/10/10 split labels used by 6000+ aggregate builds |
 | `analytics_builds/8xxx_*.sql` | Human-facing inspection / reporting queries |
+
+## Raw table dedupe migration
+
+Raw `game_data` matchdata tables use `ReplacingMergeTree` with
+`ORDER BY` set to the row's natural identity. `run_id` stays as a normal
+column for rollback/delete operations, but it is no longer part of the
+dedupe key. Consumers that materialize clean snapshots from raw tables should
+read them with `FINAL`; the `3139` and `5003` builds do this explicitly.
+
+For an existing database created with the old `MergeTree`/`run_id` sort keys,
+stop the matchdata pipeline first, then run:
+
+```bash
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/3140_migrate_raw_tables_to_replacing_merge_tree.sql
+```
+
+The migration creates `__rmt_new` tables, copies the old data, runs
+`OPTIMIZE ... FINAL`, atomically exchanges the rebuilt tables into place, and
+keeps the previous physical tables as `__pre_rmt` backups. Drop the
+`__pre_rmt` tables only after validating counts and rebuilding downstream
+filtered/analytics tables.
 
 ## Standard rebuild
 

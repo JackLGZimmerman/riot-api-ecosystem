@@ -26,6 +26,8 @@ logs/
 
 output.json
 
+app/ml/data/
+
 tmp/
 temp/
 docker-data/

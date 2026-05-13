@@ -8,5 +8,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_skill_level_up
     skillslot UInt8,
     leveluptype LowCardinality (String)
 )
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, participantid, skillslot, leveluptype);

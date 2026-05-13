@@ -6,5 +6,5 @@ CREATE TABLE IF NOT EXISTS game_data.feats
     feattype ENUM8 ('EPIC_MONSTER_KILL' = 1, 'FIRST_BLOOD' = 2, 'FIRST_TURRET' = 3),
     featstate UInt16
 )
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, feattype, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, teamid, feattype);

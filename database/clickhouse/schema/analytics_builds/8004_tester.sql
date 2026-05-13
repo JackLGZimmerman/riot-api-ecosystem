@@ -1,1 +1,2 @@
-SELECT * FROM game_data_filtered.matchup_2v1 WHERE matchups > 100 ORDER BY pair_win_rate DESC
+SELECT * FROM game_data_filtered.matchup_1v1 WHERE matchups > 500 ORDER BY left_win_rate DESC
+-- select count() from game_data.info

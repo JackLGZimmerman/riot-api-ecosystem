@@ -56,5 +56,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_participant_stats
     totalgold UInt16,
     xp UInt16
 )
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, participantid, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, frame_timestamp, participantid);

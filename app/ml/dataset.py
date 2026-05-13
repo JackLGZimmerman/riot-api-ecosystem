@@ -1,32 +1,63 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
 
-from app.ml.build_dataset import (
+from app.ml.cache_layout import (
+    CACHE_FORMAT,
     CACHE_META_FILE,
-    NORM_FILE,
+    LEGACY_ARRAY_FILES,
+    LOAD_ARRAY_DTYPES,
     VOCAB_FILE,
-    _array_paths,
+    array_paths,
 )
 from app.ml.config import (
     INTERACTION_ROLES,
     INTERACTION_SIDES,
     INTERACTION_TYPES,
     N_INTERACTION_TOKENS,
+    POSITIONS,
     DatasetConfig,
 )
+
+_COMPATIBLE_CACHE_FORMATS = {CACHE_FORMAT, "npy-memmap-v4", "npy-memmap-v3"}
+_PLAYER_ROLE_IDX = np.array(
+    [i + 1 for i in range(len(POSITIONS))] * 2,
+    dtype=LOAD_ARRAY_DTYPES["role_idx"],
+)
+
+
+def _in_memory_tensor(name: str, array: np.ndarray) -> torch.Tensor:
+    dtype = LOAD_ARRAY_DTYPES[name]
+    return torch.from_numpy(np.array(array, dtype=dtype, copy=True))
+
+
+def _decode_player_champion_build(
+    packed: np.ndarray,
+    n_builds: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    encoded = np.asarray(packed, dtype=np.uint32)
+    champion_idx = encoded // np.uint32(n_builds)
+    build_idx = encoded % np.uint32(n_builds)
+    return (
+        champion_idx.astype(LOAD_ARRAY_DTYPES["champion_idx"], copy=False),
+        build_idx.astype(LOAD_ARRAY_DTYPES["build_idx"], copy=False),
+    )
+
+
+def _implied_role_idx(n_games: int) -> np.ndarray:
+    roles = np.broadcast_to(_PLAYER_ROLE_IDX, (n_games, _PLAYER_ROLE_IDX.shape[0]))
+    return np.array(roles, dtype=LOAD_ARRAY_DTYPES["role_idx"], copy=True)
 
 
 @dataclass
 class CachedTensors:
     interaction_score: torch.Tensor
-    interaction_reliability: torch.Tensor
     champion_idx: torch.Tensor
     role_idx: torch.Tensor
     build_idx: torch.Tensor
@@ -64,8 +95,6 @@ def _cached_split(
     n_train = int(split_meta.get("train", 0))
     n_val = int(split_meta.get("val", 0))
     n_test = int(split_meta.get("test", 0))
-    if n_train <= 0:
-        raise ValueError("Training split is empty; increase the dataset size.")
     if n_train + n_val + n_test != n:
         raise ValueError(
             "Dataset cache split counts do not match n_games. "
@@ -79,9 +108,22 @@ def _cached_split(
 
 
 def _validate_cache(
+    cfg: DatasetConfig,
+    meta: dict[str, object],
     vocab_meta: dict[str, object],
     interaction_score: np.ndarray,
 ) -> None:
+    if meta.get("format") not in _COMPATIBLE_CACHE_FORMATS:
+        raise ValueError(
+            "Dataset cache format is stale. "
+            "Run `python -m app.ml.build_dataset` to rebuild it."
+        )
+    cached_smoothing = bool(meta.get("smooth_interaction_scores", True))
+    if cached_smoothing != cfg.smooth_interaction_scores:
+        raise ValueError(
+            "Dataset cache smoothing setting does not match DatasetConfig. "
+            "Run `python -m app.ml.build_dataset` to rebuild it."
+        )
     cached_n = int(vocab_meta.get("n_interaction_tokens", 0))
     if cached_n and cached_n != N_INTERACTION_TOKENS:
         raise ValueError(
@@ -101,26 +143,73 @@ def _validate_cache(
         )
 
 
-class GameDataset(Dataset):
-    """One game per index. Tensors stay shared across __getitem__ calls."""
+class _SplitView:
+    """Minimal proxy exposing split size for `len(loader.dataset)`."""
 
-    def __init__(self, tensors: CachedTensors, indices: np.ndarray):
-        self.tensors = tensors
-        self.indices = torch.from_numpy(indices.astype(np.int64))
+    def __init__(self, n: int):
+        self._n = int(n)
 
     def __len__(self) -> int:
-        return self.indices.shape[0]
+        return self._n
 
-    def __getitem__(self, i: int) -> dict[str, torch.Tensor]:
-        idx = self.indices[i]
-        return {
-            "interaction_score": self.tensors.interaction_score[idx],
-            "interaction_reliability": self.tensors.interaction_reliability[idx],
-            "champion_idx": self.tensors.champion_idx[idx],
-            "role_idx": self.tensors.role_idx[idx],
-            "build_idx": self.tensors.build_idx[idx],
-            "blue_win": self.tensors.blue_win[idx],
+
+class InMemoryBatchLoader:
+    """Vectorised batch loader for cached tensor datasets.
+
+    Reads from tensors that already live on the training device, so each batch
+    is a single `index_select`. Eliminates DataLoader IPC, pickling, and per-item
+    collation — the previous bottleneck once GPU warmup completed.
+    """
+
+    def __init__(
+        self,
+        tensors: CachedTensors,
+        indices: torch.Tensor,
+        batch_size: int,
+        *,
+        shuffle: bool,
+        drop_last: bool,
+    ):
+        self._tensors: dict[str, torch.Tensor] = {
+            "interaction_score": tensors.interaction_score,
+            "champion_idx": tensors.champion_idx,
+            "role_idx": tensors.role_idx,
+            "build_idx": tensors.build_idx,
+            "blue_win": tensors.blue_win,
         }
+        self._indices = indices
+        self._batch_size = int(batch_size)
+        self._shuffle = bool(shuffle)
+        self._drop_last = bool(drop_last)
+        self._device = indices.device
+        self.dataset = _SplitView(int(indices.shape[0]))
+
+    def __len__(self) -> int:
+        n = int(self._indices.shape[0])
+        if self._drop_last and n >= self._batch_size:
+            return n // self._batch_size
+        return (n + self._batch_size - 1) // self._batch_size
+
+    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
+        n = int(self._indices.shape[0])
+        if self._shuffle:
+            order = self._indices.index_select(
+                0, torch.randperm(n, device=self._device)
+            )
+        else:
+            order = self._indices
+
+        for start in range(0, n, self._batch_size):
+            end = start + self._batch_size
+            if end > n:
+                if self._drop_last and n >= self._batch_size:
+                    break
+                end = n
+            batch_idx = order[start:end]
+            yield {
+                name: tensor.index_select(0, batch_idx)
+                for name, tensor in self._tensors.items()
+            }
 
 
 def interaction_layout() -> InteractionLayout:
@@ -133,34 +222,45 @@ def interaction_layout() -> InteractionLayout:
 
 def load_cache(cfg: DatasetConfig) -> tuple[CachedTensors, Vocab, dict[str, object]]:
     meta_path: Path = cfg.cache_dir / CACHE_META_FILE
-    norm_path: Path = cfg.cache_dir / NORM_FILE
     vocab_path: Path = cfg.cache_dir / VOCAB_FILE
-    paths = _array_paths(cfg.cache_dir)
-    missing_paths = [
-        p for p in (meta_path, norm_path, vocab_path, *paths.values()) if not p.exists()
-    ]
-    if missing_paths:
-        raise FileNotFoundError(
-            "Dataset cache is incomplete: "
-            f"{', '.join(str(p) for p in missing_paths)}. "
-            "Run `python -m app.ml.build_dataset` first."
-        )
 
     meta = json.loads(meta_path.read_text())
     n_games = int(meta["n_games"])
-    arrays = {
-        name: np.load(path, mmap_mode="r+")[:n_games] for name, path in paths.items()
-    }
     vocab_meta = json.loads(vocab_path.read_text())
-    _validate_cache(vocab_meta, arrays["interaction_score"])
+    cache_format = str(meta.get("format"))
+    paths = (
+        array_paths(cfg.cache_dir)
+        if cache_format == CACHE_FORMAT
+        else {
+            name: cfg.cache_dir / filename
+            for name, filename in LEGACY_ARRAY_FILES.items()
+        }
+    )
+    arrays = {
+        name: np.load(path, mmap_mode="r")[:n_games] for name, path in paths.items()
+    }
+    _validate_cache(cfg, meta, vocab_meta, arrays["interaction_score"])
+
+    if "player_champion_build_idx" in arrays:
+        n_builds = int(vocab_meta["n_builds"])
+        champion_idx, build_idx = _decode_player_champion_build(
+            arrays["player_champion_build_idx"],
+            n_builds,
+        )
+        role_idx = _implied_role_idx(n_games)
+        interaction_score = arrays["interaction_score"]
+    else:
+        champion_idx = arrays["champion_idx"]
+        role_idx = arrays["role_idx"]
+        build_idx = arrays["build_idx"]
+        interaction_score = arrays["interaction_score"]
 
     tensors = CachedTensors(
-        interaction_score=torch.from_numpy(arrays["interaction_score"]),
-        interaction_reliability=torch.from_numpy(arrays["interaction_reliability"]),
-        champion_idx=torch.from_numpy(arrays["champion_idx"]),
-        role_idx=torch.from_numpy(arrays["role_idx"]),
-        build_idx=torch.from_numpy(arrays["build_idx"]),
-        blue_win=torch.from_numpy(arrays["blue_win"]),
+        interaction_score=_in_memory_tensor("interaction_score", interaction_score),
+        champion_idx=_in_memory_tensor("champion_idx", champion_idx),
+        role_idx=_in_memory_tensor("role_idx", role_idx),
+        build_idx=_in_memory_tensor("build_idx", build_idx),
+        blue_win=_in_memory_tensor("blue_win", arrays["blue_win"]),
     )
     vocab = Vocab(
         n_champions=int(vocab_meta["n_champions"]),
@@ -171,34 +271,50 @@ def load_cache(cfg: DatasetConfig) -> tuple[CachedTensors, Vocab, dict[str, obje
     return tensors, vocab, meta
 
 
+def _to_device(tensors: CachedTensors, device: torch.device) -> CachedTensors:
+    return CachedTensors(
+        interaction_score=tensors.interaction_score.to(device, non_blocking=True),
+        champion_idx=tensors.champion_idx.to(device, non_blocking=True),
+        role_idx=tensors.role_idx.to(device, non_blocking=True),
+        build_idx=tensors.build_idx.to(device, non_blocking=True),
+        blue_win=tensors.blue_win.to(device, non_blocking=True),
+    )
+
+
 def build_loaders(
     cfg: DatasetConfig,
     batch_size: int,
-    num_workers: int,
-    pin_memory: bool = True,
-) -> tuple[DataLoader, DataLoader, DataLoader, Vocab, InteractionLayout]:
+    device: torch.device,
+) -> tuple[
+    InMemoryBatchLoader,
+    InMemoryBatchLoader,
+    InMemoryBatchLoader,
+    Vocab,
+    InteractionLayout,
+]:
     tensors, vocab, meta = load_cache(cfg)
     n_games = tensors.blue_win.shape[0]
-    train_idx, val_idx, test_idx = _cached_split(n_games, meta)
+    train_idx_np, val_idx_np, test_idx_np = _cached_split(n_games, meta)
 
-    train_ds = GameDataset(tensors, train_idx)
-    val_ds = GameDataset(tensors, val_idx)
-    test_ds = GameDataset(tensors, test_idx)
-    if len(train_ds) == 0:
-        raise ValueError("Training split is empty; increase the dataset size.")
+    # Hosting the full dataset on the training device removes per-batch H2D
+    # transfer and pinning entirely. Compact disk dtypes are promoted before
+    # tensors move to the device.
+    tensors = _to_device(tensors, device)
+    train_idx = torch.from_numpy(train_idx_np).to(device)
+    val_idx = torch.from_numpy(val_idx_np).to(device)
+    test_idx = torch.from_numpy(test_idx_np).to(device)
 
-    common = {
-        "num_workers": num_workers,
-        "pin_memory": pin_memory,
-        "persistent_workers": num_workers > 0,
-    }
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
+    train_loader = InMemoryBatchLoader(
+        tensors,
+        train_idx,
+        batch_size,
         shuffle=True,
-        drop_last=len(train_ds) >= batch_size,
-        **common,
+        drop_last=train_idx.shape[0] >= batch_size,
     )
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, **common)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, **common)
+    val_loader = InMemoryBatchLoader(
+        tensors, val_idx, batch_size, shuffle=False, drop_last=False,
+    )
+    test_loader = InMemoryBatchLoader(
+        tensors, test_idx, batch_size, shuffle=False, drop_last=False,
+    )
     return train_loader, val_loader, test_loader, vocab, interaction_layout()

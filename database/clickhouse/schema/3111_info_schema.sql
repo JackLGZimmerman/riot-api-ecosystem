@@ -17,5 +17,5 @@ CREATE TABLE IF NOT EXISTS game_data.info
     platformid LowCardinality (String),
     queueid Int16
 )
-ENGINE = MergeTree
-ORDER BY (matchid, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid);

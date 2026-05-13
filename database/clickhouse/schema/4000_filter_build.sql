@@ -17,15 +17,16 @@
 --   3.  filter_result          (bitmask)
 --
 -- Stage 1 filters enabled:
---   f01 player_low_kda          KDA < 0.30  ((k+a)*10 < d*3)
---   f02 player_gold_spent       spent < 50% earned
---   f03 kill_participation_low  non-UTILITY (k+a) / team_kills < 0.10  ((k+a)*10 < team_kills)
---   f04 player_high_winrate     games > 40 AND WR > 70%
+--   f01 player_low_kda          KDA < 0.20  ((k+a)*10 < d*2)
+--   f02 player_gold_spent       spent < 50% earned AND win = 0 (losses only)
+--   f04 player_high_winrate     suspect (>40 games, lifetime WR > 70%) AND
+--                               suffix WR of collected games (current onwards,
+--                               ordered by gamecreation) >= 85%
 --   f05 team_kills_to_deaths    team K/D < 0.50  (kills*2 < deaths)
 --   f06 solo_carried            win=1 AND kills > 75% of team kills
 --   f07 too_little_damage       non-UTILITY dmg share < 2%  (dmg*50 < team_dmg)
---   f08 low_minions_killed      non-UTILITY CS/min < 4.0  ((cs+ncs)*60 < time*4)
---   f09 team_non_utility_avg_cs_per_min gap > 1.0 below enemy
+--   f08 low_minions_killed      non-UTILITY CS/min < 3.0  ((cs+ncs)*60 < time*3)
+--   f09 team_non_utility_avg_cs_per_min gap > 2.0 below enemy
 --   f10 team_non_utility_damage_to_champs ratio < 0.50  (team*2 < enemy)
 --   f11 low_build_value         highest_value < 1.0 (stage-1-clean pool)
 --
@@ -40,7 +41,7 @@ TRUNCATE TABLE game_data.filter_stg_f14_long_games;
 
 INSERT INTO game_data.filter_stg_f14_long_games (matchid)
 SELECT matchid
-FROM game_data.info
+FROM game_data.info FINAL
 WHERE gameduration > 1080;
 
 -- =============================================================================
@@ -116,8 +117,8 @@ SELECT
     tb.team_damage_to_champions,
     -- Team K/D < 0.50: kills * 2 < deaths
     tb.team_kills * 2 < tb.team_deaths AS team_kills_to_deaths,
-    -- CS/min gap > 1.0 below enemy
-    enemy.team_non_utility_avg_cs_per_min - tb.team_non_utility_avg_cs_per_min > 1.0
+    -- CS/min gap > 2.0 below enemy
+    enemy.team_non_utility_avg_cs_per_min - tb.team_non_utility_avg_cs_per_min > 2.0
         AS team_non_utility_avg_cs_per_min_gt_1_0_below_enemy,
     -- Team dmg ratio < 0.50 (1/2): team < 0.50 * enemy -> team * 2 < enemy
     enemy.team_non_utility_damage_to_champions > 0
@@ -127,6 +128,53 @@ SELECT
 FROM team_base AS tb
 LEFT JOIN team_base AS enemy
     ON tb.matchid = enemy.matchid AND tb.teamid != enemy.teamid;
+
+-- =============================================================================
+-- Stage 1c2: f04 player_high_winrate flags (long games only).
+-- Identify suspect players (lifetime > 40 games AND WR > 70%), then within
+-- each suspect player's collected long-games sorted by gamecreation ASC,
+-- flag games from the earliest while the suffix WR (games from current row
+-- onwards) is >= 85%. Equivalent to: trim earliest games one at a time
+-- until the remaining-window WR drops below 85%.
+-- =============================================================================
+
+TRUNCATE TABLE game_data.filter_stg_player_high_winrate_flags;
+
+INSERT INTO game_data.filter_stg_player_high_winrate_flags
+(
+    matchid, teamid, participantid, player_high_winrate
+)
+WITH suspect_games AS (
+    SELECT
+        ps.matchid AS matchid,
+        ps.teamid AS teamid,
+        ps.participantid AS participantid,
+        ps.puuid AS puuid,
+        ps.win AS win,
+        i.gamecreation AS gamecreation
+    FROM game_data.participant_stats_corrected AS ps
+    SEMI JOIN game_data.filter_stg_f14_long_games AS f14 ON ps.matchid = f14.matchid
+    SEMI JOIN (
+        SELECT puuid
+        FROM game_data.filter_stg_player_winrates
+        WHERE wins + losses > 40 AND wins * 100 > (wins + losses) * 70
+    ) AS sp ON ps.puuid = sp.puuid
+    ANY INNER JOIN game_data.info AS i FINAL ON ps.matchid = i.matchid
+)
+SELECT
+    matchid,
+    teamid,
+    participantid,
+    toUInt8(
+        sum(win) OVER (
+            PARTITION BY puuid ORDER BY gamecreation DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) * 100
+        >= row_number() OVER (
+            PARTITION BY puuid ORDER BY gamecreation DESC
+        ) * 85
+    ) AS player_high_winrate
+FROM suspect_games;
 
 -- =============================================================================
 -- Stage 1: per-participant flags for all active filters (long games only).
@@ -143,7 +191,6 @@ INSERT INTO game_data.filter_stg_participant_flags
     participantid,
     player_low_kda,
     player_gold_spent,
-    kill_participation_low,
     player_high_winrate,
     team_kills_to_deaths,
     solo_carried,
@@ -156,16 +203,14 @@ SELECT
     ps.matchid,
     ps.teamid,
     ps.participantid,
-    -- KDA < 0.30: (k + a) * 10 < d * 3
-    (ps.kills + ps.assists) * 10 < ps.deaths * 3 AS player_low_kda,
-    ps.goldearned > 0 AND ps.goldspent * 100 < ps.goldearned * 50
+    -- KDA < 0.20: (k + a) * 10 < d * 2
+    (ps.kills + ps.assists) * 10 < ps.deaths * 2 AS player_low_kda,
+    -- Gold spent < 50% earned, losses only
+    ps.win = 0
+    AND ps.goldearned > 0
+    AND ps.goldspent * 100 < ps.goldearned * 50
         AS player_gold_spent,
-    -- Kill participation < 10% (non-UTILITY only): (k + a) * 10 < team_kills
-    ps.teamposition != 'UTILITY'
-    AND tf.team_kills > 0
-    AND (ps.kills + ps.assists) * 10 < tf.team_kills AS kill_participation_low,
-    pl.wins + pl.losses > 40
-    AND pl.wins * 100 > (pl.wins + pl.losses) * 70 AS player_high_winrate,
+    COALESCE(hw.player_high_winrate, toUInt8(0)) AS player_high_winrate,
     tf.team_kills_to_deaths,
     ps.win = 1 AND tf.team_kills > 0 AND ps.kills * 100 > tf.team_kills * 75
         AS solo_carried,
@@ -174,18 +219,22 @@ SELECT
     AND tf.team_damage_to_champions > 0
     AND ps.totaldamagedealttochampions * 50 < tf.team_damage_to_champions
         AS too_little_damage,
-    -- Non-UTILITY CS/min < 4.0: (cs + ncs) * 60 < timeplayed * 4
+    -- Non-UTILITY CS/min < 3.0: (cs + ncs) * 60 < timeplayed * 3
     ps.teamposition != 'UTILITY'
     AND ps.timeplayed > 0
-    AND (ps.totalminionskilled + ps.neutralminionskilled) * 60 < ps.timeplayed * 4
+    AND (ps.totalminionskilled + ps.neutralminionskilled) * 60 < ps.timeplayed * 3
         AS low_minions_killed,
     tf.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy,
     tf.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy
 FROM game_data.participant_stats_corrected AS ps
 SEMI JOIN game_data.filter_stg_f14_long_games AS f14 ON ps.matchid = f14.matchid
-ANY LEFT JOIN game_data.filter_stg_player_winrates AS pl ON ps.puuid = pl.puuid
 ANY LEFT JOIN game_data.filter_stg_team_flags AS tf
-    ON ps.matchid = tf.matchid AND ps.teamid = tf.teamid;
+    ON ps.matchid = tf.matchid AND ps.teamid = tf.teamid
+ANY LEFT JOIN game_data.filter_stg_player_high_winrate_flags AS hw
+    ON
+        ps.matchid = hw.matchid
+        AND ps.teamid = hw.teamid
+        AND ps.participantid = hw.participantid;
 
 -- =============================================================================
 -- Stage 1 rollup: matchids that pass every stage-1 filter.
@@ -200,7 +249,6 @@ GROUP BY matchid
 HAVING
     max(player_low_kda) = 0
     AND max(player_gold_spent) = 0
-    AND max(kill_participation_low) = 0
     AND max(player_high_winrate) = 0
     AND max(team_kills_to_deaths) = 0
     AND max(solo_carried) = 0
@@ -344,7 +392,6 @@ INSERT INTO game_data.filter_stg_game_flags
     matchid,
     player_low_kda,
     player_gold_spent,
-    kill_participation_low,
     player_high_winrate,
     team_kills_to_deaths,
     solo_carried,
@@ -361,7 +408,6 @@ stage1_rollup AS (
         matchid,
         max(player_low_kda) AS player_low_kda,
         max(player_gold_spent) AS player_gold_spent,
-        max(kill_participation_low) AS kill_participation_low,
         max(player_high_winrate) AS player_high_winrate,
         max(team_kills_to_deaths) AS team_kills_to_deaths,
         max(solo_carried) AS solo_carried,
@@ -387,7 +433,6 @@ SELECT
     s.matchid,
     s.player_low_kda,
     s.player_gold_spent,
-    s.kill_participation_low,
     s.player_high_winrate,
     s.team_kills_to_deaths,
     s.solo_carried,
@@ -399,7 +444,6 @@ SELECT
     (
         s.player_low_kda
         OR s.player_gold_spent
-        OR s.kill_participation_low
         OR s.player_high_winrate
         OR s.team_kills_to_deaths
         OR s.solo_carried
@@ -414,14 +458,15 @@ LEFT JOIN low_build_value_rollup AS lbv ON s.matchid = lbv.matchid;
 
 -- =============================================================================
 -- Stage 3: bitmask result (one row per matchid+teamid+participantid).
--- Bit assignments (game_time_lte_18_0 applied as base pre-filter):
---   Player:  0=player_low_kda       1=player_gold_spent
---            2=kill_participation_low
---            4=player_high_winrate   6=solo_carried
---            7=too_little_damage     8=low_minions_killed
---            11=low_build_value
---   Team:    5=team_kills_to_deaths  9=team_non_utility_avg_cs_per_min_gt_1_0
---            10=team_non_utility_damage_to_champions_ratio_lt_1_2
+-- Bit assignments (sequential, matching the f01..f10 numbering used in
+-- filter_evidence.md):
+--   Player:  0=f01 player_low_kda            1=f02 player_gold_spent
+--            2=f03 player_high_winrate       4=f05 solo_carried
+--            5=f06 too_little_damage         6=f07 low_minions_killed
+--            9=f10 low_build_value
+--   Team:    3=f04 team_kills_to_deaths
+--            7=f08 team_non_utility_avg_cs_per_min_gt_2_0_below_enemy
+--            8=f09 team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy
 -- =============================================================================
 
 TRUNCATE TABLE game_data.filter_result;
@@ -443,28 +488,26 @@ SELECT
     pf.participantid,
     pf.player_low_kda * 1
     + pf.player_gold_spent * 2
-    + pf.kill_participation_low * 4
-    + pf.player_high_winrate * 16
-    + pf.solo_carried * 64
-    + pf.too_little_damage * 128
-    + pf.low_minions_killed * 256
-    + COALESCE(pl.low_build_value, toUInt8(0)) * 2048 AS player_rule_mask,
-    pf.team_kills_to_deaths * 32
-    + pf.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy * 512
-    + pf.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy * 1024
+    + pf.player_high_winrate * 4
+    + pf.solo_carried * 16
+    + pf.too_little_damage * 32
+    + pf.low_minions_killed * 64
+    + COALESCE(pl.low_build_value, toUInt8(0)) * 512 AS player_rule_mask,
+    pf.team_kills_to_deaths * 8
+    + pf.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy * 128
+    + pf.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy * 256
         AS team_rule_mask,
     toUInt32(0) AS game_rule_mask,
     gf.player_low_kda * 1
     + gf.player_gold_spent * 2
-    + gf.kill_participation_low * 4
-    + gf.player_high_winrate * 16
-    + gf.team_kills_to_deaths * 32
-    + gf.solo_carried * 64
-    + gf.too_little_damage * 128
-    + gf.low_minions_killed * 256
-    + gf.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy * 512
-    + gf.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy * 1024
-    + gf.low_build_value * 2048 AS rule_mask,
+    + gf.player_high_winrate * 4
+    + gf.team_kills_to_deaths * 8
+    + gf.solo_carried * 16
+    + gf.too_little_damage * 32
+    + gf.low_minions_killed * 64
+    + gf.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy * 128
+    + gf.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy * 256
+    + gf.low_build_value * 512 AS rule_mask,
     gf.any_filter_triggered = 0 AS is_valid
 FROM game_data.filter_stg_participant_flags AS pf
 INNER JOIN game_data.filter_stg_game_flags AS gf ON pf.matchid = gf.matchid

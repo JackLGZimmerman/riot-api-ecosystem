@@ -7,5 +7,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_item_purchased
     participantid UInt8,
     itemid UInt32
 )
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, participantid, itemid);

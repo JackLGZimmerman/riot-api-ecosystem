@@ -6,5 +6,5 @@ CREATE TABLE IF NOT EXISTS game_data.bans
     pickturn UInt8,
     championid Nullable (Int32)
 )
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, pickturn, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, teamid, pickturn);

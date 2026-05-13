@@ -42,6 +42,21 @@ CREATE TABLE game_data.filter_stg_player_role_rates
 ENGINE = MergeTree
 ORDER BY (puuid, teamposition);
 
+-- Per-game player_high_winrate flag: precomputed via suffix-WR trim
+-- over the games of suspect players (lifetime > 40 games AND WR > 70%).
+-- See 4000_filter_build.sql for the trim logic.
+DROP TABLE IF EXISTS game_data.filter_stg_player_high_winrate_flags;
+
+CREATE TABLE game_data.filter_stg_player_high_winrate_flags
+(
+    matchid String,
+    teamid UInt8,
+    participantid UInt8,
+    player_high_winrate UInt8
+)
+ENGINE = MergeTree
+ORDER BY (matchid, teamid, participantid);
+
 DROP TABLE IF EXISTS game_data.filter_stg_team_flags;
 
 CREATE TABLE game_data.filter_stg_team_flags
@@ -69,7 +84,6 @@ CREATE TABLE game_data.filter_stg_participant_flags
     participantid UInt8,
     player_low_kda UInt8,
     player_gold_spent UInt8,
-    kill_participation_low UInt8,
     player_high_winrate UInt8,
     team_kills_to_deaths UInt8,
     solo_carried UInt8,
@@ -117,7 +131,6 @@ CREATE TABLE game_data.filter_stg_game_flags
     matchid String,
     player_low_kda UInt8,
     player_gold_spent UInt8,
-    kill_participation_low UInt8,
     player_high_winrate UInt8,
     team_kills_to_deaths UInt8,
     solo_carried UInt8,

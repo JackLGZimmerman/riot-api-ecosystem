@@ -21,5 +21,5 @@ CREATE TABLE IF NOT EXISTS game_data.participant_perk_ids
     sub_perk_2 UInt16,
     perk_combo_key UInt128
 )
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, puuid, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, teamid, puuid);

@@ -68,6 +68,11 @@ INNER JOIN (
         AND s.teamposition = tupleElement(e.player, 2)
         AND s.build = tupleElement(e.player, 3);
 
+/*
+Temporarily disabled for the current 1vX-only training session. Keep the
+token layout in app/ml/config.py intact, but skip populating the heavier
+interaction-count blocks so their cache slots remain present and zero-filled.
+
 -- ----------------------------------------------------------------------------
 -- Block 3: 1v1 (token_idx 10..34) - 5 blue x 5 red, role-ordered
 -- ----------------------------------------------------------------------------
@@ -390,3 +395,4 @@ INNER JOIN (
         AND s.championid_3 = tupleElement(e.trio[3], 1)
         AND s.teamposition_3 = tupleElement(e.trio[3], 2)
         AND s.build_3 = tupleElement(e.trio[3], 3);
+*/

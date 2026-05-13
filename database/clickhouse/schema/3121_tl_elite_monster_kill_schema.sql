@@ -14,5 +14,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_elite_monster_kill
     position_x Int16,
     position_y Int16
 )
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, monstertype, killerid);

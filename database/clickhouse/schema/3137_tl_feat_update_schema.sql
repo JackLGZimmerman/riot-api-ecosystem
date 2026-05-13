@@ -8,5 +8,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_feat_update
     feattype UInt8,
     featvalue Int32
 )
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, teamid, feattype, featvalue);

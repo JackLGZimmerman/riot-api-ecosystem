@@ -2,6 +2,10 @@
 -- Label eligible filtered games as chronological train/validation/test splits.
 -- Eligibility mirrors the ML input shape needed by downstream builds: one row
 -- per selected game with exactly 10 usable participants and item-build labels.
+--
+-- Read ordering timestamps from source game_data.info filtered by the current
+-- valid_game_ids set. This keeps ML splits aligned during fast filter iteration,
+-- even when the wider game_data_filtered.info copy has not been refreshed yet.
 
 TRUNCATE TABLE game_data_filtered.ml_game_split;
 
@@ -12,11 +16,13 @@ WITH
 
 info_one_row AS (
     SELECT
-        matchid,
-        min(gamestarttimestamp) AS gamestarttimestamp,
-        min(gamecreation) AS gamecreation
-    FROM game_data_filtered.info
-    GROUP BY matchid
+        info.matchid AS matchid,
+        min(info.gamestarttimestamp) AS gamestarttimestamp,
+        min(info.gamecreation) AS gamecreation
+    FROM game_data.info AS info FINAL
+    INNER JOIN game_data_filtered.valid_game_ids AS valid
+        ON info.matchid = valid.matchid
+    GROUP BY info.matchid
 ),
 
 eligible_games AS (

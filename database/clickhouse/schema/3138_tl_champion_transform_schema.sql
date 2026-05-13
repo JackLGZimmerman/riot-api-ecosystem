@@ -7,5 +7,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_champion_transform
     participantid UInt8,
     transformtype LowCardinality (String)
 )
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, participantid, transformtype);

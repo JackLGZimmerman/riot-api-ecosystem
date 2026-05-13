@@ -11,5 +11,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_champion_special_kill
     position_y Int16,
     multikilllength Nullable (UInt8)
 )
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
+ENGINE = ReplacingMergeTree
+ORDER BY (matchid, frame_timestamp, timestamp, killtype, killerid);

@@ -16,37 +16,36 @@ rules AS (
     FROM (
         SELECT
             arrayJoin([
-                tuple(1, '01-kda-lt-0.30', countIf(player_low_kda)),
-                tuple(2, '02-spent-lt-50%-earned', countIf(player_gold_spent)),
-                tuple(3, '03-kill-participation-low', countIf(kill_participation_low)),
+                tuple(1, '01-kda-lt-0.20', countIf(player_low_kda)),
+                tuple(2, '02-spent-lt-50%-earned-on-loss', countIf(player_gold_spent)),
                 tuple(
-                    4,
-                    '04-player-games-gt-40-winrate-gt-70%',
+                    3,
+                    '03-suspect-player-suffix-wr-gte-85%',
                     countIf(player_high_winrate)
                 ),
                 tuple(
-                    6,
-                    '06-team-kd-ratio-lt-0.50-vs-enemy',
+                    4,
+                    '04-team-kd-ratio-lt-0.50-vs-enemy',
                     countIf(team_kills_to_deaths)
                 ),
                 tuple(
-                    7,
-                    '07-winning-player-kills-gt-75%-team-kills',
+                    5,
+                    '05-winning-player-kills-gt-75%-team-kills',
                     countIf(solo_carried)
                 ),
-                tuple(8, '08-non-utility-dmg-share-lt-2%', countIf(too_little_damage)),
-                tuple(9, '09-non-utility-cs-per-min-lt-4.0', countIf(low_minions_killed)),
+                tuple(6, '06-non-utility-dmg-share-lt-2%', countIf(too_little_damage)),
+                tuple(7, '07-non-utility-cs-per-min-lt-3.0', countIf(low_minions_killed)),
                 tuple(
-                    10,
-                    '10-team-non-utility-avg-cs-per-min-gt-1.0-below-enemy',
+                    8,
+                    '08-team-non-utility-avg-cs-per-min-gt-2.0-below-enemy',
                     countIf(team_non_utility_avg_cs_per_min_gt_1_0_below_enemy)
                 ),
                 tuple(
-                    11,
-                    '11-team-non-utility-dmg-to-champs-ratio-lt-1/2-vs-enemy',
+                    9,
+                    '09-team-non-utility-dmg-to-champs-ratio-lt-1/2-vs-enemy',
                     countIf(team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy)
                 ),
-                tuple(12, '12-low-build-value-lt-1.0', countIf(low_build_value))
+                tuple(10, '10-low-build-value-lt-1.0', countIf(low_build_value))
             ]) AS rule
         FROM game_data.filter_stg_game_flags
     )

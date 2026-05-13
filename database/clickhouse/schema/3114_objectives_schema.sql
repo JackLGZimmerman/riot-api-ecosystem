@@ -14,5 +14,5 @@ CREATE TABLE IF NOT EXISTS game_data.objectives (
     ),
     first UInt8,
     kills UInt8
-) ENGINE = MergeTree
-ORDER BY (matchid, teamid, objectivetype, run_id);
+) ENGINE = ReplacingMergeTree
+ORDER BY (matchid, teamid, objectivetype);
