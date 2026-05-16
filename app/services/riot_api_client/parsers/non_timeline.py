@@ -261,8 +261,12 @@ class TabulatedParticipantStats(MatchIdRow):
     gameEndedInEarlySurrender: bool
     gameEndedInIGNBSurrender: bool | None
     gameEndedInSurrender: bool
+    causedGameEndFromIGNBSurrender: bool | None
     teamEarlySurrendered: bool
     teamIGNBSurrendered: bool | None
+    wasPremadeWithIGNBGameEndCauser: bool | None
+    wasPremadeWithSevereTransgressor: bool | None
+    wasSevereTransgressor: bool | None
 
     kills: NonNegativeInt
     deaths: NonNegativeInt

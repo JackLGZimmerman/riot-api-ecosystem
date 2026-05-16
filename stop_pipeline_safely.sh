@@ -7,13 +7,25 @@ WORK_QUEUE_NAME="${WORK_QUEUE_NAME:-default}"
 AUTOMATION_NAME="${AUTOMATION_NAME:-}"
 CLICKHOUSE_CONTAINER="${CLICKHOUSE_CONTAINER:-clickhouse}"
 STOP_WAIT_TIMEOUT_S="${STOP_WAIT_TIMEOUT_S:-600}"
+FLOW_STOP_GRACE_S="${FLOW_STOP_GRACE_S:-30}"
+PREFECT_API_URL_VALUE="${PREFECT_API_URL:-http://localhost:4200/api}"
 
-PREFECT_API_URL="http://localhost:4200/api" \
-  timeout 20s .venv/bin/prefect work-queue pause "$WORK_QUEUE_NAME" -p "$WORK_POOL_NAME" || true
+prefect_api_available() {
+  timeout 3s .venv/bin/python -c \
+    'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2).read()' \
+    "${PREFECT_API_URL_VALUE%/}/health" >/dev/null 2>&1
+}
 
-if [ -n "$AUTOMATION_NAME" ]; then
-  PREFECT_API_URL="http://localhost:4200/api" \
-    timeout 20s .venv/bin/prefect automation pause "$AUTOMATION_NAME" || true
+if prefect_api_available; then
+  PREFECT_API_URL="$PREFECT_API_URL_VALUE" \
+    timeout 20s .venv/bin/prefect work-queue pause "$WORK_QUEUE_NAME" -p "$WORK_POOL_NAME" || true
+
+  if [ -n "$AUTOMATION_NAME" ]; then
+    PREFECT_API_URL="$PREFECT_API_URL_VALUE" \
+      timeout 20s .venv/bin/prefect automation pause "$AUTOMATION_NAME" || true
+  fi
+else
+  echo "Prefect API unavailable; skipping queue/automation pause"
 fi
 
 mapfile -t flow_run_containers < <(
@@ -26,12 +38,23 @@ for container_id in "${flow_run_containers[@]}"; do
 done
 
 if [ "${#flow_run_containers[@]}" -gt 0 ]; then
-  docker wait "${flow_run_containers[@]}" >/dev/null 2>&1 || true
+  if ! timeout "${FLOW_STOP_GRACE_S}s" docker wait "${flow_run_containers[@]}" >/dev/null 2>&1; then
+    echo "Timed out waiting for flow containers to exit; stopping them"
+    docker stop "${flow_run_containers[@]}" >/dev/null 2>&1 || true
+  fi
 fi
 
-echo "Cancelling active Prefect runs"
-PREFECT_API_URL="http://localhost:4200/api" \
-  .venv/bin/python scripts/cancel_deployment_runs.py || true
+if prefect_api_available; then
+  if [ -f scripts/cancel_deployment_runs.py ]; then
+    echo "Cancelling active Prefect runs"
+    PREFECT_API_URL="$PREFECT_API_URL_VALUE" \
+      .venv/bin/python scripts/cancel_deployment_runs.py || true
+  else
+    echo "Prefect cancel helper missing; skipping active-run cancellation"
+  fi
+else
+  echo "Prefect API unavailable; skipping active-run cancellation"
+fi
 
 docker stop prefect-worker 2>/dev/null || true
 

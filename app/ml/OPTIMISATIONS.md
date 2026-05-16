@@ -1,27 +1,287 @@
 # ML Optimisations
 
-## Batch Size And Gradient Accumulation
+Maintenance: update this file with decision-grade experiment evidence only: protocol, compact table, conclusion, and the recommended setting. Keep reusable testing procedure in `TESTING.md` and current defaults in `README.md`.
 
-Ran isolated 5-epoch training jobs on the current 10-interaction-token model.
-Each trial used a fresh Python process, seed `42`, BF16 AMP, diagnostics off,
-and final test evaluation from that trial's best validation checkpoint.
 
-| physical batch | grad accum | effective batch | samples/s | test AUC | test acc | test loss |
+## Optimizer Default
+
+The 2026-05-13 optimizer evidence tuned Lion against itself but did not include a matched AdamW control. With no decision-grade evidence that Lion improves held-out metrics, and with PyTorch AdamW offering a fused CUDA implementation without a third-party package, the active default is AdamW:
+
+```text
+optimizer = "adamw"
+lr = 5e-5
+weight_decay = 5e-3
+adamw_betas = (0.9, 0.999)
+```
+
+Recommendation: use fused PyTorch AdamW on CUDA and keep Lion retired unless a fresh isolated sweep beats this AdamW baseline on validation loss first and does not regress samples/s.
+
+<!-- adamw-lower-lr-150epoch-20260515:start -->
+## AdamW Lower Learning Rate 150-Epoch Sweep, 2026-05-15
+
+Status: `completed`. Run directory:
+
+```text
+/home/jack/projects/riot-api-ecosystem/app/ml/data/checkpoints/adamw_lower_lr_150epoch_20260515_0630
+```
+
+Protocol: isolated fresh Python process per trial, seed `42`, `epochs=150`, current model/training defaults except LR, BF16 AMP, fused AdamW, `torch.compile(mode="reduce-overhead")`, heavy attention diagnostics and TensorBoard disabled, final test evaluation from each trial's best validation-loss checkpoint.
+
+Memory gate: parent runner requires at least `8.0 GiB` available system memory and `8.0 GiB` free GPU memory before starting each trial.
+
+Learning rates:
+
+```text
+5.00e-5, 4.00e-5, 3.20e-5, 2.50e-5, 2.00e-5, 1.60e-5, 1.25e-5, 1.00e-5, 8.00e-6, 6.40e-6, 5.00e-6, 4.00e-6, 3.20e-6, 2.50e-6, 2.00e-6, 1.60e-6, 1.25e-6, 1.00e-6, 8.00e-7, 6.40e-7, 5.00e-7, 4.00e-7, 3.20e-7, 2.50e-7
+```
+
+| lr | status | epochs | best epoch | val loss | val AUC | test loss | test AUC | test acc | median samples/s |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5.00e-5 | completed | 150 | 111 | 0.675675 | 0.601425 | 0.675649 | 0.600723 | 0.573685 | 183,879 |
+| 4.00e-5 | completed | 150 | 111 | 0.675760 | 0.601502 | 0.675673 | 0.601119 | 0.574406 | 184,180 |
+| 3.20e-5 | completed | 150 | 111 | 0.676041 | 0.600974 | 0.675866 | 0.600999 | 0.574519 | 184,181 |
+| 2.50e-5 | completed | 150 | 111 | 0.676492 | 0.599908 | 0.676229 | 0.600351 | 0.573894 | 184,194 |
+| 2.00e-5 | completed | 150 | 111 | 0.677016 | 0.598591 | 0.676695 | 0.599360 | 0.573483 | 184,176 |
+| 1.60e-5 | completed | 150 | 111 | 0.677623 | 0.597036 | 0.677247 | 0.598110 | 0.572857 | 184,184 |
+| 1.25e-5 | completed | 150 | 111 | 0.678329 | 0.595264 | 0.677923 | 0.596517 | 0.571707 | 184,186 |
+| 1.00e-5 | completed | 150 | 121 | 0.678928 | 0.593893 | 0.678536 | 0.595196 | 0.569937 | 184,184 |
+| 8.00e-6 | completed | 150 | 121 | 0.679505 | 0.592404 | 0.679094 | 0.593699 | 0.569031 | 184,184 |
+| 6.40e-6 | completed | 150 | 121 | 0.680115 | 0.590818 | 0.679662 | 0.592138 | 0.568185 | 184,184 |
+| 5.00e-6 | completed | 150 | 121 | 0.680838 | 0.588870 | 0.680352 | 0.590162 | 0.567524 | 184,184 |
+| 4.00e-6 | completed | 150 | 129 | 0.681530 | 0.586946 | 0.681067 | 0.588153 | 0.566076 | 184,182 |
+| 3.20e-6 | completed | 150 | 129 | 0.682241 | 0.584655 | 0.681770 | 0.585736 | 0.564890 | 184,180 |
+| 2.50e-6 | completed | 150 | 129 | 0.683103 | 0.581748 | 0.682647 | 0.582573 | 0.563329 | 184,180 |
+| 2.00e-6 | completed | 150 | 138 | 0.684011 | 0.578590 | 0.683607 | 0.579087 | 0.560892 | 184,182 |
+| 1.60e-6 | completed | 150 | 146 | 0.685149 | 0.574262 | 0.684835 | 0.574008 | 0.556649 | 184,129 |
+| 1.25e-6 | completed | 150 | 144 | 0.686653 | 0.567497 | 0.686466 | 0.565888 | 0.551251 | 184,178 |
+| 1.00e-6 | completed | 150 | 145 | 0.688067 | 0.560058 | 0.687943 | 0.557525 | 0.546269 | 184,140 |
+| 8.00e-7 | completed | 150 | 144 | 0.689243 | 0.553323 | 0.689117 | 0.550560 | 0.542289 | 184,198 |
+| 6.40e-7 | completed | 150 | 145 | 0.690194 | 0.547817 | 0.690040 | 0.545209 | 0.539304 | 184,174 |
+| 5.00e-7 | completed | 150 | 144 | 0.691080 | 0.542175 | 0.690885 | 0.540128 | 0.536598 | 184,185 |
+| 4.00e-7 | completed | 150 | 143 | 0.691657 | 0.536912 | 0.691435 | 0.535590 | 0.535544 | 184,191 |
+| 3.20e-7 | completed | 150 | 138 | 0.692023 | 0.531395 | 0.691783 | 0.530915 | 0.533762 | 184,190 |
+| 2.50e-7 | completed | 150 | 143 | 0.692275 | 0.525342 | 0.692021 | 0.526036 | 0.531498 | 184,198 |
+
+Conclusion: the current recommended setting from this sweep is `lr=5.00e-5`, selected by lowest validation loss (`0.675675`).
+<!-- adamw-lower-lr-150epoch-20260515:end -->
+
+## Model Structure Notes
+
+Pick model size by held-out behavior, not by parameter count alone. If train and validation improve together, add capacity. If train improves while validation loss/Brier/ECE stall or worsen, reduce capacity or add regularization. If validation keeps improving and `gen_*` gaps stay small, the model can probably use more capacity.
+
+| Decision | Effect |
+| --- | --- |
+| `d_model` | Widens every token representation and drives most parameter/memory growth. Use when features look under-expressed, but expect slower training and easier overfit. |
+| `n_layers` | Adds repeated token mixing. More layers can model higher-order draft interactions, but redundant layers show up as weak validation gains and similar attention heads. |
+| `dim_feedforward` | Adds per-token nonlinear capacity. For this tabular/token setup, widen FFN before adding much depth. |
+| `n_heads` | Changes how attention is partitioned, with little parameter change at fixed `d_model`. Too many heads can become redundant; too few can bottleneck distinct role/team patterns. |
+| `dropout` / `attention_dropout` / `head_dropout` | Regularizes memorization. Raise when train metrics pull ahead; lower if both train and validation underfit. |
+| `pooling` | Controls the summary sent to the prediction head. `gated` blends `[CLS]` and mean-token summaries and is the safest default; `cls` is sharper, `mean` is steadier, attention pooling is more flexible but easier to overfit. |
+| `head_hidden` | Capacity after pooling. Usually a small lever compared with encoder width/depth. |
+
+### CUDA Graph Follow-Up, 2026-05-14
+
+Manual CUDA graph probes used `batch_size=10240`, current model shape, static copied batches, BF16 autocast, and fused AdamW.
+
+| path | result | median samples/s | note |
+| --- | --- | ---: | --- |
+| eager + AdamW `capturable=False` | failed | n/a | AdamW refuses graph capture unless the param group is capturable. |
+| eager + AdamW `capturable=True` | captured | 44,866 | Works, but is slower than compiled training. |
+| compiled + manual CUDA graph | failed | n/a | Fails with Inductor CUDA graph replay inside an active capture. |
+
+Conclusion: do not add manual CUDA graphs to the training loop. `torch.compile(mode="reduce-overhead")` remains the graph/launch-overhead lever.
+
+### Standard Training Session, 2026-05-14
+
+One standard run used the then-active defaults after the batch-size update: `batch_size=8192`, `epochs=100`, early stopping patience `8`, attention diagnostics every 5 epochs, TensorBoard on, compile reduce-overhead, no grad clipping.
+
+```text
+app/ml/data/checkpoints/standard_bs8192_20260514_1238
+```
+
+| run | stopped epoch | best epoch | median logged samples/s | median excluding first interval | val loss | test loss | test AUC | test accuracy | test Brier | test ECE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| standard bs8192 | 20 | 12 | 65,041 | 65,052 | 0.678306 | 0.678035 | 0.593842 | 0.570831 | 0.242554 | 0.013264 |
+
+Conclusion at the time: those defaults beat the previous `44,010` warm-path benchmark by `47.8%` in the standard train loop after the compile-heavy first interval.
+
+## Retired Lion LR And Weight Decay
+
+Ranked by lowest test loss, then highest test accuracy:
+
+| rank | sweep | lr | weight_decay | best val loss | best val acc | test loss | test acc | test AUC | median samples/s |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | lr | 1.25e-5 | 0.025 | 0.679809 | 0.564914 | 0.680193 | 0.566749 | 0.593073 | 40,221 |
+| 2 | wd @ 1.25e-5 | 1.25e-5 | 0.035 | 0.679813 | 0.564950 | 0.680199 | 0.566690 | 0.593073 | 38,008 |
+| 3 | wd @ 1.25e-5 | 1.25e-5 | 0.015 | 0.679814 | 0.564950 | 0.680200 | 0.566684 | 0.593073 | 40,002 |
+| 4 | wd @ 1.25e-5 | 1.25e-5 | 0.000 | 0.679816 | 0.564926 | 0.680203 | 0.566672 | 0.593073 | 40,951 |
+| 5 | wd @ 1.25e-5 | 1.25e-5 | 0.050 | 0.679820 | 0.564920 | 0.680211 | 0.566660 | 0.593073 | 40,085 |
+| 6 | lr | 1.50e-5 | 0.025 | 0.679783 | 0.565027 | 0.680261 | 0.566529 | 0.593016 | 41,175 |
+| 7 | wd @ 1.75e-5 | 1.75e-5 | 0.015 | 0.679730 | 0.565105 | 0.680268 | 0.566422 | 0.592876 | 37,976 |
+| 8 | wd @ 1.75e-5 | 1.75e-5 | 0.000 | 0.679729 | 0.565021 | 0.680268 | 0.566410 | 0.592876 | 39,850 |
+| 9 | wd @ 1.75e-5 | 1.75e-5 | 0.050 | 0.679730 | 0.565087 | 0.680270 | 0.566487 | 0.592876 | 41,057 |
+| 10 | lr | 1.75e-5 | 0.025 | 0.679731 | 0.565045 | 0.680270 | 0.566422 | 0.592874 | 40,264 |
+| 11 | wd @ 1.75e-5 | 1.75e-5 | 0.035 | 0.679738 | 0.565087 | 0.680281 | 0.566398 | 0.592874 | 40,700 |
+| 12 | lr | 1.00e-5 | 0.025 | 0.680018 | 0.564473 | 0.680315 | 0.566642 | 0.592732 | 40,079 |
+
+Historical best Lion settings from this retired sweep:
+
+```text
+lr = 1.25e-5
+weight_decay = 2.5e-2
+```
+
+## Warmup Steps
+
+5-epoch follow-up runs on 2026-05-14 tested whether the retired Lion setup needed more warmup after the LR/weight-decay sweep. `125` steps is roughly one epoch at `batch_size=10240` (`131` optimizer steps/epoch).
+
+| warmup steps | best val loss | test loss | test acc | test AUC | test Brier | test ECE |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4096 | 1 | 4096 | 36,995 | 0.5934 | 0.5687 | 0.6794 |
-| 8192 | 1 | 8192 | 40,501 | 0.5929 | 0.5670 | 0.6800 |
-| 10240 | 1 | 10240 | 41,044 | 0.5927 | 0.5666 | 0.6803 |
-| 4096 | 2 | 8192 | 40,363 | 0.5931 | 0.5664 | 0.6802 |
-| 5120 | 2 | 10240 | 40,645 | 0.5928 | 0.5664 | 0.6803 |
-| 8192 | 2 | 16384 | 40,963 | 0.5881 | 0.5646 | 0.6813 |
+| 125 | 0.679809 | 0.680193 | 0.566749 | 0.593073 | 0.243592 | 0.030456 |
+| 250 | 0.680031 | 0.680505 | 0.565897 | 0.592900 | 0.243745 | 0.032160 |
+| 500 | 0.680022 | 0.680451 | 0.566130 | 0.592784 | 0.243717 | 0.031002 |
 
-Summary: gradient accumulation did not provide a useful win in this pass. At
-matched effective batch sizes it was throughput-neutral to slightly slower and
-accuracy-neutral to slightly worse. Increasing effective batch to `16384` with
-accumulation hurt AUC over 5 epochs. The best throughput came from the largest
-plain physical batch tested, `10240 x 1`; the best short-run accuracy came from
-`4096 x 1`, but with about 10% lower throughput.
+Recommendation: keep `warmup_steps = 125`; longer warmup slowed useful learning and did not improve held-out metrics.
 
-Note: trials must be isolated by process for clean throughput numbers. A first
-attempt that reused one Python process across trials polluted the CUDA allocator
-between runs and produced misleading allocator-cliff behavior.
+## Output Temperature
+
+Post-hoc scaling scores `sigmoid(logits / T)`. It changes probability spread and calibration, but not ranking or the `0.5` decision boundary, so accuracy and AUC are unchanged by positive `T`.
+
+### 15-Epoch Temperature Sweep, 2026-05-14
+
+One 15-epoch baseline run used the current defaults with diagnostics off. The best validation checkpoint was epoch 11 in:
+
+```text
+app/ml/data/checkpoints/temp_sweep_15epoch_20260514_0648
+```
+
+Unscaled (`T=1.0`) checkpoint metrics: validation loss `0.678610`, validation accuracy `0.567917`, validation AUC `0.594647`; test loss `0.678677`, test accuracy `0.570134`, test AUC `0.593895`.
+
+| temperature | val loss | test loss | test Brier | test ECE | test pred std | test 45-55 pct | test 45-55 AUC | test 45-55 loss |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.50 | 0.681673 | 0.681780 | 0.244077 | 0.033490 | 0.124983 | 30.45 | 0.524895 | 0.692243 |
+| 0.70 | 0.677905 | 0.677995 | 0.242525 | 0.013569 | 0.092591 | 41.53 | 0.532983 | 0.691404 |
+| 0.85 | 0.677936 | 0.678014 | 0.242548 | 0.016065 | 0.077303 | 49.28 | 0.537906 | 0.690893 |
+| 1.00 | 0.678610 | 0.678677 | 0.242862 | 0.020538 | 0.066265 | 56.24 | 0.542577 | 0.690426 |
+| 1.15 | 0.679461 | 0.679521 | 0.243265 | 0.026128 | 0.057942 | 62.53 | 0.548291 | 0.689877 |
+| 1.30 | 0.680324 | 0.680378 | 0.243677 | 0.030207 | 0.051454 | 68.32 | 0.551917 | 0.689545 |
+| 1.50 | 0.681396 | 0.681444 | 0.244194 | 0.033669 | 0.044750 | 74.81 | 0.558171 | 0.688998 |
+| 2.00 | 0.683552 | 0.683588 | 0.245244 | 0.037065 | 0.033722 | 86.62 | 0.570645 | 0.688079 |
+
+Narrow central buckets on test:
+
+| temperature | 45-50 count | 45-50 acc | 45-50 loss | 50-55 count | 50-55 acc | 50-55 loss |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.50 | 26,495 | 0.532780 | 0.690870 | 24,605 | 0.504532 | 0.693722 |
+| 0.70 | 36,750 | 0.540082 | 0.689883 | 32,944 | 0.509410 | 0.693101 |
+| 0.85 | 44,189 | 0.544660 | 0.689347 | 38,511 | 0.512789 | 0.692667 |
+| 1.00 | 51,022 | 0.547431 | 0.689127 | 43,359 | 0.517517 | 0.691954 |
+| 1.15 | 57,329 | 0.551257 | 0.688666 | 47,615 | 0.521936 | 0.691336 |
+| 1.30 | 63,249 | 0.554855 | 0.688235 | 51,414 | 0.524060 | 0.691157 |
+| 1.50 | 69,954 | 0.559854 | 0.687636 | 55,587 | 0.527749 | 0.690712 |
+| 2.00 | 82,524 | 0.568913 | 0.686805 | 62,843 | 0.536193 | 0.689751 |
+
+Conclusion: `T=0.70` is the best probability-scoring temperature for this 15-epoch checkpoint, with the lowest validation/test logloss, Brier, and ECE. `T=0.85` is effectively tied on loss but slightly worse on calibration. `T > 1.0` makes the model too flat overall; its central-band AUC rises mostly because more examples are compressed into `0.45-0.55`, not because the model learns a better central decision boundary. Accuracy remains `0.570134` on test for every positive `T`.
+
+Recommendation: serve probabilities from the current 15-epoch checkpoint family with post-hoc output temperature `T = 0.70`. Keep training temperature at `1.0`.
+
+### 5-Epoch Temperature Sweep, 2026-05-14
+
+Earlier post-hoc scaling from the `125` warmup checkpoint:
+
+| temperature | val loss | val Brier | val ECE | test loss | test Brier | test ECE | test pred std |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.50 | 0.683449 | 0.245023 | 0.039897 | 0.684024 | 0.245229 | 0.042283 | 0.125223 |
+| 0.65 | 0.679776 | 0.243409 | 0.021449 | 0.680284 | 0.243618 | 0.030710 | 0.098662 |
+| 0.75 | 0.679224 | 0.243149 | 0.021559 | 0.679691 | 0.243352 | 0.030625 | 0.086292 |
+| 0.90 | 0.679407 | 0.243227 | 0.021947 | 0.679821 | 0.243415 | 0.030509 | 0.072538 |
+| 1.00 | 0.679810 | 0.243415 | 0.023586 | 0.680193 | 0.243592 | 0.030457 | 0.065535 |
+| 1.25 | 0.681068 | 0.244015 | 0.028043 | 0.681392 | 0.244169 | 0.033663 | 0.052742 |
+| 1.50 | 0.682292 | 0.244609 | 0.033748 | 0.682572 | 0.244744 | 0.039694 | 0.044098 |
+| 2.00 | 0.684263 | 0.245576 | 0.038101 | 0.684482 | 0.245683 | 0.044369 | 0.033183 |
+
+Earlier recommendation: serve probabilities from this shorter checkpoint family with post-hoc temperature `T = 0.75` for logloss/Brier. The 15-epoch sweep supersedes this for the current training horizon.
+
+<!-- capacity-reg-grid-20260515:start -->
+## Capacity × Regularization Grid Sweep, 2026-05-15
+
+Status: `partially completed` — t00–t19 ran to 150 epochs; t20 (d384/l4/ff2048) was terminated early (~30 epochs) due to batch-size collapse caused by insufficient GPU memory headroom at that capacity, reducing throughput to ~10k samples/s. Run directory:
+
+```text
+app/ml/data/checkpoints/capacity_reg_grid_20260515_210752
+```
+
+Protocol: 5×5 grid (5 capacity tiers × 5 regularization tiers = 25 trials), isolated fresh Python subprocess per trial, seed `42`, `epochs=150`, `batch_size=16384`, BF16 AMP, fused AdamW, `torch.compile(mode="reduce-overhead")`, attention diagnostics disabled, train monitor `50k` samples/epoch. Best val-loss checkpoint used for test evaluation. Median samples/s computed from `train_step` events after step 10 (skips compile warmup).
+
+Capacity tiers (`d_model` / `n_layers` / `dim_feedforward`, `n_heads=4` fixed):
+
+```text
+C0: 192 / 3 /  768
+C1: 256 / 3 / 1024
+C2: 256 / 4 / 1536
+C3: 384 / 3 / 1536
+C4: 384 / 4 / 2048  ← terminated early
+```
+
+Regularization tiers (`dropout` / `attention_dropout` / `weight_decay`):
+
+```text
+R0: 0.05 / 0.05 / 1e-3
+R1: 0.15 / 0.10 / 5e-3
+R2: 0.25 / 0.15 / 1e-2
+R3: 0.35 / 0.20 / 2e-2
+R4: 0.45 / 0.25 / 5e-2
+```
+
+### Full Results
+
+Sorted by capacity tier then regularization tier. `best ep` = epoch of best val loss. Samples/s from training steps only (excludes val/monitor overhead).
+
+| trial | cap | reg | epochs | best ep | val loss | val acc | val AUC | val Brier | val ECE | test loss | test acc | test AUC | test Brier | test ECE | med samples/s |
+| --- | :---: | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| t00 d192/l3/ff768 | C0 | R0 | 150 | 65 | 0.677196 | 0.5708 | 0.598349 | 0.242159 | 0.012168 | 0.676330 | 0.5728 | 0.598872 | 0.241741 | 0.016725 | 209,963 |
+| t01 d192/l3/ff768 | C0 | R1 | 150 | 111 | 0.677121 | 0.5703 | 0.599112 | 0.242133 | 0.017318 | 0.676807 | 0.5722 | 0.599564 | 0.241986 | 0.024896 | 211,384 |
+| t02 d192/l3/ff768 | C0 | R2 | 150 | 111 | 0.677661 | 0.5685 | 0.597451 | 0.242396 | 0.017584 | 0.677589 | 0.5705 | 0.597555 | 0.242363 | 0.026280 | 212,411 |
+| t03 d192/l3/ff768 | C0 | R3 | 150 | 111 | 0.678468 | 0.5667 | 0.594907 | 0.242789 | 0.019163 | 0.678574 | 0.5686 | 0.594920 | 0.242836 | 0.028027 | 212,433 |
+| t04 d192/l3/ff768 | C0 | R4 | 150 | 111 | 0.679678 | 0.5643 | 0.590989 | 0.243363 | 0.017593 | 0.679638 | 0.5666 | 0.591574 | 0.243329 | 0.026179 | 212,459 |
+| t05 d256/l3/ff1024 | C1 | R0 | 150 | 34 | 0.676780 | 0.5722 | 0.599282 | 0.241963 | 0.011960 | 0.676263 | 0.5735 | 0.599405 | 0.241708 | 0.017379 | 167,026 |
+| **t06 d256/l3/ff1024** | **C1** | **R1** | **150** | **111** | **0.675678** | **0.5728** | **0.601421** | **0.241450** | **0.007786** | **0.675649** | **0.5737** | **0.600729** | **0.241421** | **0.016638** | **167,855** |
+| t07 d256/l3/ff1024 | C1 | R2 | 150 | 111 | 0.675860 | 0.5726 | 0.601084 | 0.241534 | 0.008147 | 0.675688 | 0.5753 | 0.600906 | 0.241437 | 0.016301 | 167,004 |
+| t08 d256/l3/ff1024 | C1 | R3 | 150 | 128 | 0.676813 | 0.5704 | 0.598151 | 0.241991 | 0.008636 | 0.676555 | 0.5734 | 0.598413 | 0.241852 | 0.017186 | 167,019 |
+| t09 d256/l3/ff1024 | C1 | R4 | 150 | 128 | 0.678353 | 0.5664 | 0.593396 | 0.242733 | 0.010421 | 0.678156 | 0.5691 | 0.593878 | 0.242623 | 0.019419 | 167,936 |
+| t10 d256/l4/ff1536 | C2 | R0 | 150 | 33 | 0.676520 | 0.5722 | 0.600297 | 0.241840 | 0.013679 | 0.676347 | 0.5726 | 0.599605 | 0.241753 | 0.018524 | 112,273 |
+| t11 d256/l4/ff1536 | C2 | R1 | 150 | 70 | 0.675557 | 0.5729 | 0.602009 | 0.241389 | 0.008108 | 0.675313 | 0.5747 | 0.601552 | 0.241265 | 0.016334 | 121,093 |
+| t12 d256/l4/ff1536 | C2 | R2 | 150 | 89 | 0.675633 | 0.5731 | 0.601784 | 0.241425 | 0.008696 | 0.675383 | 0.5755 | 0.602088 | 0.241288 | 0.016873 | 111,066 |
+| t13 d256/l4/ff1536 | C2 | R3 | 150 | 89 | 0.676231 | 0.5711 | 0.599678 | 0.241709 | 0.006290 | 0.675944 | 0.5736 | 0.599552 | 0.241558 | 0.013723 | 110,609 |
+| t14 d256/l4/ff1536 | C2 | R4 | 150 | 127 | 0.677349 | 0.5686 | 0.596521 | 0.242249 | 0.010384 | 0.677149 | 0.5717 | 0.596872 | 0.242136 | 0.019338 | 110,595 |
+| t15 d384/l3/ff1536 | C3 | R0 | 150 | 29 | 0.676410 | 0.5713 | 0.599669 | 0.241787 | 0.009169 | 0.675982 | 0.5719 | 0.598837 | 0.241580 | 0.013950 | 99,243 |
+| t16 d384/l3/ff1536 | C3 | R1 | 150 | 34 | 0.675557 | 0.5739 | 0.602078 | 0.241383 | 0.008295 | 0.675147 | 0.5751 | 0.601698 | 0.241188 | 0.016740 | 99,249 |
+| t17 d384/l3/ff1536 | C3 | R2 | 150 | 76 | 0.675505 | 0.5735 | 0.601744 | 0.241366 | 0.005764 | 0.675135 | 0.5753 | 0.601244 | 0.241180 | 0.013302 | 98,640 |
+| t18 d384/l3/ff1536 | C3 | R3 | 150 | 15 | 0.679733 | 0.5646 | 0.589780 | 0.243391 | 0.013627 | 0.679726 | 0.5656 | 0.589677 | 0.243376 | 0.022351 | 98,684 |
+| t19 d384/l3/ff1536 | C3 | R4 | 150 | 128 | 0.676843 | 0.5702 | 0.598706 | 0.242000 | 0.010438 | 0.676560 | 0.5723 | 0.598964 | 0.241852 | 0.018999 | 99,269 |
+| t20 d384/l4/ff2048 | C4 | R0 | 30† | 26 | 0.676635 | 0.5702 | 0.598384 | 0.241902 | 0.007964 | — | — | — | — | — | 10,122† |
+
+† Terminated early. Throughput reflects batch-size collapse (GPU OOM pressure), not model cost.
+
+### Tier Summary (best trial per capacity tier)
+
+| tier | config | best trial / reg | best val loss | test loss | test acc | test AUC | test Brier | test ECE | med samples/s | vs C1 throughput |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C0 | d192 / l3 / ff768 | t01 / R1 | 0.677121 | 0.676807 | 0.5722 | 0.599564 | 0.241986 | 0.024896 | 211,384 | +26% |
+| **C1** | **d256 / l3 / ff1024** | **t06 / R1** | **0.675678** | **0.675649** | **0.5737** | **0.600729** | **0.241421** | **0.016638** | **167,855** | **—** |
+| C2 | d256 / l4 / ff1536 | t11 / R1 | 0.675557 | 0.675313 | 0.5747 | 0.601552 | 0.241265 | 0.016334 | 121,093 | −28% |
+| C3 | d384 / l3 / ff1536 | t17 / R2 | 0.675505 | 0.675135 | 0.5753 | 0.601244 | 0.241180 | 0.013302 | 98,640 | −41% |
+| C4 | d384 / l4 / ff2048 | t20 / R0 | 0.676635† | — | — | — | — | — | 10,122† | −94%† |
+
+### Conclusions
+
+**Accuracy ceiling**: all four completed tiers converge within 0.002 val loss of each other (0.6755–0.6771 at their best regularization). The dataset signal, not model capacity, limits performance above C1.
+
+**Best throughput/accuracy tradeoff: C1 (d256/l3/ff1024, R1)**. Matches C2 and C3 accuracy to within noise while running at 167k samples/s — 26% faster than C2 (d256/l4) and 41% faster than C3 (d384/l3). These defaults are already the active config.
+
+**C0 (d192) is genuinely compromised**: consistently 0.001–0.004 higher val loss and notably worse ECE (0.017–0.028 vs 0.007–0.017 for C1), even at peak throughput. Not a valid tradeoff.
+
+**Regularization**: R1 (dropout=0.15, attn\_dropout=0.10, weight\_decay=5e-3) or R2 (0.25/0.15/1e-2) is optimal across all tiers. R3–R4 degrades all metrics. R0 underregularizes slightly (best val at early epochs, marginally worse final metrics).
+
+**Recommended setting (confirmed)**: `d_model=256, n_layers=3, dim_feedforward=1024, dropout=0.15, attention_dropout=0.10, weight_decay=5e-3` — existing defaults unchanged.
+<!-- capacity-reg-grid-20260515:end -->

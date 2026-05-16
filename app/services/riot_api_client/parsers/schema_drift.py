@@ -5,7 +5,7 @@ import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from app.services.riot_api_client.parsers.models import timeline as tl_models
 from app.services.riot_api_client.parsers.models.non_timeline import (
@@ -170,7 +170,7 @@ def _fail(
     expected_schema: Any,
     actual_schema: Any,
     differences: list[Any],
-) -> None:
+) -> NoReturn:
     report = {
         "detected_at": datetime.now(tz=UTC).isoformat(),
         "stream": stream,
@@ -184,9 +184,11 @@ def _fail(
     }
     output_dir = Path(os.getenv("SCHEMA_DRIFT_DIR", str(DRIFT_OUTPUT_DIR)))
     output_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{stream}_{match_id}_{checked_object}")
-    report_path = output_dir / f"{datetime.now(tz=UTC):%Y%m%dT%H%M%S%fZ}_{safe_name}.json"
-    report_path.write_text(json.dumps(report, indent=2, sort_keys=True, default=str))
+    safe_stream = re.sub(r"[^A-Za-z0-9_.-]+", "_", stream)
+    report_path = output_dir / f"{safe_stream}.log.jsonl"
+    with report_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(report, sort_keys=True, default=str))
+        f.write("\n")
     raise SchemaDriftError(
         "Schema drift detected "
         f"stream={stream} match_id={match_id} object={checked_object} "
@@ -295,8 +297,7 @@ def timeline(raw: Any, *, match_id: str = "unknown", drift_date: str = "unknown"
         for event_idx, event in enumerate(events):
             path = f"$.info.frames[{frame_idx}].events[{event_idx}]"
             event_type = event.get("type") if isinstance(event, dict) else None
-            model = TIMELINE_EVENTS.get(event_type)
-            if model is None:
+            if not isinstance(event_type, str) or event_type not in TIMELINE_EVENTS:
                 _fail(
                     stream="timeline",
                     match_id=match_id,
@@ -308,6 +309,7 @@ def timeline(raw: Any, *, match_id: str = "unknown", drift_date: str = "unknown"
                     differences=[{"type": "unknown_event_type", "event_type": event_type}],
                 )
 
+            model = TIMELINE_EVENTS[event_type]
             expected_schema, expected_keys, required_keys = _typed_dict_schema(model)
             _check(
                 stream="timeline",

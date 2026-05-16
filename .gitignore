@@ -67,6 +67,8 @@ requirements.lock
 .vscode/
 .idea/
 .codex
+.agents/
+.claude/settings.local.json
 *.iml
 *.swp
 *.swo
@@ -98,3 +100,19 @@ lake/*
 !lake/.gitkeep
 
 __pypackages__/
+
+app/ml/data/*
+!app/ml/data/.gitignore
+app/ml/**/checkpoints/
+app/ml/**/tensorboard/
+app/ml/**/runs/
+app/ml/**/*.npy
+app/ml/**/*.npz
+app/ml/**/*.pt
+app/ml/**/*.pth
+app/ml/**/*.ckpt
+app/ml/**/*.safetensors
+app/ml/**/events.out.tfevents*
+app/ml/**/metrics*.jsonl
+app/ml/**/metrics_latest.json
+app/ml/**/session_summary*.json

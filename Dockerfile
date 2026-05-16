@@ -3,7 +3,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 RUN pip install --no-cache-dir uv \
- && uv sync --frozen --no-dev
+ && uv sync --frozen --only-group runtime --no-install-project
 
 # Prefect executes `python` inside this container; point PATH at uv's env.
 ENV PATH="/app/.venv/bin:${PATH}"

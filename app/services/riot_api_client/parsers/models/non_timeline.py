@@ -248,6 +248,7 @@ class Participant(BaseModel):
     gameEndedInEarlySurrender: bool
     gameEndedInIGNBSurrender: bool | None = None  # Schema drift, new IGNB surrender variant.
     gameEndedInSurrender: bool
+    causedGameEndFromIGNBSurrender: bool | None = None
     getBackPings: NonNegativeInt
     goldEarned: NonNegativeInt
     goldSpent: NonNegativeInt
@@ -323,6 +324,9 @@ class Participant(BaseModel):
     summonerName: str
     teamEarlySurrendered: bool
     teamIGNBSurrendered: bool | None = None  # Schema drift, new IGNB surrender variant.
+    wasPremadeWithIGNBGameEndCauser: bool | None = None
+    wasPremadeWithSevereTransgressor: bool | None = None
+    wasSevereTransgressor: bool | None = None
     teamId: PositiveInt
     teamPosition: str
     timeCCingOthers: NonNegativeInt
