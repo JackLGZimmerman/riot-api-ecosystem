@@ -23,7 +23,7 @@ from app.ml.config import (
 
 _COMPATIBLE_CACHE_FORMATS = {CACHE_FORMAT, "npy-memmap-v5", "npy-memmap-v4", "npy-memmap-v3"}
 _PLAYER_ROLE_IDX = np.array(
-    [i + 1 for i in range(len(POSITIONS))] * 2,
+    list(range(len(POSITIONS))) * 2,
     dtype=LOAD_ARRAY_DTYPES["role_idx"],
 )
 

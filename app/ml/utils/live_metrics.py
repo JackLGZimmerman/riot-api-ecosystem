@@ -18,6 +18,7 @@ class LiveMetrics:
         latest_file: str,
         tensorboard_dir: str | None,
         tensorboard_raw_mirror: bool = False,
+        tensorboard_run_name: str | None = None,
     ) -> None:
         metrics_dir.mkdir(parents=True, exist_ok=True)
         self.path = metrics_dir / metrics_file
@@ -27,6 +28,7 @@ class LiveMetrics:
             metrics_file,
             tensorboard_dir,
             raw_mirror=tensorboard_raw_mirror,
+            run_name=tensorboard_run_name,
         )
         self.tensorboard_path = self.tensorboard.path
         self._t0 = time.perf_counter()

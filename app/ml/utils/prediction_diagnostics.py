@@ -7,18 +7,14 @@ import torch
 from app.ml.utils.metrics import metric_scalar
 
 ECE_BINS = 15
-PREDICTION_BUCKET_EDGES = (0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65)
-CENTRAL_PREDICTION_RANGES = ((0.475, 0.525), (0.45, 0.55), (0.40, 0.60))
 
-# The 0.475-0.525 band is the critical decision region for this model. Its
-# metrics are computed every epoch for both train and validation (cheap); the
-# wider/narrower bands plus the bucket/distribution tables are computed only on
-# the heavy-diagnostic cadence (prediction_metrics(..., full=True)).
+PREDICTION_BUCKET_EDGES = (0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65)
+
+# The 0.475-0.525 band is the critical decision region for this model. Only
+# auc / logloss / calibration are emitted: brier ~ 0.25, accuracy ~ 0.5 by
+# construction for predictions in this band, so they carry no extra signal.
 HEADLINE_CENTRAL_RANGE = (0.475, 0.525)
-_NON_HEADLINE_CENTRAL_RANGES = tuple(
-    r for r in CENTRAL_PREDICTION_RANGES if r != HEADLINE_CENTRAL_RANGE
-)
-CENTRAL_BAND_KEYS = ("auc", "logloss", "accuracy", "brier", "calibration", "pct_data")
+CENTRAL_BAND_KEYS = ("auc", "logloss", "calibration")
 
 
 def central_range_label(lower: float, upper: float) -> str:
@@ -35,17 +31,6 @@ def central_range_label(lower: float, upper: float) -> str:
 
 
 HEADLINE_CENTRAL_BAND = central_range_label(*HEADLINE_CENTRAL_RANGE)
-
-
-def prediction_summary_from_metrics(
-    metrics: dict[str, object],
-) -> dict[str, float | int]:
-    summary: dict[str, float | int] = {}
-    for key, value in metrics.items():
-        scalar = metric_scalar(value)
-        if key.startswith("pred_") and scalar is not None:
-            summary[key] = scalar
-    return summary
 
 
 def central_band_summary(
@@ -73,27 +58,18 @@ def generalization_gaps(
     """
     gaps: dict[str, float] = {}
 
-    def _gap(name: str, train_key: str, held_out_key: str, sign: float) -> None:
-        train_value = metric_scalar(train_metrics.get(train_key))
-        held_out_value = metric_scalar(held_out_metrics.get(held_out_key))
+    def _gap(name: str, key: str, sign: float) -> None:
+        train_value = metric_scalar(train_metrics.get(key))
+        held_out_value = metric_scalar(held_out_metrics.get(key))
         if train_value is not None and held_out_value is not None:
             gaps[name] = float(sign * (float(train_value) - float(held_out_value)))
 
-    _gap("gen_loss_gap", "loss", "loss", -1.0)
-    _gap("gen_accuracy_gap", "accuracy", "accuracy", 1.0)
-    _gap("gen_auc_gap", "auc", "auc", 1.0)
-    _gap("gen_brier_gap", "brier", "brier", -1.0)
-    _gap("gen_ece_gap", "ece", "ece", -1.0)
+    _gap("gen_loss_gap", "loss", -1.0)
+    _gap("gen_accuracy_gap", "accuracy", 1.0)
+    _gap("gen_auc_gap", "auc", 1.0)
     band = HEADLINE_CENTRAL_BAND
     _gap(
-        f"gen_central_{band}_logloss_gap",
-        f"pred_central_{band}_logloss",
-        f"pred_central_{band}_logloss",
-        -1.0,
-    )
-    _gap(
         f"gen_central_{band}_auc_gap",
-        f"pred_central_{band}_auc",
         f"pred_central_{band}_auc",
         1.0,
     )
@@ -165,91 +141,30 @@ def binary_logloss(scores: torch.Tensor, targets: torch.Tensor) -> float:
     return float(loss.mean().item())
 
 
-def _prediction_distribution_fields(scores: torch.Tensor) -> dict[str, float]:
-    if scores.numel() == 0:
-        return {}
-    quantiles = torch.quantile(
-        scores.double(),
-        torch.tensor(
-            [0.01, 0.05, 0.10, 0.50, 0.90, 0.95, 0.99],
-            dtype=torch.float64,
-            device=scores.device,
-        ),
-    )
-    return {
-        "pred_std": float(scores.std(unbiased=False).item()),
-        "pred_p01": float(quantiles[0].item()),
-        "pred_p05": float(quantiles[1].item()),
-        "pred_p10": float(quantiles[2].item()),
-        "pred_p50": float(quantiles[3].item()),
-        "pred_p90": float(quantiles[4].item()),
-        "pred_p95": float(quantiles[5].item()),
-        "pred_p99": float(quantiles[6].item()),
-    }
-
-
-def _confidence_bucket_fields(
+def prediction_bucket_rows(
     scores: torch.Tensor,
     targets: torch.Tensor,
-) -> dict[str, float | int]:
-    fields: dict[str, float | int] = {}
-    for threshold in (0.55, 0.60, 0.65):
-        mask = scores > threshold
-        count = int(mask.sum().item())
-        label = int(round(threshold * 100))
-        fields[f"pred_gt_{label}_count"] = count
-        fields[f"pred_gt_{label}_accuracy"] = (
-            float(targets[mask].mean().item()) if count else float("nan")
-        )
-    for threshold in (0.45, 0.40, 0.35):
-        mask = scores < threshold
-        count = int(mask.sum().item())
-        label = int(round(threshold * 100))
-        fields[f"pred_lt_{label}_count"] = count
-        fields[f"pred_lt_{label}_accuracy"] = (
-            float((1.0 - targets[mask]).mean().item()) if count else float("nan")
-        )
-    return fields
+) -> list[dict[str, object]]:
+    """Rows for the heavy-cadence console bucket table.
 
-
-def prediction_bucket_diagnostics(
-    scores: torch.Tensor,
-    targets: torch.Tensor,
-) -> tuple[list[dict[str, object]], dict[str, float | int]]:
+    Scalar bucket fields are not emitted to JSONL - the graduated band table
+    (prediction_band_diagnostics) is the canonical per-bucket record.
+    """
     n = scores.numel()
     rows: list[dict[str, object]] = []
-    fields: dict[str, float | int] = {}
     edges = PREDICTION_BUCKET_EDGES
-    bucket_specs: list[tuple[str, str, torch.Tensor]] = [
-        (
-            f"<{edges[0]:.2f}",
-            f"lt_{int(round(edges[0] * 100))}",
-            scores < edges[0],
-        )
+    bucket_specs: list[tuple[str, torch.Tensor]] = [
+        (f"<{edges[0]:.2f}", scores < edges[0])
     ]
     for lower, upper in zip(edges, edges[1:]):
-        lower_label = int(round(lower * 100))
-        upper_label = int(round(upper * 100))
         if upper == edges[-1]:
             mask = (scores >= lower) & (scores <= upper)
         else:
             mask = (scores >= lower) & (scores < upper)
-        bucket_specs.append(
-            (
-                f"{lower:.2f}-{upper:.2f}",
-                f"{lower_label}_{upper_label}",
-                mask,
-            )
-        )
-    bucket_specs.append(
-        (
-            f">{edges[-1]:.2f}",
-            f"gt_{int(round(edges[-1] * 100))}",
-            scores > edges[-1],
-        )
-    )
+        bucket_specs.append((f"{lower:.2f}-{upper:.2f}", mask))
+    bucket_specs.append((f">{edges[-1]:.2f}", scores > edges[-1]))
 
-    for label, key, mask in bucket_specs:
+    for label, mask in bucket_specs:
         count = int(mask.sum().item())
         pct_data = 100.0 * count / n if n else float("nan")
         if count:
@@ -269,64 +184,46 @@ def prediction_bucket_diagnostics(
             accuracy = float("nan")
             logloss = float("nan")
 
-        row = {
-            "bucket": label,
-            "count": count,
-            "pct_data": pct_data,
-            "mean_pred": mean_pred,
-            "actual_rate": actual_rate,
-            "gap": gap,
-            "accuracy": accuracy,
-            "logloss": logloss,
-        }
-        rows.append(row)
-        for metric, value in row.items():
-            if metric == "bucket":
-                continue
-            fields[f"pred_bucket_{key}_{metric}"] = value
-    return rows, fields
+        rows.append(
+            {
+                "bucket": label,
+                "count": count,
+                "pct_data": pct_data,
+                "mean_pred": mean_pred,
+                "actual_rate": actual_rate,
+                "gap": gap,
+                "accuracy": accuracy,
+                "logloss": logloss,
+            }
+        )
+    return rows
 
 
-def _central_prediction_fields(
+def _headline_central_fields(
     scores: torch.Tensor,
     targets: torch.Tensor,
-    ranges: tuple[tuple[float, float], ...] = CENTRAL_PREDICTION_RANGES,
-) -> dict[str, float | int]:
-    fields: dict[str, float | int] = {}
-    n = scores.numel()
-    for lower, upper in ranges:
-        label = central_range_label(lower, upper)
-        mask = (scores >= lower) & (scores <= upper)
-        count = int(mask.sum().item())
-        fields[f"pred_central_{label}_count"] = count
-        fields[f"pred_central_{label}_pct_data"] = (
-            100.0 * count / n if n else float("nan")
-        )
-        if count:
-            central_scores = scores[mask]
-            central_targets = targets[mask]
-            fields[f"pred_central_{label}_auc"] = binary_auc(
-                central_scores, central_targets
-            )
-            fields[f"pred_central_{label}_calibration"] = binary_ece(
-                central_scores, central_targets
-            )
-            fields[f"pred_central_{label}_accuracy"] = float(
-                ((central_scores > 0.5) == central_targets).float().mean().item()
-            )
-            fields[f"pred_central_{label}_logloss"] = binary_logloss(
-                central_scores, central_targets
-            )
-            fields[f"pred_central_{label}_brier"] = float(
-                torch.mean((central_scores - central_targets) ** 2).item()
-            )
-        else:
-            fields[f"pred_central_{label}_auc"] = float("nan")
-            fields[f"pred_central_{label}_calibration"] = float("nan")
-            fields[f"pred_central_{label}_accuracy"] = float("nan")
-            fields[f"pred_central_{label}_logloss"] = float("nan")
-            fields[f"pred_central_{label}_brier"] = float("nan")
-    return fields
+) -> dict[str, float]:
+    """auc / logloss / calibration on the 0.475-0.525 decision band."""
+    lower, upper = HEADLINE_CENTRAL_RANGE
+    label = HEADLINE_CENTRAL_BAND
+    mask = (scores >= lower) & (scores <= upper)
+    if int(mask.sum().item()) == 0:
+        return {
+            f"pred_central_{label}_auc": float("nan"),
+            f"pred_central_{label}_logloss": float("nan"),
+            f"pred_central_{label}_calibration": float("nan"),
+        }
+    central_scores = scores[mask]
+    central_targets = targets[mask]
+    return {
+        f"pred_central_{label}_auc": binary_auc(central_scores, central_targets),
+        f"pred_central_{label}_logloss": binary_logloss(
+            central_scores, central_targets
+        ),
+        f"pred_central_{label}_calibration": binary_ece(
+            central_scores, central_targets
+        ),
+    }
 
 
 def prediction_metrics(
@@ -336,40 +233,31 @@ def prediction_metrics(
     total_correct: int,
     total: int,
     *,
-    full: bool = True,
+    bucket_table: bool = False,
 ) -> dict[str, object]:
     """Prediction-quality metrics.
 
-    `full=False` computes only the core scalars plus the headline 0.475-0.525
-    central band - everything needed every epoch. `full=True` adds the
-    distribution quantiles, confidence buckets, the bucket table, and the
-    remaining central bands (the heavy-diagnostic cadence).
+    Always returns the core scalars + the headline 0.475-0.525 central band.
+    `mean_pred`, `blue_win_rate`, and `baseline_logloss` are kept available
+    for the final-test report; per-epoch logging deliberately excludes them.
+    `bucket_table=True` attaches `prediction_bucket_table` rows for the
+    heavy-cadence console log; the graduated band table is owned by the
+    caller (see `prediction_band_diagnostics`).
     """
-    mean_pred = scores.mean()
-    blue_win_rate = targets.mean()
     metrics: dict[str, object] = {
         "loss": total_loss / total,
         "accuracy": total_correct / total,
         "auc": binary_auc(scores, targets),
         "brier": torch.mean((scores - targets) ** 2).item(),
         "ece": binary_ece(scores, targets),
-        "mean_pred": mean_pred.item(),
-        "blue_win_rate": blue_win_rate.item(),
+        "mean_pred": scores.mean().item(),
+        "blue_win_rate": targets.mean().item(),
         "baseline_logloss": baseline_logloss(targets),
         "n": total,
     }
-    metrics.update(
-        _central_prediction_fields(scores, targets, (HEADLINE_CENTRAL_RANGE,))
-    )
-    if full:
-        metrics.update(_prediction_distribution_fields(scores))
-        metrics.update(_confidence_bucket_fields(scores, targets))
-        bucket_rows, bucket_fields = prediction_bucket_diagnostics(scores, targets)
-        metrics["prediction_bucket_table"] = bucket_rows
-        metrics.update(bucket_fields)
-        metrics.update(
-            _central_prediction_fields(scores, targets, _NON_HEADLINE_CENTRAL_RANGES)
-        )
+    metrics.update(_headline_central_fields(scores, targets))
+    if bucket_table:
+        metrics["prediction_bucket_table"] = prediction_bucket_rows(scores, targets)
     return metrics
 
 
@@ -402,26 +290,60 @@ def _format_prediction_bucket_table(rows: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-def _format_central_prediction_table(metrics: dict[str, object]) -> str:
-    lines = [
-        "range    count    pct_data   auc      logloss   brier    calibration   accuracy"
-    ]
-    for lower, upper in CENTRAL_PREDICTION_RANGES:
-        label = central_range_label(lower, upper)
-        pct_data = metrics.get(f"pred_central_{label}_pct_data")
-        pct_scalar = metric_scalar(pct_data)
-        pct_text = f"{float(pct_scalar):.1f}%" if pct_scalar is not None else "-"
-        count_scalar = metric_scalar(metrics.get(f"pred_central_{label}_count")) or 0
-        lines.append(
-            f"{lower:.3f}-{upper:.3f} "
-            f"{int(count_scalar):>8,}  "
-            f"{pct_text:>8}   "
-            f"{_format_metric_cell(metrics.get(f'pred_central_{label}_auc')):>6}   "
-            f"{_format_metric_cell(metrics.get(f'pred_central_{label}_logloss')):>7}   "
-            f"{_format_metric_cell(metrics.get(f'pred_central_{label}_brier')):>6}   "
-            f"{_format_metric_cell(metrics.get(f'pred_central_{label}_calibration')):>11}   "
-            f"{_format_metric_cell(metrics.get(f'pred_central_{label}_accuracy')):>8}"
-        )
+# Per-mille integer edges (then /1000) avoid float drift.
+# 0-30% and 70-100%: 5% slices; 30-40% and 60-70%: 1% slices; 40-60%: 0.1% slices.
+_BAND_EDGES: tuple[float, ...] = tuple(
+    x / 1000
+    for x in (
+        *range(50, 250, 50),    # 5-25 in 5% bins
+        *range(250, 400, 25),  # 25-40 in 2.5% bins
+        *range(400, 600, 5),   # 40-60 in 0.5% bins
+        *range(600, 750, 25),  # 60-75 in 2.5% bins
+        *range(750, 950, 50),  # 75-95 in 5% bins
+        1000,
+    )
+)
+
+
+def prediction_band_diagnostics(
+    scores: torch.Tensor,
+    targets: torch.Tensor,
+) -> list[dict[str, object]]:
+    """Graduated band table emitted on heavy epochs + final test."""
+    n_bins = len(_BAND_EDGES) - 1
+    rows: list[dict[str, object]] = []
+    for i, (lo, hi) in enumerate(zip(_BAND_EDGES, _BAND_EDGES[1:])):
+        mask = (scores >= lo) & (scores <= hi if i == n_bins - 1 else scores < hi)
+        count = int(mask.sum().item())
+        if count > 0:
+            bin_preds = scores[mask]
+            bin_targets = targets[mask]
+            accuracy_pct = 100.0 * float(
+                ((bin_preds > 0.5) == bin_targets).float().mean().item()
+            )
+        else:
+            accuracy_pct = float("nan")
+        rows.append({"band": f"{lo:.1%}-{hi:.1%}", "count": count, "accuracy_pct": accuracy_pct})
+    return rows
+
+
+def format_prediction_band_table(rows: list[dict[str, object]]) -> str:
+    section_headers = {
+        "0.0%-5.0%": "--- 5% bins (0-30%) ---",
+        "30.0%-31.0%": "--- 1% bins (30-40%) ---",
+        "40.0%-40.1%": "--- 0.1% bins (40-60%) ---",
+        "60.0%-61.0%": "--- 1% bins (60-70%) ---",
+        "70.0%-75.0%": "--- 5% bins (70-100%) ---",
+    }
+    lines: list[str] = ["band             count    accuracy"]
+    for row in rows:
+        band = str(row["band"])
+        if band in section_headers:
+            lines.append(section_headers[band])
+        count = int(row["count"])  # type: ignore[arg-type]
+        acc = row["accuracy_pct"]
+        acc_str = f"{float(acc):.1f}%" if isinstance(acc, float) and not (acc != acc) else "-"
+        lines.append(f"{band:<16} {count:>8,}  {acc_str:>8}")
     return "\n".join(lines)
 
 
@@ -437,8 +359,3 @@ def log_prediction_diagnostics(
             split_name,
             _format_prediction_bucket_table(rows),
         )
-    logger.info(
-        "%s central prediction metrics:\n%s",
-        split_name,
-        _format_central_prediction_table(metrics),
-    )

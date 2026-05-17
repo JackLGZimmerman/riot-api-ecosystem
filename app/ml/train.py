@@ -7,7 +7,6 @@ Run with:
 from __future__ import annotations
 
 import logging
-import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,10 +15,11 @@ from typing import Literal, cast, overload
 import torch
 from torch import nn
 
+from app.core.config.settings import PROJECT_ROOT
 from app.core.logging.logger import setup_logging_config
 from app.ml.config import DatasetConfig, ModelConfig, TrainConfig
 from app.ml.dataset import InMemoryBatchLoader, build_loaders
-from app.ml.model import HybridTokenModel
+from app.ml.model import N_TEAM_TOKENS, HybridTokenModel
 from app.ml.utils.attention_diagnostics import (
     AttentionMetricTracker,
     attention_summary_from_metrics,
@@ -29,10 +29,11 @@ from app.ml.utils.metrics import metric_scalar, prefixed_fields
 from app.ml.utils.prediction_diagnostics import (
     HEADLINE_CENTRAL_BAND,
     central_band_summary,
+    format_prediction_band_table,
     generalization_gaps,
     log_prediction_diagnostics,
+    prediction_band_diagnostics,
     prediction_metrics,
-    prediction_summary_from_metrics,
 )
 from app.ml.utils.training_runtime import (
     configure_torch_runtime,
@@ -51,6 +52,16 @@ MODEL_INPUT_KEYS = (
     "role_idx",
     "build_idx",
 )
+
+
+def _project_relative(path: Path | str | None) -> str | None:
+    if path is None:
+        return None
+    p = Path(path)
+    try:
+        return str(p.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(p)
 
 
 def _slice_batch(
@@ -134,12 +145,14 @@ def evaluate(
     amp_dtype: torch.dtype,
     device: torch.device,
     attention: AttentionEvalConfig | None = None,
-    full_diagnostics: bool = True,
+    bucket_table: bool = False,
+    compute_band_rows: bool = False,
 ) -> dict[str, object]:
     """Evaluate `model` over `loader` with hard 0/1 targets.
 
-    `full_diagnostics=False` keeps only the core + headline-central-band
-    prediction metrics; `attention` enables sampled attention diagnostics.
+    `bucket_table=True` attaches the console-only prediction bucket table;
+    `attention` enables sampled attention diagnostics; `compute_band_rows=True`
+    attaches the graduated band table under `prediction_band_rows`.
     """
     model.eval()
     attention = attention or AttentionEvalConfig()
@@ -195,10 +208,12 @@ def evaluate(
     scores = torch.cat(score_chunks)
     targets = torch.cat(target_chunks)
     metrics = prediction_metrics(
-        scores, targets, total_loss, total_correct, total, full=full_diagnostics
+        scores, targets, total_loss, total_correct, total, bucket_table=bucket_table
     )
     if attention_tracker is not None:
         metrics.update(attention_tracker.summary())
+    if compute_band_rows:
+        metrics["prediction_band_rows"] = prediction_band_diagnostics(scores, targets)
     return metrics
 
 
@@ -233,20 +248,13 @@ def _monitor_gap_fields(
     train_metrics: dict[str, object],
     held_out_metrics: dict[str, object],
 ) -> dict[str, object]:
-    """Held-in train metrics plus train-vs-held-out generalization gaps.
+    """Held-in train loss plus train-vs-held-out generalization gaps.
 
     Both inputs come from the eval path (hard 0/1 targets), so they are
-    directly comparable.
+    directly comparable. Only train_monitor_loss is logged; the rest of the
+    train-monitor metrics live inside the gap fields.
     """
-    fields: dict[str, object] = dict(
-        train_monitor_loss=train_metrics["loss"],
-        train_monitor_accuracy=train_metrics["accuracy"],
-        train_monitor_auc=train_metrics["auc"],
-        train_monitor_brier=train_metrics["brier"],
-        train_monitor_ece=train_metrics["ece"],
-        train_monitor_n=train_metrics["n"],
-    )
-    fields.update(prefixed_fields("train", central_band_summary(train_metrics)))
+    fields: dict[str, object] = {"train_monitor_loss": train_metrics["loss"]}
     fields.update(generalization_gaps(train_metrics, held_out_metrics))
     return fields
 
@@ -258,8 +266,6 @@ def _assemble_epoch_fields(
     lr: float,
     elapsed: float,
     train_loss: float,
-    train_mean_pred: float,
-    train_positive_rate: float,
     val_metrics: dict[str, object],
     train_monitor_metrics: dict[str, object] | None,
     train_attention_summary: dict[str, float],
@@ -268,9 +274,9 @@ def _assemble_epoch_fields(
     """Build the epoch_end metrics row.
 
     `train_loss` is the epoch mean of the optimization objective - measured
-    against smoothed targets (TrainConfig.target_min/target_max).
-    `val_*` and `train_monitor_*` come from the eval path with
-    hard 0/1 targets, so only those two are directly comparable to each other.
+    against smoothed targets (TrainConfig.target_min/target_max). `val_*` and
+    `train_monitor_loss` come from the eval path with hard 0/1 targets, so
+    only those are directly comparable to each other.
     """
     epoch_fields: dict[str, object] = dict(
         epoch=epoch,
@@ -282,36 +288,288 @@ def _assemble_epoch_fields(
         val_auc=val_metrics["auc"],
         val_brier=val_metrics["brier"],
         val_ece=val_metrics["ece"],
-        train_mean_pred=train_mean_pred,
-        val_mean_pred=val_metrics["mean_pred"],
-        train_positive_rate=train_positive_rate,
-        val_positive_rate=val_metrics["blue_win_rate"],
-        baseline_logloss=val_metrics["baseline_logloss"],
-        val_n=val_metrics["n"],
         epoch_s=elapsed,
     )
     epoch_fields.update(prefixed_fields("val", central_band_summary(val_metrics)))
     if train_monitor_metrics is not None:
         epoch_fields.update(_monitor_gap_fields(train_monitor_metrics, val_metrics))
 
-    # Heavy diagnostics - sampled attention + full prediction tables - only on
-    # the attention_diagnostics_interval cadence.
+    # Heavy diagnostics: sampled attention only. Prediction-distribution and
+    # bucket scalars are intentionally not emitted - the prediction_bands event
+    # is the canonical per-bucket record.
     if collect_heavy_diagnostics:
-        epoch_fields.update(
-            prefixed_fields("val", prediction_summary_from_metrics(val_metrics))
-        )
         epoch_fields.update(prefixed_fields("train", train_attention_summary))
         epoch_fields.update(
             prefixed_fields("val", attention_summary_from_metrics(val_metrics))
         )
-        if train_monitor_metrics is not None:
-            epoch_fields.update(
-                prefixed_fields(
-                    "train",
-                    prediction_summary_from_metrics(train_monitor_metrics),
-                )
-            )
     return epoch_fields
+
+
+def _record_run_start_metadata(
+    metrics: LiveMetrics,
+    train_cfg: TrainConfig,
+    device: torch.device,
+    use_amp: bool,
+) -> None:
+    """Capture the durable run configuration in a `run_start` event."""
+    metrics.record(
+        "run_start",
+        device=str(device),
+        amp=use_amp,
+        amp_dtype=train_cfg.amp_dtype,
+        batch_size=train_cfg.batch_size,
+        **cuda_runtime_info(device),
+        attention_diagnostics_interval=train_cfg.attention_diagnostics_interval,
+        attention_diagnostics_interval_unit="epochs",
+        attention_diagnostics_batch_size=train_cfg.attention_diagnostics_batch_size,
+        attention_diagnostics_eval_samples=train_cfg.attention_diagnostics_eval_samples,
+        prediction_bands_enabled=train_cfg.prediction_bands_enabled,
+        train_monitor_samples=train_cfg.train_monitor_samples,
+        target_min=train_cfg.target_min,
+        target_max=train_cfg.target_max,
+        optimizer="adamw",
+        lr=train_cfg.lr,
+        weight_decay=train_cfg.weight_decay,
+        adamw_betas=train_cfg.adamw_betas,
+        compile_mode=train_cfg.compile_mode,
+        grad_clip=train_cfg.grad_clip,
+        checkpoint_dir=train_cfg.checkpoint_dir,
+        metrics_dir=train_cfg.metrics_dir,
+        tensorboard_dir=metrics.tensorboard_path,
+        tensorboard_raw_mirror=train_cfg.tensorboard_raw_mirror,
+    )
+
+
+def _emit_prediction_bands(
+    metrics: LiveMetrics,
+    split: str,
+    rows: list[dict[str, object]],
+    *,
+    step: int,
+) -> None:
+    """Record the graduated band table as its own `prediction_bands` event."""
+    metrics.record("prediction_bands", split=split, step=step, rows=rows)
+    logger.info(
+        "%s graduated prediction bands:\n%s",
+        split,
+        format_prediction_band_table(rows),
+    )
+
+
+def _maybe_compute_grad_norm(
+    *,
+    model: nn.Module,
+    scaler: torch.amp.GradScaler,
+    optimizer: torch.optim.Optimizer,
+    grad_clip: float,
+    will_log: bool,
+    device: torch.device,
+) -> float | None:
+    """Compute (and optionally clip) the gradient norm.
+
+    Returns the norm when clipping is on or `will_log` is set; otherwise None
+    leaves the hot path untouched.
+    """
+    if grad_clip <= 0.0 and not will_log:
+        return None
+    max_norm = grad_clip if grad_clip > 0.0 else float("inf")
+    scaler.unscale_(optimizer)
+    return float(
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm,
+            foreach=device.type == "cuda",
+        ).item()
+    )
+
+
+def _log_epoch_summary(
+    *,
+    epoch: int,
+    elapsed: float,
+    epoch_fields: dict[str, object],
+    val_metrics: dict[str, object],
+    train_loss: float,
+) -> None:
+    """One-line console summary at the end of each epoch."""
+    val_central = central_band_summary(val_metrics)
+    val_attention_summary = attention_summary_from_metrics(val_metrics)
+    tr_mon_loss = epoch_fields.get("train_monitor_loss")
+    gen_loss_gap = epoch_fields.get("gen_loss_gap")
+    gen_acc_gap = epoch_fields.get("gen_accuracy_gap")
+    attn_entropy = val_attention_summary.get("attention_entropy_mean")
+    logger.info(
+        (
+            "epoch %d done in %.1fs | train_loss[smoothed] %.4e%s "
+            "val_loss[hard] %.4e%s | "
+            "val_acc %.4e val_auc %.4e val_brier %.4e val_ece %.4e%s"
+            "val_central%s auc %.4e logloss %.4e%s"
+        ),
+        epoch,
+        elapsed,
+        train_loss,
+        f" tr_mon_loss[hard] {tr_mon_loss:.4e}" if tr_mon_loss is not None else "",
+        val_metrics["loss"],
+        f" (gap {gen_loss_gap:.4e})" if gen_loss_gap is not None else "",
+        val_metrics["accuracy"],
+        val_metrics["auc"],
+        val_metrics["brier"],
+        val_metrics["ece"],
+        f" acc_gap {gen_acc_gap:.4e} | " if gen_acc_gap is not None else " | ",
+        HEADLINE_CENTRAL_BAND.replace("_", "-"),
+        val_central.get(f"central_{HEADLINE_CENTRAL_BAND}_auc", float("nan")),
+        val_central.get(f"central_{HEADLINE_CENTRAL_BAND}_logloss", float("nan")),
+        f" | attn_entropy {attn_entropy:.4e}" if attn_entropy is not None else "",
+    )
+
+
+def _swap_sides(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Swap blue (positions [0:5]) and red (positions [5:10]) along the player axis.
+
+    Side embedding is applied positionally via the model's _player_side buffer,
+    so reordering the input indices alone produces the correct semantic swap:
+    each player's identity travels with them but their assigned side flips.
+    """
+    out = dict(batch)
+    for key in MODEL_INPUT_KEYS:
+        x = batch[key]
+        out[key] = torch.cat(
+            [x[:, N_TEAM_TOKENS : N_TEAM_TOKENS * 2], x[:, :N_TEAM_TOKENS]],
+            dim=1,
+        )
+    return out
+
+
+@torch.inference_mode()
+def evaluate_symmetry(
+    model: nn.Module,
+    loader: InMemoryBatchLoader,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+    device: torch.device,
+) -> dict[str, float]:
+    """Blue/red swap symmetry on a held-out loader.
+
+    A perfectly side-symmetric model would have p_orig + p_swap = 1 for every
+    example. The reported |p_swap - (1 - p_orig)| stats quantify how much the
+    model's prediction depends on side-positional cues vs. player identity.
+    Real games carry a small side win-rate gap, so some non-zero delta is
+    expected; the magnitude is what matters across architecture ablations.
+    """
+    model.eval()
+    deltas: list[torch.Tensor] = []
+    for batch in loader:
+        with torch.amp.autocast(
+            device_type=device.type, dtype=amp_dtype, enabled=use_amp
+        ):
+            logits_orig = _forward_model(model, batch)
+            logits_swap = _forward_model(model, _swap_sides(batch))
+        p_orig = torch.sigmoid(logits_orig.float())
+        p_swap = torch.sigmoid(logits_swap.float())
+        deltas.append((p_swap - (1.0 - p_orig)).detach().abs().cpu())
+    delta = torch.cat(deltas)
+    return {
+        "symmetry_abs_delta_mean": float(delta.mean().item()),
+        "symmetry_abs_delta_p50": float(delta.median().item()),
+        "symmetry_abs_delta_p95": float(torch.quantile(delta, 0.95).item()),
+        "symmetry_abs_delta_max": float(delta.max().item()),
+        "n": int(delta.numel()),
+    }
+
+
+def _run_final_test(
+    *,
+    model: nn.Module,
+    forward_model: nn.Module,
+    test_loader: InMemoryBatchLoader,
+    train_monitor_loader: InMemoryBatchLoader | None,
+    best_path: Path,
+    train_cfg: TrainConfig,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+    device: torch.device,
+    metrics: LiveMetrics,
+    step: int,
+) -> None:
+    """Reload the best checkpoint, evaluate on test, record artefacts."""
+    state = torch.load(best_path, map_location=device, weights_only=False)
+    model.load_state_dict(state["model_state"])
+    test_metrics = evaluate(
+        forward_model,
+        test_loader,
+        use_amp,
+        amp_dtype,
+        device,
+        attention=AttentionEvalConfig(
+            batch_size=train_cfg.attention_diagnostics_batch_size,
+            samples=train_cfg.attention_diagnostics_eval_samples,
+            model=model,
+        ),
+        compute_band_rows=train_cfg.prediction_bands_enabled,
+    )
+    log_prediction_diagnostics(logger, "test", test_metrics)
+    band_rows = test_metrics.pop("prediction_band_rows", None)
+    if isinstance(band_rows, list):
+        _emit_prediction_bands(metrics, "test", band_rows, step=step)
+    test_attention_summary = attention_summary_from_metrics(test_metrics)
+    final_gap_fields: dict[str, object] = {}
+    if train_monitor_loader is not None:
+        final_train_metrics = evaluate(
+            forward_model,
+            train_monitor_loader,
+            use_amp,
+            amp_dtype,
+            device,
+        )
+        final_gap_fields = _monitor_gap_fields(final_train_metrics, test_metrics)
+    logger.info(
+        (
+            "test_loss %.4e test_auc %.4e test_accuracy %.4e "
+            "test_brier %.4e test_ece %.4e test_mean_pred %.4e "
+            "test_positive_rate %.4e test_baseline_logloss %.4e "
+            "n=%d test_attn_entropy %.4e"
+        ),
+        test_metrics["loss"],
+        test_metrics["auc"],
+        test_metrics["accuracy"],
+        test_metrics["brier"],
+        test_metrics["ece"],
+        test_metrics["mean_pred"],
+        test_metrics["blue_win_rate"],
+        test_metrics["baseline_logloss"],
+        test_metrics["n"],
+        test_attention_summary.get("attention_entropy_mean", float("nan")),
+    )
+    metrics.record(
+        "test",
+        step=step,
+        test_loss=test_metrics["loss"],
+        test_accuracy=test_metrics["accuracy"],
+        test_auc=test_metrics["auc"],
+        test_brier=test_metrics["brier"],
+        test_ece=test_metrics["ece"],
+        test_mean_pred=test_metrics["mean_pred"],
+        test_positive_rate=test_metrics["blue_win_rate"],
+        test_baseline_logloss=test_metrics["baseline_logloss"],
+        test_n=test_metrics["n"],
+        checkpoint=best_path,
+        **prefixed_fields("test", central_band_summary(test_metrics)),
+        **prefixed_fields("test", test_attention_summary),
+        **final_gap_fields,
+    )
+
+    symmetry = evaluate_symmetry(
+        forward_model, test_loader, use_amp, amp_dtype, device
+    )
+    logger.info(
+        "test symmetry: mean=%.4e p50=%.4e p95=%.4e max=%.4e n=%d",
+        symmetry["symmetry_abs_delta_mean"],
+        symmetry["symmetry_abs_delta_p50"],
+        symmetry["symmetry_abs_delta_p95"],
+        symmetry["symmetry_abs_delta_max"],
+        symmetry["n"],
+    )
+    metrics.record("test_symmetry", step=step, **symmetry)
 
 
 def train(
@@ -328,18 +586,11 @@ def train(
     use_amp = train_cfg.use_amp and device.type == "cuda"
     amp_dtype = resolve_amp_dtype(train_cfg.amp_dtype)
     configure_torch_runtime(device)
-    effective_batch_size = train_cfg.batch_size * train_cfg.gradient_accumulation_steps
     logger.info(
         "Using device: %s | amp=%s | amp_dtype=%s",
         device,
         use_amp,
         train_cfg.amp_dtype,
-    )
-    logger.info(
-        "Batching: micro_batch=%d accumulation=%d effective_batch=%d",
-        train_cfg.batch_size,
-        train_cfg.gradient_accumulation_steps,
-        effective_batch_size,
     )
     metrics = LiveMetrics(
         train_cfg.metrics_dir,
@@ -347,37 +598,14 @@ def train(
         train_cfg.latest_metrics_file,
         train_cfg.tensorboard_dir,
         train_cfg.tensorboard_raw_mirror,
+        tensorboard_run_name=train_cfg.tensorboard_run_name,
     )
-    logger.info("Live metrics: %s", metrics.path)
+    logger.info("Live metrics: %s", _project_relative(metrics.path))
     if metrics.tensorboard_path is not None:
-        logger.info("TensorBoard metrics: %s", metrics.tensorboard_path)
-    metrics.record(
-        "run_start",
-        device=str(device),
-        amp=use_amp,
-        amp_dtype=train_cfg.amp_dtype,
-        batch_size=train_cfg.batch_size,
-        gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
-        effective_batch_size=effective_batch_size,
-        **cuda_runtime_info(device),
-        attention_diagnostics_interval=train_cfg.attention_diagnostics_interval,
-        attention_diagnostics_interval_unit="epochs",
-        attention_diagnostics_batch_size=train_cfg.attention_diagnostics_batch_size,
-        attention_diagnostics_eval_samples=train_cfg.attention_diagnostics_eval_samples,
-        train_monitor_samples=train_cfg.train_monitor_samples,
-        target_min=train_cfg.target_min,
-        target_max=train_cfg.target_max,
-        optimizer="adamw",
-        lr=train_cfg.lr,
-        weight_decay=train_cfg.weight_decay,
-        adamw_betas=train_cfg.adamw_betas,
-        compile_mode=train_cfg.compile_mode,
-        grad_clip=train_cfg.grad_clip,
-        checkpoint_dir=train_cfg.checkpoint_dir,
-        metrics_dir=train_cfg.metrics_dir,
-        tensorboard_dir=metrics.tensorboard_path,
-        tensorboard_raw_mirror=train_cfg.tensorboard_raw_mirror,
-    )
+        logger.info(
+            "TensorBoard metrics: %s", _project_relative(metrics.tensorboard_path)
+        )
+    _record_run_start_metadata(metrics, train_cfg, device, use_amp)
 
     (
         train_loader,
@@ -402,9 +630,7 @@ def train(
         train_monitor_games,
         vocab,
     )
-    optimizer_steps_per_epoch = math.ceil(
-        len(train_loader) / train_cfg.gradient_accumulation_steps
-    )
+    optimizer_steps_per_epoch = len(train_loader)
     metrics.record(
         "data_ready",
         train_games=len(train_loader.dataset),
@@ -484,8 +710,6 @@ def train(
                 forward_model.train()
             epoch_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
             epoch_n = 0
-            epoch_pred_sum = torch.zeros((), device=device, dtype=torch.float64)
-            epoch_target_sum = torch.zeros((), device=device, dtype=torch.float64)
             interval_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
             interval_n = 0
             interval_t0 = time.perf_counter()
@@ -502,25 +726,10 @@ def train(
             )
             train_attention_recorded = False
 
-            train_batches = len(train_loader)
-            train_iter = train_loader.iter_batches()
-            for micro_step, batch in enumerate(train_iter, start=1):
-                accumulation_boundary = (
-                    micro_step % train_cfg.gradient_accumulation_steps == 0
-                    or micro_step == train_batches
-                )
-                accumulation_group_start = (
-                    (micro_step - 1) // train_cfg.gradient_accumulation_steps
-                ) * train_cfg.gradient_accumulation_steps + 1
-                accumulation_group_size = min(
-                    train_cfg.gradient_accumulation_steps,
-                    train_batches - accumulation_group_start + 1,
-                )
-                next_step = step + 1
+            for batch in train_loader.iter_batches():
+                step += 1
                 collect_attention = (
-                    collect_heavy_diagnostics
-                    and not train_attention_recorded
-                    and accumulation_boundary
+                    collect_heavy_diagnostics and not train_attention_recorded
                 )
 
                 with torch.amp.autocast(
@@ -536,8 +745,7 @@ def train(
                     )
                     loss = loss_fn(logits, target)
 
-                scaled_loss = loss / accumulation_group_size
-                scaler.scale(scaled_loss).backward()
+                scaler.scale(loss).backward()
 
                 batch_n = batch["blue_win"].numel()
                 batch_loss = loss.detach().float()
@@ -545,41 +753,20 @@ def train(
                 epoch_n += batch_n
                 interval_loss_sum += batch_loss.double() * batch_n
                 interval_n += batch_n
-                with torch.no_grad():
-                    epoch_pred_sum += torch.sigmoid(logits.detach().float()).sum()
-                    epoch_target_sum += batch["blue_win"].detach().sum()
 
-                if not accumulation_boundary:
-                    continue
-
-                will_log = next_step % train_cfg.log_interval == 0
-                grad_norm: float | None = None
-                if train_cfg.grad_clip > 0.0:
-                    scaler.unscale_(optimizer)
-                    grad_norm = float(
-                        torch.nn.utils.clip_grad_norm_(
-                            model.parameters(),
-                            train_cfg.grad_clip,
-                            foreach=device.type == "cuda",
-                        ).item()
-                    )
-                elif will_log:
-                    # Total gradient norm without clipping: max_norm=inf measures
-                    # the norm and scales grads by 1.0. Only on logged steps, so
-                    # the hot path is untouched.
-                    scaler.unscale_(optimizer)
-                    grad_norm = float(
-                        torch.nn.utils.clip_grad_norm_(
-                            model.parameters(),
-                            float("inf"),
-                            foreach=device.type == "cuda",
-                        ).item()
-                    )
+                will_log = step % train_cfg.log_interval == 0
+                grad_norm = _maybe_compute_grad_norm(
+                    model=model,
+                    scaler=scaler,
+                    optimizer=optimizer,
+                    grad_clip=train_cfg.grad_clip,
+                    will_log=will_log,
+                    device=device,
+                )
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
-                step = next_step
 
                 # Diagnostics run after the optimizer step on a bounded slice,
                 # keeping the normal SDPA training path clear on most steps. The
@@ -608,14 +795,14 @@ def train(
                     interval_elapsed = time.perf_counter() - interval_t0
                     interval_avg_loss = float((interval_loss_sum / interval_n).item())
                     batch_loss_value = float(batch_loss.item())
-                    samples_per_s = interval_n / max(1e-9, interval_elapsed)
+                    samples_per_s = int(round(interval_n / max(1e-9, interval_elapsed)))
                     lr = float(scheduler.get_last_lr()[0])
                     grad_norm_value = (
                         grad_norm if grad_norm is not None else float("nan")
                     )
                     logger.info(
                         "epoch %d step %d train_loss %.4e batch_loss %.4e "
-                        "lr %.2e grad_norm %.3e samples/s %.1f",
+                        "lr %.2e grad_norm %.3e samples/s %d",
                         epoch,
                         step,
                         interval_avg_loss,
@@ -657,7 +844,7 @@ def train(
                     ),
                     model=model,
                 ),
-                full_diagnostics=collect_heavy_diagnostics,
+                bucket_table=collect_heavy_diagnostics,
             )
             # Held-in train subset through the eval path: directly comparable
             # to validation for the overfitting read. Kept light - no attention.
@@ -669,7 +856,6 @@ def train(
                     use_amp,
                     amp_dtype,
                     device,
-                    full_diagnostics=collect_heavy_diagnostics,
                 )
             if collect_heavy_diagnostics:
                 log_prediction_diagnostics(logger, "validation", val_metrics)
@@ -677,10 +863,6 @@ def train(
             # Epoch mean of the smoothed-target optimization objective; not
             # comparable to the hard-target eval losses.
             train_loss = float((epoch_loss_sum / epoch_n).item())
-            train_mean_pred = float((epoch_pred_sum / max(epoch_n, 1)).cpu().item())
-            train_positive_rate = float(
-                (epoch_target_sum / max(epoch_n, 1)).cpu().item()
-            )
             lr_value = float(scheduler.get_last_lr()[0])
 
             train_attention_summary = train_attention_tracker.summary()
@@ -690,45 +872,18 @@ def train(
                 lr=lr_value,
                 elapsed=elapsed,
                 train_loss=train_loss,
-                train_mean_pred=train_mean_pred,
-                train_positive_rate=train_positive_rate,
                 val_metrics=val_metrics,
                 train_monitor_metrics=train_monitor_metrics,
                 train_attention_summary=train_attention_summary,
                 collect_heavy_diagnostics=collect_heavy_diagnostics,
             )
 
-            val_central = central_band_summary(val_metrics)
-            val_attention_summary = attention_summary_from_metrics(val_metrics)
-            # train_loss is the smoothed-target optimization loss; tr_mon_loss
-            # and val_loss are eval-path losses on hard 0/1 targets (only those
-            # two are directly comparable - see _assemble_epoch_fields).
-            logger.info(
-                (
-                    "epoch %d done in %.1fs | train_loss[smoothed] %.4e "
-                    "tr_mon_loss[hard] %.4e val_loss[hard] %.4e (gap %.4e) | "
-                    "val_acc %.4e val_auc %.4e val_brier %.4e val_ece %.4e "
-                    "acc_gap %.4e | val_central%s auc %.4e logloss %.4e | "
-                    "val_attn_entropy %.4e"
-                ),
-                epoch,
-                elapsed,
-                train_loss,
-                epoch_fields.get("train_monitor_loss", float("nan")),
-                val_metrics["loss"],
-                epoch_fields.get("gen_loss_gap", float("nan")),
-                val_metrics["accuracy"],
-                val_metrics["auc"],
-                val_metrics["brier"],
-                val_metrics["ece"],
-                epoch_fields.get("gen_accuracy_gap", float("nan")),
-                HEADLINE_CENTRAL_BAND.replace("_", "-"),
-                val_central.get(f"central_{HEADLINE_CENTRAL_BAND}_auc", float("nan")),
-                val_central.get(
-                    f"central_{HEADLINE_CENTRAL_BAND}_logloss",
-                    float("nan"),
-                ),
-                val_attention_summary.get("attention_entropy_mean", float("nan")),
+            _log_epoch_summary(
+                epoch=epoch,
+                elapsed=elapsed,
+                epoch_fields=epoch_fields,
+                val_metrics=val_metrics,
+                train_loss=train_loss,
             )
             metrics.record("epoch_end", **epoch_fields)
 
@@ -753,7 +908,9 @@ def train(
                     best_path,
                 )
                 logger.info(
-                    "Saved checkpoint: %s (val_loss=%.4e)", best_path, best_val_loss
+                    "Saved checkpoint: %s (val_loss=%.4e)",
+                    _project_relative(best_path),
+                    best_val_loss,
                 )
                 metrics.record(
                     "checkpoint",
@@ -763,70 +920,18 @@ def train(
                     val_loss=best_val_loss,
                 )
 
-        state = torch.load(best_path, map_location=device, weights_only=False)
-        model.load_state_dict(state["model_state"])
-        test_metrics = evaluate(
-            forward_model,
-            test_loader,
-            use_amp,
-            amp_dtype,
-            device,
-            attention=AttentionEvalConfig(
-                batch_size=train_cfg.attention_diagnostics_batch_size,
-                samples=train_cfg.attention_diagnostics_eval_samples,
-                model=model,
-            ),
-        )
-        log_prediction_diagnostics(logger, "test", test_metrics)
-        test_attention_summary = attention_summary_from_metrics(test_metrics)
-        test_prediction_summary = prediction_summary_from_metrics(test_metrics)
-        # Final train/test gap from the best checkpoint: the end-of-run
-        # overfitting summary.
-        final_gap_fields: dict[str, object] = {}
-        if train_monitor_loader is not None:
-            final_train_metrics = evaluate(
-                forward_model,
-                train_monitor_loader,
-                use_amp,
-                amp_dtype,
-                device,
-            )
-            final_gap_fields = _monitor_gap_fields(final_train_metrics, test_metrics)
-        logger.info(
-            (
-                "test_loss %.4e test_auc %.4e test_accuracy %.4e "
-                "test_brier %.4e test_ece %.4e test_mean_pred %.4e "
-                "test_positive_rate %.4e test_baseline_logloss %.4e "
-                "n=%d test_attn_entropy %.4e"
-            ),
-            test_metrics["loss"],
-            test_metrics["auc"],
-            test_metrics["accuracy"],
-            test_metrics["brier"],
-            test_metrics["ece"],
-            test_metrics["mean_pred"],
-            test_metrics["blue_win_rate"],
-            test_metrics["baseline_logloss"],
-            test_metrics["n"],
-            test_attention_summary.get("attention_entropy_mean", float("nan")),
-        )
-        metrics.record(
-            "test",
+        _run_final_test(
+            model=model,
+            forward_model=forward_model,
+            test_loader=test_loader,
+            train_monitor_loader=train_monitor_loader,
+            best_path=best_path,
+            train_cfg=train_cfg,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+            device=device,
+            metrics=metrics,
             step=step,
-            test_loss=test_metrics["loss"],
-            test_accuracy=test_metrics["accuracy"],
-            test_auc=test_metrics["auc"],
-            test_brier=test_metrics["brier"],
-            test_ece=test_metrics["ece"],
-            test_mean_pred=test_metrics["mean_pred"],
-            test_positive_rate=test_metrics["blue_win_rate"],
-            test_baseline_logloss=test_metrics["baseline_logloss"],
-            test_n=test_metrics["n"],
-            checkpoint=best_path,
-            **prefixed_fields("test", central_band_summary(test_metrics)),
-            **prefixed_fields("test", test_prediction_summary),
-            **prefixed_fields("test", test_attention_summary),
-            **final_gap_fields,
         )
     finally:
         metrics.close()

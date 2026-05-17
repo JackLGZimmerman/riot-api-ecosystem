@@ -21,58 +21,34 @@ TENSORBOARD_SCALAR_TAGS: dict[tuple[str, str], str] = {
     ("train_step", "grad_norm"): "optimization/grad_norm",
     ("train_step", "samples_per_s"): "throughput/samples_per_s",
     # Core loss curves. `loss/train_objective` is the epoch-mean optimization
-    # objective (smoothed targets + any sample weights); `loss/train_heldin`
-    # and `loss/val` are eval-path hard-label losses, so only those two are
-    # directly comparable. `baseline_logloss` is a per-run constant and stays
-    # in the JSONL only - a flat TensorBoard curve adds nothing.
+    # objective (smoothed targets); `loss/train_heldin` and `loss/val` are
+    # eval-path hard-label losses, so only those two are directly comparable.
     ("epoch_end", "train_loss"): "loss/train_objective",
     ("epoch_end", "train_monitor_loss"): "loss/train_heldin",
     ("epoch_end", "val_loss"): "loss/val",
-    # Quality: train vs val, the headline overfitting read.
-    ("epoch_end", "train_monitor_accuracy"): "quality/train_accuracy",
+    # Quality: validation alone. Train-side accuracy/auc live inside gen_*_gap.
     ("epoch_end", "val_accuracy"): "quality/val_accuracy",
-    ("epoch_end", "train_monitor_auc"): "quality/train_auc",
     ("epoch_end", "val_auc"): "quality/val_auc",
-    # Central 0.475-0.525 prediction band: the critical decision region. The
-    # `central_475_525/` prefix names the band explicitly; `val_data_pct` is the
-    # share of validation predictions that land inside the band.
-    ("epoch_end", "train_central_475_525_auc"): "central_475_525/train_auc",
+    # Central 0.475-0.525 prediction band: the critical decision region.
     ("epoch_end", "val_central_475_525_auc"): "central_475_525/val_auc",
-    ("epoch_end", "train_central_475_525_logloss"): "central_475_525/train_logloss",
     ("epoch_end", "val_central_475_525_logloss"): "central_475_525/val_logloss",
-    ("epoch_end", "train_central_475_525_accuracy"): "central_475_525/train_accuracy",
-    ("epoch_end", "val_central_475_525_accuracy"): "central_475_525/val_accuracy",
-    ("epoch_end", "val_central_475_525_pct_data"): "central_475_525/val_data_pct",
+    ("epoch_end", "val_central_475_525_calibration"): (
+        "central_475_525/val_calibration"
+    ),
     # Generalization gaps: positive == train beats held-out (overfitting).
     ("epoch_end", "gen_loss_gap"): "generalization/loss_gap",
     ("epoch_end", "gen_accuracy_gap"): "generalization/accuracy_gap",
     ("epoch_end", "gen_auc_gap"): "generalization/auc_gap",
-    ("epoch_end", "gen_brier_gap"): "generalization/brier_gap",
-    ("epoch_end", "gen_central_475_525_logloss_gap"): (
-        "generalization/central_475_525_logloss_gap"
-    ),
     ("epoch_end", "gen_central_475_525_auc_gap"): (
         "generalization/central_475_525_auc_gap"
     ),
     # Calibration.
-    ("epoch_end", "train_monitor_brier"): "calibration/train_brier",
     ("epoch_end", "val_brier"): "calibration/val_brier",
-    ("epoch_end", "train_monitor_ece"): "calibration/train_ece",
     ("epoch_end", "val_ece"): "calibration/val_ece",
-    # Prediction distribution health. The split label base rates
-    # (train/val positive_rate) are per-run constants and stay in the JSONL
-    # only - a flat TensorBoard curve adds nothing.
-    ("epoch_end", "train_mean_pred"): "predictions/train_mean_pred",
-    ("epoch_end", "val_mean_pred"): "predictions/val_mean_pred",
-    # Attention: the curated subset that drives architecture decisions.
+    # Attention (heavy cadence): collapse, head degeneration, wasted capacity,
+    # right-token-family mass, epoch-over-epoch drift.
     ("epoch_end", "train_attention_entropy_mean"): "attention/train_entropy",
     ("epoch_end", "val_attention_entropy_mean"): "attention/val_entropy",
-    ("epoch_end", "train_attention_effective_tokens_mean"): (
-        "attention/train_effective_tokens"
-    ),
-    ("epoch_end", "val_attention_effective_tokens_mean"): (
-        "attention/val_effective_tokens"
-    ),
     ("epoch_end", "train_attention_head_diversity_mean"): (
         "attention/train_head_diversity"
     ),
@@ -87,14 +63,7 @@ TENSORBOARD_SCALAR_TAGS: dict[tuple[str, str], str] = {
     ),
     ("epoch_end", "train_attention_player_mass"): "attention/train_player_mass",
     ("epoch_end", "val_attention_player_mass"): "attention/val_player_mass",
-    ("epoch_end", "train_attention_layer_entropy_mean_range"): (
-        "attention/train_layer_entropy_range"
-    ),
-    ("epoch_end", "val_attention_layer_entropy_mean_range"): (
-        "attention/val_layer_entropy_range"
-    ),
-    ("epoch_end", "train_attention_drift_l2"): "attention/train_drift_l2",
-    ("epoch_end", "val_attention_drift_l2"): "attention/val_drift_l2",
+    ("epoch_end", "train_attention_drift_cosine"): "attention/train_drift_cosine",
     # Best checkpoint + final test.
     ("checkpoint", "val_loss"): "best/val_loss",
     ("test", "test_loss"): "loss/test",
@@ -104,8 +73,14 @@ TENSORBOARD_SCALAR_TAGS: dict[tuple[str, str], str] = {
     ("test", "test_ece"): "calibration/test_ece",
     ("test", "test_central_475_525_auc"): "central_475_525/test_auc",
     ("test", "test_central_475_525_logloss"): "central_475_525/test_logloss",
-    ("test", "test_mean_pred"): "predictions/test_mean_pred",
-    ("test", "test_positive_rate"): "predictions/test_positive_rate",
+    ("test", "test_central_475_525_calibration"): (
+        "central_475_525/test_calibration"
+    ),
+    # Final blue/red swap symmetry on the test split (lower = more symmetric).
+    ("test_symmetry", "symmetry_abs_delta_mean"): "symmetry/test_mean",
+    ("test_symmetry", "symmetry_abs_delta_p50"): "symmetry/test_p50",
+    ("test_symmetry", "symmetry_abs_delta_p95"): "symmetry/test_p95",
+    ("test_symmetry", "symmetry_abs_delta_max"): "symmetry/test_max",
 }
 
 
@@ -116,6 +91,7 @@ class TensorBoardMetricWriter:
         metrics_file: str,
         tensorboard_dir: str | None,
         raw_mirror: bool = False,
+        run_name: str | None = None,
     ) -> None:
         self.path: Path | None = None
         self._writer = None
@@ -132,8 +108,12 @@ class TensorBoardMetricWriter:
             )
             return
 
-        run_name = f"{Path(metrics_file).stem}_{time.strftime('%Y%m%d_%H%M%S')}"
-        self.path = metrics_dir / tensorboard_dir / run_name
+        resolved_run_name = run_name or (
+            f"{Path(metrics_file).stem}_{time.strftime('%Y%m%d_%H%M%S')}"
+        )
+        # `metrics_dir / tensorboard_dir` collapses to `tensorboard_dir` when
+        # the latter is absolute, so sweeps can pin a shared TB root.
+        self.path = metrics_dir / tensorboard_dir / resolved_run_name
         self._writer = SummaryWriter(log_dir=str(self.path))
 
     def record(

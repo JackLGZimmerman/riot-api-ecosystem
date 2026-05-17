@@ -15,8 +15,15 @@ from app.ml.utils.attention_diagnostics import (
     summarise_attention_layers,
 )
 
-# Fixed 10 player tokens (5 blue + 5 red) following the leading [CLS] token.
+# Fixed 10 player tokens (5 blue + 5 red).
 N_PLAYER_TOKENS = 10
+N_TEAM_TOKENS = 5
+# Pooling splits the encoder's player tokens by side, pools each team
+# independently into (blue_repr, red_repr), and builds the 5-way comparison
+# (b, r, b-r, |b-r|, b*r) used as the head input. Blue/red swap symmetry is
+# enforced at the head via antisymmetrization:
+#   logit = head(b, r, b-r, |b-r|, b*r) - head(r, b, r-b, |b-r|, b*r)
+# so logit(b, r) = -logit(r, b) exactly, by construction.
 
 
 class _DiagnosticEncoderLayer(nn.Module):
@@ -183,7 +190,7 @@ class _DiagnosticEncoder(nn.Module):
 
 
 class HybridTokenModel(nn.Module):
-    """Champion set transformer over [CLS] + 10 player tokens.
+    """Champion set transformer over 10 player tokens.
 
     Each player token is the compositional sum of champion + role + build + side
     embeddings. The model is PyTorch-native so current CUDA wheels can select
@@ -202,9 +209,6 @@ class HybridTokenModel(nn.Module):
         self.role_emb = nn.Embedding(vocab.n_roles, d)
         self.build_emb = nn.Embedding(vocab.n_builds, d)
         self.side_emb = nn.Embedding(N_SIDES, d)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d))
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-
         self.register_buffer(
             "_player_side",
             torch.tensor([[SIDE_BLUE] * 5 + [SIDE_RED] * 5], dtype=torch.long),
@@ -228,17 +232,12 @@ class HybridTokenModel(nn.Module):
         )
 
         self.pooling = cfg.pooling
-        self.attention_pool = (
+        self.team_attention_pool = (
             nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 1, bias=False))
-            if cfg.pooling == "attention"
+            if cfg.pooling == "team_attention"
             else None
         )
-        self.pool_gate = (
-            nn.Sequential(nn.LayerNorm(d * 2), nn.Linear(d * 2, d), nn.Sigmoid())
-            if cfg.pooling == "gated"
-            else None
-        )
-        head_input_dim = d * 2 if cfg.pooling == "concat_cls_mean" else d
+        head_input_dim = d * 5
         self.head = nn.Sequential(
             nn.LayerNorm(head_input_dim),
             nn.Linear(head_input_dim, cfg.head_hidden),
@@ -262,25 +261,36 @@ class HybridTokenModel(nn.Module):
             + self.side_emb(side_idx)
         )
 
-    def _pool_encoded(self, encoded: torch.Tensor) -> torch.Tensor:
-        cls = encoded[:, 0]
-        tokens = encoded[:, 1:]
-        mean = tokens.mean(dim=1)
-        if self.pooling == "cls":
-            return cls
-        if self.pooling == "mean":
-            return mean
-        if self.pooling == "concat_cls_mean":
-            return torch.cat([cls, mean], dim=-1)
-        if self.pooling == "attention":
-            attention_pool = cast(nn.Sequential, self.attention_pool)
-            weights = attention_pool(tokens).squeeze(-1).softmax(dim=-1)
-            return torch.sum(tokens * weights.unsqueeze(-1), dim=1)
-        if self.pooling == "gated":
-            pool_gate = cast(nn.Sequential, self.pool_gate)
-            gate = pool_gate(torch.cat([cls, mean], dim=-1))
-            return gate * cls + (1.0 - gate) * mean
-        return cls
+    def _team_pool(
+        self, tokens: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pool 10 player tokens into separate blue/red team representations.
+
+        `tokens` is [B, 10, d] with positions [0:5] carrying blue side and
+        [5:10] carrying red (set by the fixed _player_side buffer during
+        embedding). Returns (blue_repr, red_repr), both [B, d].
+        """
+        blue_tokens = tokens[:, :N_TEAM_TOKENS]
+        red_tokens = tokens[:, N_TEAM_TOKENS:]
+        if self.pooling == "team_attention":
+            team_pool = cast(nn.Sequential, self.team_attention_pool)
+            blue_weights = team_pool(blue_tokens).squeeze(-1).softmax(dim=-1)
+            red_weights = team_pool(red_tokens).squeeze(-1).softmax(dim=-1)
+            blue_repr = torch.sum(blue_tokens * blue_weights.unsqueeze(-1), dim=1)
+            red_repr = torch.sum(red_tokens * red_weights.unsqueeze(-1), dim=1)
+        else:
+            blue_repr = blue_tokens.mean(dim=1)
+            red_repr = red_tokens.mean(dim=1)
+        return blue_repr, red_repr
+
+    @staticmethod
+    def _match_features(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
+        """5-way comparison concat (first, second, first-second, |first-second|, first*second)."""
+        diff = first - second
+        return torch.cat(
+            [first, second, diff, diff.abs(), first * second],
+            dim=-1,
+        )
 
     def forward(
         self,
@@ -291,11 +301,7 @@ class HybridTokenModel(nn.Module):
         attention_diagnostics_sample_size: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, object]]:
         player = self._player_tokens(champion_idx, role_idx, build_idx)
-        b = player.shape[0]
-
-        cls = self.cls_token.expand(b, -1, -1)
-        x = torch.cat([cls, player], dim=1)
-        x = self.input_dropout(self.input_norm(x))
+        x = self.input_dropout(self.input_norm(player))
         encoded = self.encoder(
             x,
             collect_attention_diagnostics=return_attention_diagnostics,
@@ -307,7 +313,10 @@ class HybridTokenModel(nn.Module):
         else:
             z = encoded
             attention_diagnostics = {}
-        logits = self.head(self._pool_encoded(z)).squeeze(-1)
+        blue_repr, red_repr = self._team_pool(z)
+        score_bvr = self.head(self._match_features(blue_repr, red_repr)).squeeze(-1)
+        score_rvb = self.head(self._match_features(red_repr, blue_repr)).squeeze(-1)
+        logits = score_bvr - score_rvb
         if return_attention_diagnostics:
             return logits, attention_diagnostics
         return logits

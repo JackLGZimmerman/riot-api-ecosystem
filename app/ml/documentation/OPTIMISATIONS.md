@@ -3,6 +3,28 @@
 Maintenance: update this file with decision-grade experiment evidence only: protocol, compact table, conclusion, and the recommended setting. Keep reusable testing procedure in `TESTING.md` and current defaults in `README.md`.
 
 
+<!-- pooling-multi-seed-20260517:start -->
+## Pooling × Seed Sweep, 2026-05-17
+
+Status: `completed`. Run directory: `app/ml/data/checkpoints/pooling_sweep_20260517_141947`.
+
+Protocol: live defaults, only `ModelConfig.pooling` and `TrainConfig.seed` vary. Each trial in an isolated subprocess. Seeds `[42, 123, 777]`. Test metrics from best-val-loss checkpoint. Symmetry from `evaluate_symmetry` on test (`n=167,822`/trial), measuring `|p_swap − (1 − p_orig)|`.
+
+Modes compared: `team_mean` / `team_attention` (5-way concat `(b, r, b-r, |b-r|, b*r)`, `head_input=5d`), `team_mean_symmetric` (3-way concat `(b-r, |b-r|, b*r)`, `head_input=3d`; drops the asymmetric `(b, r)` prefix so the head can only read swap-antisymmetric `b-r` plus the two swap-symmetric magnitudes).
+
+### Mean ± std across seeds
+
+| pooling | test_loss | test_auc | test_brier | test_ece | sym_mean | sym_p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| team_mean | **0.675578 ± 0.000043** | **0.600971 ± 0.000306** | **0.241397 ± 0.000020** | 0.017061 ± 0.001209 | 1.5189e-01 ± 2.2e-03 | 3.8638e-01 ± 5.1e-03 |
+| team_attention | 0.675718 ± 0.000047 | 0.600825 ± 0.000227 | 0.241464 ± 0.000021 | 0.018757 ± 0.001260 | 1.5126e-01 ± 3.4e-03 | 3.8637e-01 ± 8.2e-03 |
+| team_mean_symmetric (default) | 0.675641 ± 0.000175 | 0.600418 ± 0.000718 | 0.241430 ± 0.000087 | **0.016419 ± 0.001016** | **1.4583e-01 ± 4.0e-03** | **3.7468e-01 ± 9.2e-03** |
+
+### Recommendation
+
+`team_mean_symmetric`: best symmetry and best calibration (ECE) among the team modes; scoring metrics within ≤1.5e-3 of the `team_mean` leader. The architectural prior (head reads only swap-antisymmetric + swap-symmetric components) is the deciding factor on a near-tie. `team_attention` is dominated on every axis. Pick `team_mean` if a future change targets held-out scoring without the symmetry constraint.
+<!-- pooling-multi-seed-20260517:end -->
+
 ## Optimizer Default
 
 The 2026-05-13 optimizer evidence tuned Lion against itself but did not include a matched AdamW control. With no decision-grade evidence that Lion improves held-out metrics, and with PyTorch AdamW offering a fused CUDA implementation without a third-party package, the active default is AdamW:
@@ -32,7 +54,7 @@ Memory gate: parent runner requires at least `8.0 GiB` available system memory a
 Learning rates:
 
 ```text
-5.00e-5, 4.00e-5, 3.20e-5, 2.50e-5, 2.00e-5, 1.60e-5, 1.25e-5, 1.00e-5, 8.00e-6, 6.40e-6, 5.00e-6, 4.00e-6, 3.20e-6, 2.50e-6, 2.00e-6, 1.60e-6, 1.25e-6, 1.00e-6, 8.00e-7, 6.40e-7, 5.00e-7, 4.00e-7, 3.20e-7, 2.50e-7
+5.00e-5, 4.00e-5, 3.20e-5, 2.50e-5, 2.00e-5, 1.60e-5, 1.25e-5, 1.00e-5, 8.00e-6, 6.40e-6, 5.00e-6, 4.00e-6, 3.20e-6, 2.50e-6
 ```
 
 | lr | status | epochs | best epoch | val loss | val AUC | test loss | test AUC | test acc | median samples/s |
@@ -51,16 +73,6 @@ Learning rates:
 | 4.00e-6 | completed | 150 | 129 | 0.681530 | 0.586946 | 0.681067 | 0.588153 | 0.566076 | 184,182 |
 | 3.20e-6 | completed | 150 | 129 | 0.682241 | 0.584655 | 0.681770 | 0.585736 | 0.564890 | 184,180 |
 | 2.50e-6 | completed | 150 | 129 | 0.683103 | 0.581748 | 0.682647 | 0.582573 | 0.563329 | 184,180 |
-| 2.00e-6 | completed | 150 | 138 | 0.684011 | 0.578590 | 0.683607 | 0.579087 | 0.560892 | 184,182 |
-| 1.60e-6 | completed | 150 | 146 | 0.685149 | 0.574262 | 0.684835 | 0.574008 | 0.556649 | 184,129 |
-| 1.25e-6 | completed | 150 | 144 | 0.686653 | 0.567497 | 0.686466 | 0.565888 | 0.551251 | 184,178 |
-| 1.00e-6 | completed | 150 | 145 | 0.688067 | 0.560058 | 0.687943 | 0.557525 | 0.546269 | 184,140 |
-| 8.00e-7 | completed | 150 | 144 | 0.689243 | 0.553323 | 0.689117 | 0.550560 | 0.542289 | 184,198 |
-| 6.40e-7 | completed | 150 | 145 | 0.690194 | 0.547817 | 0.690040 | 0.545209 | 0.539304 | 184,174 |
-| 5.00e-7 | completed | 150 | 144 | 0.691080 | 0.542175 | 0.690885 | 0.540128 | 0.536598 | 184,185 |
-| 4.00e-7 | completed | 150 | 143 | 0.691657 | 0.536912 | 0.691435 | 0.535590 | 0.535544 | 184,191 |
-| 3.20e-7 | completed | 150 | 138 | 0.692023 | 0.531395 | 0.691783 | 0.530915 | 0.533762 | 184,190 |
-| 2.50e-7 | completed | 150 | 143 | 0.692275 | 0.525342 | 0.692021 | 0.526036 | 0.531498 | 184,198 |
 
 Conclusion: the current recommended setting from this sweep is `lr=5.00e-5`, selected by lowest validation loss (`0.675675`).
 <!-- adamw-lower-lr-150epoch-20260515:end -->
@@ -76,7 +88,7 @@ Pick model size by held-out behavior, not by parameter count alone. If train and
 | `dim_feedforward` | Adds per-token nonlinear capacity. For this tabular/token setup, widen FFN before adding much depth. |
 | `n_heads` | Changes how attention is partitioned, with little parameter change at fixed `d_model`. Too many heads can become redundant; too few can bottleneck distinct role/team patterns. |
 | `dropout` / `attention_dropout` / `head_dropout` | Regularizes memorization. Raise when train metrics pull ahead; lower if both train and validation underfit. |
-| `pooling` | Controls the summary sent to the prediction head. `gated` blends `[CLS]` and mean-token summaries and is the safest default; `cls` is sharper, `mean` is steadier, attention pooling is more flexible but easier to overfit. |
+| `pooling` | Controls the summary sent to the prediction head. Modes (see the 2026-05-17 sweep): `team_mean` / `team_attention` (per-team pool + 5-way concat `(b, r, b-r, abs(b-r), b*r)`) |
 | `head_hidden` | Capacity after pooling. Usually a small lever compared with encoder width/depth. |
 
 ### CUDA Graph Follow-Up, 2026-05-14
@@ -90,117 +102,6 @@ Manual CUDA graph probes used `batch_size=10240`, current model shape, static co
 | compiled + manual CUDA graph | failed | n/a | Fails with Inductor CUDA graph replay inside an active capture. |
 
 Conclusion: do not add manual CUDA graphs to the training loop. `torch.compile(mode="reduce-overhead")` remains the graph/launch-overhead lever.
-
-### Standard Training Session, 2026-05-14
-
-One standard run used the then-active defaults after the batch-size update: `batch_size=8192`, `epochs=100`, early stopping patience `8`, attention diagnostics every 5 epochs, TensorBoard on, compile reduce-overhead, no grad clipping.
-
-```text
-app/ml/data/checkpoints/standard_bs8192_20260514_1238
-```
-
-| run | stopped epoch | best epoch | median logged samples/s | median excluding first interval | val loss | test loss | test AUC | test accuracy | test Brier | test ECE |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| standard bs8192 | 20 | 12 | 65,041 | 65,052 | 0.678306 | 0.678035 | 0.593842 | 0.570831 | 0.242554 | 0.013264 |
-
-Conclusion at the time: those defaults beat the previous `44,010` warm-path benchmark by `47.8%` in the standard train loop after the compile-heavy first interval.
-
-## Retired Lion LR And Weight Decay
-
-Ranked by lowest test loss, then highest test accuracy:
-
-| rank | sweep | lr | weight_decay | best val loss | best val acc | test loss | test acc | test AUC | median samples/s |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | lr | 1.25e-5 | 0.025 | 0.679809 | 0.564914 | 0.680193 | 0.566749 | 0.593073 | 40,221 |
-| 2 | wd @ 1.25e-5 | 1.25e-5 | 0.035 | 0.679813 | 0.564950 | 0.680199 | 0.566690 | 0.593073 | 38,008 |
-| 3 | wd @ 1.25e-5 | 1.25e-5 | 0.015 | 0.679814 | 0.564950 | 0.680200 | 0.566684 | 0.593073 | 40,002 |
-| 4 | wd @ 1.25e-5 | 1.25e-5 | 0.000 | 0.679816 | 0.564926 | 0.680203 | 0.566672 | 0.593073 | 40,951 |
-| 5 | wd @ 1.25e-5 | 1.25e-5 | 0.050 | 0.679820 | 0.564920 | 0.680211 | 0.566660 | 0.593073 | 40,085 |
-| 6 | lr | 1.50e-5 | 0.025 | 0.679783 | 0.565027 | 0.680261 | 0.566529 | 0.593016 | 41,175 |
-| 7 | wd @ 1.75e-5 | 1.75e-5 | 0.015 | 0.679730 | 0.565105 | 0.680268 | 0.566422 | 0.592876 | 37,976 |
-| 8 | wd @ 1.75e-5 | 1.75e-5 | 0.000 | 0.679729 | 0.565021 | 0.680268 | 0.566410 | 0.592876 | 39,850 |
-| 9 | wd @ 1.75e-5 | 1.75e-5 | 0.050 | 0.679730 | 0.565087 | 0.680270 | 0.566487 | 0.592876 | 41,057 |
-| 10 | lr | 1.75e-5 | 0.025 | 0.679731 | 0.565045 | 0.680270 | 0.566422 | 0.592874 | 40,264 |
-| 11 | wd @ 1.75e-5 | 1.75e-5 | 0.035 | 0.679738 | 0.565087 | 0.680281 | 0.566398 | 0.592874 | 40,700 |
-| 12 | lr | 1.00e-5 | 0.025 | 0.680018 | 0.564473 | 0.680315 | 0.566642 | 0.592732 | 40,079 |
-
-Historical best Lion settings from this retired sweep:
-
-```text
-lr = 1.25e-5
-weight_decay = 2.5e-2
-```
-
-## Warmup Steps
-
-5-epoch follow-up runs on 2026-05-14 tested whether the retired Lion setup needed more warmup after the LR/weight-decay sweep. `125` steps is roughly one epoch at `batch_size=10240` (`131` optimizer steps/epoch).
-
-| warmup steps | best val loss | test loss | test acc | test AUC | test Brier | test ECE |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 125 | 0.679809 | 0.680193 | 0.566749 | 0.593073 | 0.243592 | 0.030456 |
-| 250 | 0.680031 | 0.680505 | 0.565897 | 0.592900 | 0.243745 | 0.032160 |
-| 500 | 0.680022 | 0.680451 | 0.566130 | 0.592784 | 0.243717 | 0.031002 |
-
-Recommendation: keep `warmup_steps = 125`; longer warmup slowed useful learning and did not improve held-out metrics.
-
-## Output Temperature
-
-Post-hoc scaling scores `sigmoid(logits / T)`. It changes probability spread and calibration, but not ranking or the `0.5` decision boundary, so accuracy and AUC are unchanged by positive `T`.
-
-### 15-Epoch Temperature Sweep, 2026-05-14
-
-One 15-epoch baseline run used the current defaults with diagnostics off. The best validation checkpoint was epoch 11 in:
-
-```text
-app/ml/data/checkpoints/temp_sweep_15epoch_20260514_0648
-```
-
-Unscaled (`T=1.0`) checkpoint metrics: validation loss `0.678610`, validation accuracy `0.567917`, validation AUC `0.594647`; test loss `0.678677`, test accuracy `0.570134`, test AUC `0.593895`.
-
-| temperature | val loss | test loss | test Brier | test ECE | test pred std | test 45-55 pct | test 45-55 AUC | test 45-55 loss |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0.50 | 0.681673 | 0.681780 | 0.244077 | 0.033490 | 0.124983 | 30.45 | 0.524895 | 0.692243 |
-| 0.70 | 0.677905 | 0.677995 | 0.242525 | 0.013569 | 0.092591 | 41.53 | 0.532983 | 0.691404 |
-| 0.85 | 0.677936 | 0.678014 | 0.242548 | 0.016065 | 0.077303 | 49.28 | 0.537906 | 0.690893 |
-| 1.00 | 0.678610 | 0.678677 | 0.242862 | 0.020538 | 0.066265 | 56.24 | 0.542577 | 0.690426 |
-| 1.15 | 0.679461 | 0.679521 | 0.243265 | 0.026128 | 0.057942 | 62.53 | 0.548291 | 0.689877 |
-| 1.30 | 0.680324 | 0.680378 | 0.243677 | 0.030207 | 0.051454 | 68.32 | 0.551917 | 0.689545 |
-| 1.50 | 0.681396 | 0.681444 | 0.244194 | 0.033669 | 0.044750 | 74.81 | 0.558171 | 0.688998 |
-| 2.00 | 0.683552 | 0.683588 | 0.245244 | 0.037065 | 0.033722 | 86.62 | 0.570645 | 0.688079 |
-
-Narrow central buckets on test:
-
-| temperature | 45-50 count | 45-50 acc | 45-50 loss | 50-55 count | 50-55 acc | 50-55 loss |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0.50 | 26,495 | 0.532780 | 0.690870 | 24,605 | 0.504532 | 0.693722 |
-| 0.70 | 36,750 | 0.540082 | 0.689883 | 32,944 | 0.509410 | 0.693101 |
-| 0.85 | 44,189 | 0.544660 | 0.689347 | 38,511 | 0.512789 | 0.692667 |
-| 1.00 | 51,022 | 0.547431 | 0.689127 | 43,359 | 0.517517 | 0.691954 |
-| 1.15 | 57,329 | 0.551257 | 0.688666 | 47,615 | 0.521936 | 0.691336 |
-| 1.30 | 63,249 | 0.554855 | 0.688235 | 51,414 | 0.524060 | 0.691157 |
-| 1.50 | 69,954 | 0.559854 | 0.687636 | 55,587 | 0.527749 | 0.690712 |
-| 2.00 | 82,524 | 0.568913 | 0.686805 | 62,843 | 0.536193 | 0.689751 |
-
-Conclusion: `T=0.70` is the best probability-scoring temperature for this 15-epoch checkpoint, with the lowest validation/test logloss, Brier, and ECE. `T=0.85` is effectively tied on loss but slightly worse on calibration. `T > 1.0` makes the model too flat overall; its central-band AUC rises mostly because more examples are compressed into `0.45-0.55`, not because the model learns a better central decision boundary. Accuracy remains `0.570134` on test for every positive `T`.
-
-Recommendation: serve probabilities from the current 15-epoch checkpoint family with post-hoc output temperature `T = 0.70`. Keep training temperature at `1.0`.
-
-### 5-Epoch Temperature Sweep, 2026-05-14
-
-Earlier post-hoc scaling from the `125` warmup checkpoint:
-
-| temperature | val loss | val Brier | val ECE | test loss | test Brier | test ECE | test pred std |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0.50 | 0.683449 | 0.245023 | 0.039897 | 0.684024 | 0.245229 | 0.042283 | 0.125223 |
-| 0.65 | 0.679776 | 0.243409 | 0.021449 | 0.680284 | 0.243618 | 0.030710 | 0.098662 |
-| 0.75 | 0.679224 | 0.243149 | 0.021559 | 0.679691 | 0.243352 | 0.030625 | 0.086292 |
-| 0.90 | 0.679407 | 0.243227 | 0.021947 | 0.679821 | 0.243415 | 0.030509 | 0.072538 |
-| 1.00 | 0.679810 | 0.243415 | 0.023586 | 0.680193 | 0.243592 | 0.030457 | 0.065535 |
-| 1.25 | 0.681068 | 0.244015 | 0.028043 | 0.681392 | 0.244169 | 0.033663 | 0.052742 |
-| 1.50 | 0.682292 | 0.244609 | 0.033748 | 0.682572 | 0.244744 | 0.039694 | 0.044098 |
-| 2.00 | 0.684263 | 0.245576 | 0.038101 | 0.684482 | 0.245683 | 0.044369 | 0.033183 |
-
-Earlier recommendation: serve probabilities from this shorter checkpoint family with post-hoc temperature `T = 0.75` for logloss/Brier. The 15-epoch sweep supersedes this for the current training horizon.
 
 <!-- capacity-reg-grid-20260515:start -->
 ## Capacity × Regularization Grid Sweep, 2026-05-15

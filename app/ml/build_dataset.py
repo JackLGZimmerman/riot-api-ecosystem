@@ -37,18 +37,11 @@ from app.ml.config import (
     PLAYER_PIVOT_TABLE,
     POSITIONS,
     SPLIT_TABLE,
-    UNK_INDEX,
     DatasetConfig,
 )
-from app.ml.utils.cache_sparsity import (
-    N_PLAYER_TOKENS,
-    cache_sparsity_metadata,
-    collect_player_sparsity_counts,
-    empty_player_sparsity_counts,
-    log_player_sparsity_summary,
-    merge_player_sparsity_counts,
-)
 from database.clickhouse.client import get_client
+
+N_PLAYER_TOKENS = 10
 
 setup_logging_config()
 logger = logging.getLogger(__name__)
@@ -139,19 +132,18 @@ def _build_vocabularies() -> dict[str, object]:
         """
     ).result_rows
 
-    champion_to_idx = {int(c[0]): i + 1 for i, c in enumerate(champions)}
-    build_to_idx = {str(b[0]): i + 1 for i, b in enumerate(builds)}
-    role_to_idx = {p: i + 1 for i, p in enumerate(POSITIONS)}
+    champion_to_idx = {int(c[0]): i for i, c in enumerate(champions)}
+    build_to_idx = {str(b[0]): i for i, b in enumerate(builds)}
+    role_to_idx = {p: i for i, p in enumerate(POSITIONS)}
 
     return {
         "champion_to_idx": champion_to_idx,
         "build_to_idx": build_to_idx,
         "role_to_idx": role_to_idx,
-        "n_champions": len(champion_to_idx) + 1,
-        "n_builds": len(build_to_idx) + 1,
-        "n_roles": len(role_to_idx) + 1,
-        "n_sides": 4,
-        "unk_index": UNK_INDEX,
+        "n_champions": len(champion_to_idx),
+        "n_builds": len(build_to_idx),
+        "n_roles": len(role_to_idx),
+        "n_sides": 2,
     }
 
 
@@ -213,12 +205,13 @@ def _resolve_player_idx(
     role_map: dict[str, int],
     build_map: dict[str, int],
 ) -> tuple[int, int, int]:
-    champ_idx = (
-        int(champion_lut[cid]) if 0 <= cid < champion_lut.shape[0] else UNK_INDEX
-    )
-    role_idx = role_map.get(pos, UNK_INDEX)
-    build_idx = build_map.get(build, UNK_INDEX)
-    return champ_idx, role_idx, build_idx
+    if not (0 <= cid < champion_lut.shape[0] and champion_lut[cid] >= 0):
+        raise ValueError(f"Unknown champion id {cid}")
+    if pos not in role_map:
+        raise ValueError(f"Unknown role {pos!r}")
+    if build not in build_map:
+        raise ValueError(f"Unknown build {build!r}")
+    return int(champion_lut[cid]), role_map[pos], build_map[build]
 
 
 def _pack_champion_build_idx(
@@ -234,7 +227,7 @@ def _pack_champion_build_idx(
 def _build_champion_lut(vocab: dict) -> np.ndarray:
     keys = vocab["champion_to_idx"]
     max_id = max(keys) if keys else 0
-    lut = np.zeros(max_id + 1, dtype=np.int32)
+    lut = np.full(max_id + 1, -1, dtype=np.int32)
     for k, v in keys.items():
         lut[k] = v
     return lut
@@ -258,7 +251,7 @@ def _stream_into_arrays(
     arrays: dict[str, np.ndarray],
     matchids: list[str],
     start_write_idx: int,
-) -> tuple[int, dict[str, object]]:
+) -> int:
     champion_lut = _build_champion_lut(vocab)
     role_map = vocab["role_to_idx"]
     build_map = vocab["build_to_idx"]
@@ -267,35 +260,29 @@ def _stream_into_arrays(
     t0 = time.perf_counter()
     pivot_rows = list(_iter_query_rows(_player_pivot_query(), matchids))
     if not pivot_rows:
-        return 0, empty_player_sparsity_counts()
+        return 0
     n = len(pivot_rows)
-    champion_idx_chunk = np.zeros((n, N_PLAYER_TOKENS), dtype=DISK_ARRAY_DTYPES["player_champion_build_idx"])
-    role_idx_chunk = np.zeros((n, N_PLAYER_TOKENS), dtype=np.uint8)
+    champion_idx_chunk = np.zeros(
+        (n, N_PLAYER_TOKENS), dtype=DISK_ARRAY_DTYPES["player_champion_build_idx"]
+    )
     build_idx_chunk = np.zeros((n, N_PLAYER_TOKENS), dtype=np.uint8)
 
     for i, (_matchid, blue_win, blue_players, red_players) in enumerate(pivot_rows):
         for slot, (cid, pos, build) in enumerate(blue_players):
-            c, r, b = _resolve_player_idx(
+            c, _r, b = _resolve_player_idx(
                 int(cid), str(pos), str(build), champion_lut, role_map, build_map
             )
             champion_idx_chunk[i, slot] = c
-            role_idx_chunk[i, slot] = r
             build_idx_chunk[i, slot] = b
         for slot, (cid, pos, build) in enumerate(red_players):
-            c, r, b = _resolve_player_idx(
+            c, _r, b = _resolve_player_idx(
                 int(cid), str(pos), str(build), champion_lut, role_map, build_map
             )
             chunk_slot = len(POSITIONS) + slot
             champion_idx_chunk[i, chunk_slot] = c
-            role_idx_chunk[i, chunk_slot] = r
             build_idx_chunk[i, chunk_slot] = b
         arrays["blue_win"][start_write_idx + i] = int(blue_win)
 
-    player_sparsity_counts = collect_player_sparsity_counts(
-        champion_idx_chunk,
-        role_idx_chunk,
-        build_idx_chunk,
-    )
     arrays["player_champion_build_idx"][start_write_idx : start_write_idx + n] = (
         _pack_champion_build_idx(champion_idx_chunk, build_idx_chunk, n_builds)
     )
@@ -305,7 +292,7 @@ def _stream_into_arrays(
         time.perf_counter() - t0,
         n,
     )
-    return n, player_sparsity_counts
+    return n
 
 
 def _flush_arrays(arrays: dict[str, np.ndarray]) -> None:
@@ -354,7 +341,8 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     estimated_cache_mb = (
         n_games
         * (
-            N_PLAYER_TOKENS * np.dtype(DISK_ARRAY_DTYPES["player_champion_build_idx"]).itemsize
+            N_PLAYER_TOKENS
+            * np.dtype(DISK_ARRAY_DTYPES["player_champion_build_idx"]).itemsize
             + np.dtype(DISK_ARRAY_DTYPES["blue_win"]).itemsize
         )
         / 1e6
@@ -364,12 +352,6 @@ def build(cfg: DatasetConfig | None = None) -> Path:
 
     n_written = 0
     split_counts = {"train": 0, "val": 0, "test": 0}
-    split_player_sparsity_counts = {
-        "train": empty_player_sparsity_counts(),
-        "val": empty_player_sparsity_counts(),
-        "test": empty_player_sparsity_counts(),
-    }
-    overall_player_sparsity_counts = empty_player_sparsity_counts()
 
     for split_name, split_matchids in (
         ("train", train_matchids),
@@ -384,27 +366,13 @@ def build(cfg: DatasetConfig | None = None) -> Path:
                 split_offset,
                 len(chunk),
             )
-            chunk_written, chunk_player_sparsity_counts = _stream_into_arrays(
-                cfg, vocab, arrays, chunk, n_written
-            )
+            chunk_written = _stream_into_arrays(cfg, vocab, arrays, chunk, n_written)
             if chunk_written == 0:
                 logger.warning("Stopping %s split after an empty chunk", split_name)
                 break
             n_written += chunk_written
             split_counts[split_name] += chunk_written
-            merge_player_sparsity_counts(
-                split_player_sparsity_counts[split_name], chunk_player_sparsity_counts
-            )
-            merge_player_sparsity_counts(
-                overall_player_sparsity_counts, chunk_player_sparsity_counts
-            )
     logger.info("Wrote %d / %d games", n_written, n_games)
-
-    for split_name in ("train", "val", "test"):
-        log_player_sparsity_summary(
-            logger, split_name, split_player_sparsity_counts[split_name]
-        )
-    log_player_sparsity_summary(logger, "overall", overall_player_sparsity_counts)
 
     if n_written < n_games:
         for k, arr in arrays.items():
@@ -434,10 +402,6 @@ def build(cfg: DatasetConfig | None = None) -> Path:
                     "test_fraction": cfg.test_fraction,
                 },
                 "train_matchids_hash": _matchids_hash(train_matchids),
-                **cache_sparsity_metadata(
-                    overall_player_sparsity_counts,
-                    split_player_sparsity_counts,
-                ),
                 "arrays": {
                     name: str(path.name)
                     for name, path in array_paths(cfg.cache_dir).items()

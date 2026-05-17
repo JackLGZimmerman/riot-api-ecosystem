@@ -38,10 +38,6 @@ eligible_games AS (
         ON
             ps.matchid = ivt.matchid
             AND ps.participantid = ivt.participantid
-    WHERE
-        ps.championid IS NOT NULL
-        AND ps.teamposition != 'UNKNOWN'
-        AND ps.timeplayed > 0
     GROUP BY ps.matchid
     HAVING count() = 10
 ),
