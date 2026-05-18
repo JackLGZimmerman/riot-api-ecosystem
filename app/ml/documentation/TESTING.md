@@ -36,6 +36,8 @@ Read `gen_*` from the same epoch (`gen_loss_gap`, `gen_auc_gap`) to interpret wh
 
 For multi-seed sweeps, compare mean ± std across seeds, not single-seed numbers. A per-axis edge that is smaller than the within-seed std of either competing arm is noise.
 
+Multi-seed both arms before declaring a tie. Comparing a multi-seed candidate against a single-seed baseline (or vice versa) understates the signal: a sub-noise gap in the means can still be a real win if it is paired and sign-consistent across matched seeds. When in doubt, prefer a paired delta (same seed in both arms) over a mean-vs-mean test at small seed counts.
+
 ## Recording Results
 
 When the sweep finishes, copy a compact protocol + table + conclusion block into `OPTIMISATIONS.md` under a dated section (see existing sweep entries for the format). The protocol block in `OPTIMISATIONS.md` should snapshot the *actual* live-default values used at sweep time — that file is a historical record, unlike this one. Capture, at minimum, per trial: best epoch, val loss/accuracy/Brier/ECE, test loss/accuracy/Brier/ECE, and median `samples/s`.

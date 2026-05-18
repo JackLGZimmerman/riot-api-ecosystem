@@ -1,12 +1,40 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
+import socket
 import time
 from pathlib import Path
+from typing import Any
 
 from app.ml.utils.metrics import metric_scalar
 
 logger = logging.getLogger(__name__)
+
+# Auto-routes relation diagnostics (see app.ml.utils.attention_diagnostics)
+# into dedicated TensorBoard namespaces without enumerating each tag:
+#   train_attention_relation_self        -> attention_relation/train_self
+#   val_attention_head_2_bot_duo_ally    -> attention_head_2/val_bot_duo_ally
+# Pattern requires digits after `head_` so it never collides with
+# attention_head_diversity_mean or attention_drift_cosine.
+_RELATION_TAG_RE = re.compile(
+    r"^(train|val|test)_attention_(?:relation_([a-z][a-z0-9_]*)"
+    r"|head_(\d+)_([a-z][a-z0-9_]*))$"
+)
+
+
+def _relation_tag(event: str, field: str) -> str | None:
+    if event not in ("epoch_end", "test"):
+        return None
+    match = _RELATION_TAG_RE.match(field)
+    if match is None:
+        return None
+    split = match.group(1)
+    global_name = match.group(2)
+    if global_name is not None:
+        return f"attention_relation/{split}_{global_name}"
+    return f"attention_head_{match.group(3)}/{split}_{match.group(4)}"
 
 # Curated TensorBoard charts. TensorBoard is kept to the signals that are most
 # decision-relevant for iterating on the set transformer: train-vs-val quality,
@@ -94,13 +122,17 @@ class TensorBoardMetricWriter:
         run_name: str | None = None,
     ) -> None:
         self.path: Path | None = None
-        self._writer = None
+        self._writer: Any = None
+        self._event_cls: Any = None
+        self._summary_cls: Any = None
         self._raw_mirror = bool(raw_mirror)
         if not tensorboard_dir:
             return
 
         try:
-            from torch.utils.tensorboard import SummaryWriter
+            from tensorboard.compat.proto.event_pb2 import Event
+            from tensorboard.compat.proto.summary_pb2 import Summary
+            from tensorboard.summary.writer.record_writer import RecordWriter
         except ImportError as exc:
             logger.warning(
                 "TensorBoard is unavailable (%s); continuing with JSONL live metrics only",
@@ -114,7 +146,21 @@ class TensorBoardMetricWriter:
         # `metrics_dir / tensorboard_dir` collapses to `tensorboard_dir` when
         # the latter is absolute, so sweeps can pin a shared TB root.
         self.path = metrics_dir / tensorboard_dir / resolved_run_name
-        self._writer = SummaryWriter(log_dir=str(self.path))
+        self.path.mkdir(parents=True, exist_ok=True)
+        event_path = self.path / (
+            f"events.out.tfevents.{int(time.time())}."
+            f"{socket.gethostname()}.{os.getpid()}.{time.time_ns()}"
+        )
+        event_cls: Any = Event
+        summary_cls: Any = Summary
+        self._writer = RecordWriter(event_path.open("wb"))
+        self._event_cls = event_cls
+        self._summary_cls = summary_cls
+        self._writer.write(
+            event_cls(wall_time=time.time(), file_version="brain.Event:2")
+            .SerializeToString()
+        )
+        self._writer.flush()
 
     def record(
         self,
@@ -128,19 +174,35 @@ class TensorBoardMetricWriter:
         step_field = metric_scalar(fields.get("step"))
         epoch_field = metric_scalar(fields.get("epoch"))
         global_step = int(step_field or epoch_field or 0)
+        values = []
         for key, value in row.items():
             scalar = metric_scalar(value)
             if scalar is None:
                 continue
 
             tag = TENSORBOARD_SCALAR_TAGS.get((event, key))
+            if tag is None:
+                tag = _relation_tag(event, key)
             if tag is not None:
-                self._writer.add_scalar(tag, float(scalar), global_step)
-            if self._raw_mirror:
-                self._writer.add_scalar(
-                    f"raw/{event}/{key}", float(scalar), global_step
+                values.append(
+                    self._summary_cls.Value(tag=tag, simple_value=float(scalar))
                 )
-        self._writer.flush()
+            if self._raw_mirror:
+                values.append(
+                    self._summary_cls.Value(
+                        tag=f"raw/{event}/{key}",
+                        simple_value=float(scalar),
+                    )
+                )
+        if values:
+            self._writer.write(
+                self._event_cls(
+                    wall_time=time.time(),
+                    step=global_step,
+                    summary=self._summary_cls(value=values),
+                ).SerializeToString()
+            )
+            self._writer.flush()
 
     def close(self) -> None:
         if self._writer is not None:

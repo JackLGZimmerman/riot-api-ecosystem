@@ -41,7 +41,6 @@ class _DiagnosticEncoderLayer(nn.Module):
         dim_feedforward: int,
         dropout: float,
         attention_dropout: float,
-        head_dropout: float,
     ):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(
@@ -59,23 +58,6 @@ class _DiagnosticEncoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
-        self.head_dropout = float(head_dropout)
-
-    def _apply_head_dropout(self, attn_probs: torch.Tensor) -> torch.Tensor:
-        if not self.training or self.head_dropout <= 0.0:
-            return attn_probs
-        keep_prob = 1.0 - self.head_dropout
-        keep = (
-            torch.rand(
-                attn_probs.shape[0],
-                attn_probs.shape[1],
-                1,
-                1,
-                device=attn_probs.device,
-            )
-            < keep_prob
-        )
-        return attn_probs * keep.to(attn_probs.dtype) / keep_prob
 
     def _self_attention_manual(
         self,
@@ -98,7 +80,6 @@ class _DiagnosticEncoderLayer(nn.Module):
             p=float(self.self_attn.dropout),
             training=self.training,
         )
-        retained_attn_probs = self._apply_head_dropout(retained_attn_probs)
         stats = None
         if collect_attention_diagnostics:
             stats = attention_layer_stats(
@@ -117,10 +98,7 @@ class _DiagnosticEncoderLayer(nn.Module):
         attention_diagnostics_sample_size: int | None,
         attention_player_token_count: int,
     ) -> tuple[torch.Tensor, dict[str, object] | None]:
-        use_manual_attention = collect_attention_diagnostics or (
-            self.training and self.head_dropout > 0.0
-        )
-        if use_manual_attention:
+        if collect_attention_diagnostics:
             out, stats = self._self_attention_manual(
                 x,
                 collect_attention_diagnostics,
@@ -193,8 +171,7 @@ class HybridTokenModel(nn.Module):
     """Champion set transformer over 10 player tokens.
 
     Each player token is the compositional sum of champion + role + build + side
-    embeddings. The model is PyTorch-native so current CUDA wheels can select
-    optimized scaled-dot-product attention kernels for NVIDIA Blackwell GPUs.
+    embeddings.
     """
 
     def __init__(
@@ -224,7 +201,6 @@ class HybridTokenModel(nn.Module):
             dim_feedforward=cfg.dim_feedforward,
             dropout=cfg.dropout,
             attention_dropout=cfg.attention_dropout,
-            head_dropout=cfg.head_dropout,
         )
         self.encoder = _DiagnosticEncoder(
             encoder_layer,

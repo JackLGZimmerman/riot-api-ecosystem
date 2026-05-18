@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-from hashlib import sha1
 from pathlib import Path
 from typing import cast
 
@@ -102,14 +101,6 @@ def _iter_query_rows(query: str, matchids: list[str]):
             yield from zip(*block, strict=False)
 
 
-def _matchids_hash(matchids: list[str]) -> str:
-    digest = sha1()
-    for matchid in matchids:
-        digest.update(matchid.encode())
-        digest.update(b"\0")
-    return digest.hexdigest()[:12]
-
-
 # --------------------------------------------------------------------------
 # Vocabulary
 # --------------------------------------------------------------------------
@@ -143,7 +134,6 @@ def _build_vocabularies() -> dict[str, object]:
         "n_champions": len(champion_to_idx),
         "n_builds": len(build_to_idx),
         "n_roles": len(role_to_idx),
-        "n_sides": 2,
     }
 
 
@@ -204,14 +194,14 @@ def _resolve_player_idx(
     champion_lut: np.ndarray,
     role_map: dict[str, int],
     build_map: dict[str, int],
-) -> tuple[int, int, int]:
+) -> tuple[int, int]:
     if not (0 <= cid < champion_lut.shape[0] and champion_lut[cid] >= 0):
         raise ValueError(f"Unknown champion id {cid}")
     if pos not in role_map:
         raise ValueError(f"Unknown role {pos!r}")
     if build not in build_map:
         raise ValueError(f"Unknown build {build!r}")
-    return int(champion_lut[cid]), role_map[pos], build_map[build]
+    return int(champion_lut[cid]), build_map[build]
 
 
 def _pack_champion_build_idx(
@@ -246,7 +236,6 @@ def _player_pivot_query() -> str:
 
 
 def _stream_into_arrays(
-    cfg: DatasetConfig,
     vocab: dict,
     arrays: dict[str, np.ndarray],
     matchids: list[str],
@@ -269,13 +258,13 @@ def _stream_into_arrays(
 
     for i, (_matchid, blue_win, blue_players, red_players) in enumerate(pivot_rows):
         for slot, (cid, pos, build) in enumerate(blue_players):
-            c, _r, b = _resolve_player_idx(
+            c, b = _resolve_player_idx(
                 int(cid), str(pos), str(build), champion_lut, role_map, build_map
             )
             champion_idx_chunk[i, slot] = c
             build_idx_chunk[i, slot] = b
         for slot, (cid, pos, build) in enumerate(red_players):
-            c, _r, b = _resolve_player_idx(
+            c, b = _resolve_player_idx(
                 int(cid), str(pos), str(build), champion_lut, role_map, build_map
             )
             chunk_slot = len(POSITIONS) + slot
@@ -366,7 +355,7 @@ def build(cfg: DatasetConfig | None = None) -> Path:
                 split_offset,
                 len(chunk),
             )
-            chunk_written = _stream_into_arrays(cfg, vocab, arrays, chunk, n_written)
+            chunk_written = _stream_into_arrays(vocab, arrays, chunk, n_written)
             if chunk_written == 0:
                 logger.warning("Stopping %s split after an empty chunk", split_name)
                 break
@@ -401,7 +390,6 @@ def build(cfg: DatasetConfig | None = None) -> Path:
                     "val_fraction": cfg.val_fraction,
                     "test_fraction": cfg.test_fraction,
                 },
-                "train_matchids_hash": _matchids_hash(train_matchids),
                 "arrays": {
                     name: str(path.name)
                     for name, path in array_paths(cfg.cache_dir).items()

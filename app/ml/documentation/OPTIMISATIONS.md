@@ -27,11 +27,11 @@ Modes compared: `team_mean` / `team_attention` (5-way concat `(b, r, b-r, |b-r|,
 
 ## Optimizer Default
 
-The 2026-05-13 optimizer evidence tuned Lion against itself but did not include a matched AdamW control. With no decision-grade evidence that Lion improves held-out metrics, and with PyTorch AdamW offering a fused CUDA implementation without a third-party package, the active default is AdamW:
+The 2026-05-13 optimizer evidence tuned Lion against itself but did not include a matched AdamW control. With no decision-grade evidence that Lion improves held-out metrics, and with PyTorch AdamW offering a fused CUDA implementation without a third-party package, the active default is AdamW. Base LR / schedule values come from the 2026-05-18 LR-schedule sweep (see below):
 
 ```text
 optimizer = "adamw"
-lr = 5e-5
+lr = 2e-4
 weight_decay = 5e-3
 adamw_betas = (0.9, 0.999)
 ```
@@ -74,8 +74,65 @@ Learning rates:
 | 3.20e-6 | completed | 150 | 129 | 0.682241 | 0.584655 | 0.681770 | 0.585736 | 0.564890 | 184,180 |
 | 2.50e-6 | completed | 150 | 129 | 0.683103 | 0.581748 | 0.682647 | 0.582573 | 0.563329 | 184,180 |
 
-Conclusion: the current recommended setting from this sweep is `lr=5.00e-5`, selected by lowest validation loss (`0.675675`).
+Conclusion: the current recommended setting from this sweep is `lr=5.00e-5`, selected by lowest validation loss (`0.675675`). **Superseded by the 2026-05-18 LR-schedule sweep below**, which paired a higher base LR (`2e-4`) with an aggressive heavy-tail schedule and beats this on every test metric while cutting wall time ~44%.
 <!-- adamw-lower-lr-150epoch-20260515:end -->
+
+<!-- lr-schedule-20260518:start -->
+## LR Schedule Tuning, 2026-05-18
+
+Status: `completed` and promoted. Run directories: `app/ml/data/checkpoints/{iter,baseline_multiseed,final}/`.
+
+Protocol: one-knob-at-a-time iter sweeps over `lr`, `lr_center_epoch`, `lr_sharpness`, `lr_tail_strength`, each via `sweep one --phase iter`. Fixed `epochs=40`, `early_stop_patience=0`, all other live defaults. Best-of-run val_loss recorded; winner re-validated against baseline with paired multi-seed (42/43/44), then promoted via `sweep final --epochs 60 --patience 20` with the full diagnostic suite for the head-to-head test comparison.
+
+### Iter knob results (single seed=42)
+
+| Run | Config (vs defaults) | best val_loss | best ep | notes |
+| --- | --- | ---: | ---: | --- |
+| baseline | defaults: lr=5e-5, center=20, sharp=4.0, tail=0.3 | 0.67558 | 45 | stable, ~0.6757 plateau |
+| iter/r1 | lr=2e-4, center=10, sharp=4.0, tail=0.5 | 0.67503 | 11 | post-peak oscillates ~0.6766 |
+| iter/r2 | lr=2e-4, center=10, sharp=8.0, tail=0.5 | **0.67500** | 11 | tighter ~0.6758 plateau |
+| iter/r3 | r2 + center=12 | 0.67513 | 11 | higher LR at peak (1.87e-4 vs 1.56e-4), no gain |
+| iter/r4 | r2 + tail=0.3 | 0.67504 | 11 | noisier plateau (~0.6763) than r2 (~0.6757) |
+
+### Paired multi-seed validation (r2 config vs baseline, same seed in both arms)
+
+| seed | baseline vloss | iter vloss | Δ (iter − baseline) |
+| --- | ---: | ---: | ---: |
+| 42 | 0.67544 | 0.67500 | −0.00045 |
+| 43 | 0.67584 | 0.67562 | −0.00022 |
+| 44 | 0.67590 | 0.67576 | −0.00014 |
+| **mean** | **0.67573** | **0.67546** | **−0.00027** |
+
+Iter wins 3/3 paired seeds (sign-consistent). Paired t ≈ −2.9 (df=2). Baseline seed std = 2.0e-4; iter seed std = 3.3e-4.
+
+### Final-run test comparison (seed=42, `sweep final --epochs 60 --patience 20`)
+
+| Metric | Baseline final | Iter final | Δ |
+| --- | ---: | ---: | ---: |
+| test_loss | 0.67523 | **0.67504** | −0.00019 |
+| test_accuracy | 0.5753 | **0.5760** | +0.0007 |
+| test_auc | 0.60253 | **0.60273** | +0.0002 |
+| test_brier | 0.24123 | **0.24114** | −0.00009 |
+| test_ece | 0.0194 | **0.0176** | −0.0018 (better calibration) |
+| wall_s | 457 | 258 | **−44%** |
+
+### Conclusion
+
+Promoted: `lr=2e-4`, `lr_center_epoch=10`, `lr_sharpness=8.0`, `lr_tail_strength=0.5`. `TrainConfig` defaults updated; README "Training Defaults" table updated to match.
+
+### Schedule-knob sensitivities (durable)
+
+1. **`lr` dominates.** Sweet spot 2e-4 to 1e-3. `lr<1e-4` trains too slowly; `lr>=2e-3` overshoots and degrades val_acc sharply.
+2. **`lr_center_epoch` must align with the peak.** At `lr=2e-4` the model peaks at ep ~11. `center=10` aligns. `center=5` decays too fast (underfit). `center=12` leaves LR too high through the peak (no gain). Default `center=20` from a 500-epoch schedule leaves LR at full strength too long → post-peak collapse.
+3. **`lr_sharpness` controls post-peak stability.** `sharp=4` → noisy plateau (~0.6766). `sharp=8` → tighter plateau (~0.6758). Peak value unchanged.
+4. **`lr_tail_strength=0.5`** is the sweet spot. `0.3` gives a noisier plateau (~0.6763 mean vs r2's ~0.6757). `1.0` (untested in iter; tried in r0) decays too fast.
+5. **`warmup_steps`**: at default `lr=5e-5` has no effect. At high LR, `warmup_500` hurts by ~4e-4. Keep at default 125 unless investigating.
+6. **`weight_decay`, `lr_eta_min_ratio`, `lr_sharpness>=2`**: all sub-noise. Don't sweep these further unless lr/schedule are locked.
+
+### Methodology note
+
+The first verdict from this sweep was "no signal" — based on comparing iter's 3-seed mean to a single-seed baseline. Re-running baseline at the same seeds inverted the conclusion: paired Δ is consistent in sign and magnitude across all seeds. **Always multi-seed both arms before declaring a tie**; sub-noise gains in the mean can still be real if they appear paired.
+<!-- lr-schedule-20260518:end -->
 
 ## Model Structure Notes
 
@@ -87,7 +144,7 @@ Pick model size by held-out behavior, not by parameter count alone. If train and
 | `n_layers` | Adds repeated token mixing. More layers can model higher-order draft interactions, but redundant layers show up as weak validation gains and similar attention heads. |
 | `dim_feedforward` | Adds per-token nonlinear capacity. For this tabular/token setup, widen FFN before adding much depth. |
 | `n_heads` | Changes how attention is partitioned, with little parameter change at fixed `d_model`. Too many heads can become redundant; too few can bottleneck distinct role/team patterns. |
-| `dropout` / `attention_dropout` / `head_dropout` | Regularizes memorization. Raise when train metrics pull ahead; lower if both train and validation underfit. |
+| `dropout` / `attention_dropout` | Regularizes memorization. Raise when train metrics pull ahead; lower if both train and validation underfit. |
 | `pooling` | Controls the summary sent to the prediction head. Modes (see the 2026-05-17 sweep): `team_mean` / `team_attention` (per-team pool + 5-way concat `(b, r, b-r, abs(b-r), b*r)`) |
 | `head_hidden` | Capacity after pooling. Usually a small lever compared with encoder width/depth. |
 

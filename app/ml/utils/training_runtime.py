@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import math
-from collections.abc import Callable
-
 import numpy as np
 import torch
 
@@ -54,11 +51,3 @@ def set_seed(seed: int, seed_cuda: bool) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def lr_lambda(warmup_steps: int, total_steps: int) -> Callable[[int], float]:
-    def fn(step: int) -> float:
-        if step < warmup_steps:
-            return step / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
-
-    return fn

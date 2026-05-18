@@ -38,7 +38,6 @@ from app.ml.utils.prediction_diagnostics import (
 from app.ml.utils.training_runtime import (
     configure_torch_runtime,
     cuda_runtime_info,
-    lr_lambda,
     resolve_amp_dtype,
     set_seed,
     smooth_binary_targets,
@@ -68,8 +67,6 @@ def _slice_batch(
     batch: dict[str, torch.Tensor],
     max_examples: int,
 ) -> dict[str, torch.Tensor]:
-    if max_examples <= 0:
-        return batch
     n = min(max_examples, batch["blue_win"].shape[0])
     return {k: v[:n] for k, v in batch.items()}
 
@@ -91,19 +88,6 @@ class AttentionEvalConfig:
     @property
     def enabled(self) -> bool:
         return self.samples > 0 and self.batch_size > 0
-
-
-def _attention_sample_size(
-    attention: AttentionEvalConfig,
-    batch_idx: int,
-    diagnostic_examples: int,
-) -> int:
-    """Examples to pull from this batch for attention diagnostics (0 = skip)."""
-    if attention.samples > 0:
-        if diagnostic_examples >= attention.samples:
-            return 0
-        return min(attention.batch_size, attention.samples - diagnostic_examples)
-    return 0
 
 
 @overload
@@ -167,7 +151,7 @@ def evaluate(
     attention_tracker = AttentionMetricTracker() if attention.enabled else None
     diagnostic_examples = 0
 
-    for batch_idx, batch in enumerate(loader):
+    for batch in loader:
         with torch.amp.autocast(
             device_type=device.type,
             dtype=amp_dtype,
@@ -185,13 +169,11 @@ def evaluate(
 
         if attention_tracker is None:
             continue
-        sample_size = _attention_sample_size(attention, batch_idx, diagnostic_examples)
-        if sample_size <= 0:
+        if diagnostic_examples >= attention.samples:
             continue
+        sample_size = min(attention.batch_size, attention.samples - diagnostic_examples)
         diag_batch = _slice_batch(batch, sample_size)
         diag_n = int(diag_batch["blue_win"].shape[0])
-        if diag_n <= 0:
-            continue
         with torch.amp.autocast(
             device_type=device.type,
             dtype=amp_dtype,
@@ -202,7 +184,7 @@ def evaluate(
                 diag_batch,
                 return_attention_diagnostics=True,
             )
-        attention_tracker.update(diagnostics, examples=diag_n)
+        attention_tracker.update(diagnostics)
         diagnostic_examples += diag_n
 
     scores = torch.cat(score_chunks)
@@ -294,9 +276,8 @@ def _assemble_epoch_fields(
     if train_monitor_metrics is not None:
         epoch_fields.update(_monitor_gap_fields(train_monitor_metrics, val_metrics))
 
-    # Heavy diagnostics: sampled attention only. Prediction-distribution and
-    # bucket scalars are intentionally not emitted - the prediction_bands event
-    # is the canonical per-bucket record.
+    # Heavy diagnostics: sampled attention only; bucket scalars go through
+    # the dedicated prediction_bands event.
     if collect_heavy_diagnostics:
         epoch_fields.update(prefixed_fields("train", train_attention_summary))
         epoch_fields.update(
@@ -332,12 +313,82 @@ def _record_run_start_metadata(
         weight_decay=train_cfg.weight_decay,
         adamw_betas=train_cfg.adamw_betas,
         compile_mode=train_cfg.compile_mode,
+        lr_scheduler="linear_warmup_smooth_heavy_tail",
+        warmup_steps=train_cfg.warmup_steps,
+        lr_center_epoch=train_cfg.lr_center_epoch,
+        lr_sharpness=train_cfg.lr_sharpness,
+        lr_tail_strength=train_cfg.lr_tail_strength,
+        lr_eta_min_ratio=train_cfg.lr_eta_min_ratio,
         grad_clip=train_cfg.grad_clip,
+        early_stop_patience=train_cfg.early_stop_patience,
+        run_final_test=train_cfg.run_final_test,
         checkpoint_dir=train_cfg.checkpoint_dir,
         metrics_dir=train_cfg.metrics_dir,
         tensorboard_dir=metrics.tensorboard_path,
         tensorboard_raw_mirror=train_cfg.tensorboard_raw_mirror,
     )
+
+
+def _build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    total_steps: int,
+    warmup_steps: int,
+    center_step: int,
+    sharpness: float,
+    tail_strength: float,
+    eta_min_ratio: float,
+) -> tuple[torch.optim.lr_scheduler.LRScheduler, dict[str, object]]:
+    """Linear warmup followed by a smooth heavy-tail decay.
+
+    Post-warmup progress maps to a single continuous curve whose main
+    fall-off sits at `center_step`. The tail decays slowly to
+    `eta_min_ratio * base_lr` and reaches that floor exactly at the final
+    step.
+    """
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps must be non-negative")
+    if sharpness <= 0.0:
+        raise ValueError("sharpness must be positive")
+    if tail_strength <= 0.0:
+        raise ValueError("tail_strength must be positive")
+    if not 0.0 <= eta_min_ratio <= 1.0:
+        raise ValueError("eta_min_ratio must be in [0, 1]")
+
+    total_steps = max(1, total_steps)
+    decay_steps = max(1, total_steps - warmup_steps)
+    center_progress = max(1e-6, min(1.0, center_step / decay_steps))
+
+    raw_end = (1.0 + (1.0 / center_progress) ** sharpness) ** (-tail_strength)
+    denom = 1.0 - raw_end
+
+    def lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            start = 1.0 / warmup_steps
+            return start + (1.0 - start) * (step / warmup_steps)
+        progress = min(1.0, max(0.0, (step - warmup_steps) / decay_steps))
+        raw = (1.0 + (progress / center_progress) ** sharpness) ** (-tail_strength)
+        remaining = (raw - raw_end) / denom
+        return eta_min_ratio + (1.0 - eta_min_ratio) * remaining
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    schedule_name = (
+        "linear_warmup_smooth_heavy_tail" if warmup_steps > 0 else "smooth_heavy_tail"
+    )
+    scheduler_fields: dict[str, object] = {
+        "scheduler": type(scheduler).__name__,
+        "schedule": schedule_name,
+        "warmup_steps": warmup_steps,
+        "total_steps": total_steps,
+        "decay_steps": decay_steps,
+        "center_step": center_step,
+        "center_progress": center_progress,
+        "sharpness": sharpness,
+        "tail_strength": tail_strength,
+        "eta_min_ratio": eta_min_ratio,
+        "initial_lr": float(scheduler.get_last_lr()[0]),
+    }
+    return scheduler, scheduler_fields
 
 
 def _emit_prediction_bands(
@@ -558,9 +609,7 @@ def _run_final_test(
         **final_gap_fields,
     )
 
-    symmetry = evaluate_symmetry(
-        forward_model, test_loader, use_amp, amp_dtype, device
-    )
+    symmetry = evaluate_symmetry(forward_model, test_loader, use_amp, amp_dtype, device)
     logger.info(
         "test symmetry: mean=%.4e p50=%.4e p95=%.4e max=%.4e n=%d",
         symmetry["symmetry_abs_delta_mean"],
@@ -685,9 +734,20 @@ def train(
         weight_decay=train_cfg.weight_decay,
         adamw_betas=train_cfg.adamw_betas,
     )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
+    scheduler, scheduler_fields = _build_lr_scheduler(
         optimizer,
-        lr_lambda(train_cfg.warmup_steps, optimizer_steps_per_epoch * train_cfg.epochs),
+        total_steps=optimizer_steps_per_epoch * train_cfg.epochs,
+        warmup_steps=train_cfg.warmup_steps,
+        center_step=optimizer_steps_per_epoch * train_cfg.lr_center_epoch,
+        sharpness=train_cfg.lr_sharpness,
+        tail_strength=train_cfg.lr_tail_strength,
+        eta_min_ratio=train_cfg.lr_eta_min_ratio,
+    )
+    metrics.record(
+        "lr_scheduler_ready",
+        step_unit="optimizer_step",
+        base_lr=train_cfg.lr,
+        **scheduler_fields,
     )
     loss_fn = nn.BCEWithLogitsLoss()
     scaler = torch.amp.GradScaler(
@@ -700,6 +760,7 @@ def train(
     best_path = train_cfg.checkpoint_dir / "best.pt"
     checkpoint_written = False
     step = 0
+    epochs_since_best = 0
     # Persisted across epochs so attention_drift_* is measured epoch-over-epoch.
     train_attention_tracker = AttentionMetricTracker()
 
@@ -780,13 +841,7 @@ def train(
                         device=device,
                         sample_size=train_cfg.attention_diagnostics_batch_size,
                     )
-                    train_attention_tracker.update(
-                        attention_diagnostics,
-                        examples=min(
-                            train_cfg.attention_diagnostics_batch_size,
-                            batch["blue_win"].shape[0],
-                        ),
-                    )
+                    train_attention_tracker.update(attention_diagnostics)
                     train_attention_recorded = True
 
                 if step % train_cfg.log_interval == 0:
@@ -811,9 +866,6 @@ def train(
                         grad_norm_value,
                         samples_per_s,
                     )
-                    # train_loss / batch_loss here are the optimization
-                    # objective with smoothed targets. The eval-path val_* /
-                    # train_monitor_* losses use hard targets.
                     metrics.record(
                         "train_step",
                         epoch=epoch,
@@ -860,8 +912,6 @@ def train(
             if collect_heavy_diagnostics:
                 log_prediction_diagnostics(logger, "validation", val_metrics)
             elapsed = time.perf_counter() - t0
-            # Epoch mean of the smoothed-target optimization objective; not
-            # comparable to the hard-target eval losses.
             train_loss = float((epoch_loss_sum / epoch_n).item())
             lr_value = float(scheduler.get_last_lr()[0])
 
@@ -896,6 +946,7 @@ def train(
             if current_val_loss < best_val_loss or not checkpoint_written:
                 best_val_loss = current_val_loss
                 checkpoint_written = True
+                epochs_since_best = 0
                 torch.save(
                     {
                         "model_state": model.state_dict(),
@@ -919,20 +970,43 @@ def train(
                     path=best_path,
                     val_loss=best_val_loss,
                 )
+            else:
+                epochs_since_best += 1
 
-        _run_final_test(
-            model=model,
-            forward_model=forward_model,
-            test_loader=test_loader,
-            train_monitor_loader=train_monitor_loader,
-            best_path=best_path,
-            train_cfg=train_cfg,
-            use_amp=use_amp,
-            amp_dtype=amp_dtype,
-            device=device,
-            metrics=metrics,
-            step=step,
-        )
+            if (
+                train_cfg.early_stop_patience > 0
+                and epochs_since_best >= train_cfg.early_stop_patience
+            ):
+                logger.info(
+                    "Early stopping at epoch %d: no val_loss improvement "
+                    "for %d epochs (best=%.4e)",
+                    epoch,
+                    train_cfg.early_stop_patience,
+                    best_val_loss,
+                )
+                metrics.record(
+                    "early_stop",
+                    epoch=epoch,
+                    step=step,
+                    patience=train_cfg.early_stop_patience,
+                    best_val_loss=best_val_loss,
+                )
+                break
+
+        if train_cfg.run_final_test and checkpoint_written:
+            _run_final_test(
+                model=model,
+                forward_model=forward_model,
+                test_loader=test_loader,
+                train_monitor_loader=train_monitor_loader,
+                best_path=best_path,
+                train_cfg=train_cfg,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                device=device,
+                metrics=metrics,
+                step=step,
+            )
     finally:
         metrics.close()
 

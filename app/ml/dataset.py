@@ -11,7 +11,6 @@ import torch
 from app.ml.cache_layout import (
     CACHE_FORMAT,
     CACHE_META_FILE,
-    LEGACY_ARRAY_FILES,
     LOAD_ARRAY_DTYPES,
     VOCAB_FILE,
     array_paths,
@@ -21,7 +20,9 @@ from app.ml.config import (
     DatasetConfig,
 )
 
-_COMPATIBLE_CACHE_FORMATS = {CACHE_FORMAT, "npy-memmap-v5", "npy-memmap-v4", "npy-memmap-v3"}
+# Token layout fixed by 6900_ml_game_player_pivot_build.sql:
+# slots 0-4 = blue (teamid=100), slots 5-9 = red (teamid=200), both in POSITIONS order.
+# Side is implied by slot index, not stored; blue_win is the label for slots 0-4.
 _PLAYER_ROLE_IDX = np.array(
     list(range(len(POSITIONS))) * 2,
     dtype=LOAD_ARRAY_DTYPES["role_idx"],
@@ -64,7 +65,6 @@ class Vocab:
     n_champions: int
     n_builds: int
     n_roles: int
-    n_sides: int
 
 
 def _cached_split(
@@ -96,7 +96,7 @@ def _cached_split(
 def _validate_cache(
     meta: dict[str, object],
 ) -> None:
-    if meta.get("format") not in _COMPATIBLE_CACHE_FORMATS:
+    if meta.get("format") != CACHE_FORMAT:
         raise ValueError(
             "Dataset cache format is stale. "
             "Run `python -m app.ml.build_dataset` to rebuild it."
@@ -149,17 +149,9 @@ class InMemoryBatchLoader:
             return n // self._batch_size
         return (n + self._batch_size - 1) // self._batch_size
 
-    def iter_batches(
-        self,
-        *,
-        shuffle: bool | None = None,
-        drop_last: bool | None = None,
-    ) -> Iterator[dict[str, torch.Tensor]]:
+    def iter_batches(self) -> Iterator[dict[str, torch.Tensor]]:
         n = int(self._indices.shape[0])
-        use_shuffle = self._shuffle if shuffle is None else bool(shuffle)
-        use_drop_last = self._drop_last if drop_last is None else bool(drop_last)
-
-        if use_shuffle:
+        if self._shuffle:
             order = self._indices.index_select(
                 0, torch.randperm(n, device=self._device)
             )
@@ -169,7 +161,7 @@ class InMemoryBatchLoader:
         for start in range(0, n, self._batch_size):
             end = start + self._batch_size
             if end > n:
-                if use_drop_last and n >= self._batch_size:
+                if self._drop_last and n >= self._batch_size:
                     break
                 end = n
             batch_idx = order[start:end]
@@ -188,33 +180,20 @@ def load_cache(cfg: DatasetConfig) -> tuple[CachedTensors, Vocab, dict[str, obje
     vocab_path: Path = cfg.cache_dir / VOCAB_FILE
 
     meta = json.loads(meta_path.read_text())
+    _validate_cache(meta)
     n_games = int(meta["n_games"])
     vocab_meta = json.loads(vocab_path.read_text())
-    cache_format = str(meta.get("format"))
-    paths = (
-        array_paths(cfg.cache_dir)
-        if cache_format == CACHE_FORMAT
-        else {
-            name: cfg.cache_dir / filename
-            for name, filename in LEGACY_ARRAY_FILES.items()
-        }
-    )
     arrays = {
-        name: np.load(path, mmap_mode="r")[:n_games] for name, path in paths.items()
+        name: np.load(path, mmap_mode="r")[:n_games]
+        for name, path in array_paths(cfg.cache_dir).items()
     }
-    _validate_cache(meta)
 
-    if "player_champion_build_idx" in arrays:
-        n_builds = int(vocab_meta["n_builds"])
-        champion_idx, build_idx = _decode_player_champion_build(
-            arrays["player_champion_build_idx"],
-            n_builds,
-        )
-        role_idx = _implied_role_idx(n_games)
-    else:
-        champion_idx = arrays["champion_idx"]
-        role_idx = arrays["role_idx"]
-        build_idx = arrays["build_idx"]
+    n_builds = int(vocab_meta["n_builds"])
+    champion_idx, build_idx = _decode_player_champion_build(
+        arrays["player_champion_build_idx"],
+        n_builds,
+    )
+    role_idx = _implied_role_idx(n_games)
 
     tensors = CachedTensors(
         champion_idx=_in_memory_tensor("champion_idx", champion_idx),
@@ -226,7 +205,6 @@ def load_cache(cfg: DatasetConfig) -> tuple[CachedTensors, Vocab, dict[str, obje
         n_champions=int(vocab_meta["n_champions"]),
         n_builds=int(vocab_meta["n_builds"]),
         n_roles=int(vocab_meta["n_roles"]),
-        n_sides=int(vocab_meta["n_sides"]),
     )
     return tensors, vocab, meta
 
