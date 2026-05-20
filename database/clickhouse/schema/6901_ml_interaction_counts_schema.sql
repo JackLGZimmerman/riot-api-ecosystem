@@ -1,28 +1,17 @@
 -- noqa: disable=LT01,LT05,PRS
 
--- Per-game per-token (matchups, primary_wins) materialised by joining each
--- game's role-pivot players against the model-consumed 6xxx aggregate tables.
--- Aggregate joins are filtered to matchups >= 5 to keep right-side cardinality
--- tractable. Rows are sparse:
--- token slots without an aggregate match (or with matchups < 5) simply do
--- not appear. The Python cache builder fills missing tokens with zeros and
--- applies leave-one-out + Bayesian smoothing in numpy.
+-- Per-game per-token 1vX historical profile features materialised by joining
+-- each game's role-pivot players against the reduced `synergy_1vx` table.
+-- `synergy_1vx` is keyed by (championid, teamposition, build, bin_idx), so
+-- this table preserves one row per player token and scaling bin. Rows are
+-- sparse: token/bin slots without a train-split aggregate match do not appear.
 --
--- token_idx layout (matches app/ml/config.INTERACTION_TYPES order):
---    0..4      1vX synergy blue (5)
---    5..9      1vX synergy red  (5)
---   10..34     1v1 matchups (5 blue x 5 red)
---   35..44     2vX synergy blue (10)
---   45..54     2vX synergy red  (10)
---   55..104    2v1 blue pair vs red single (10 x 5)
---  105..154    2v1 red pair  vs blue single (10 x 5)
---  155..164    3vX synergy blue (10)
---  165..174    3vX synergy red  (10)
+-- token_idx layout:
+--   0..4 = blue TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY
+--   5..9 = red  TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY
 --
--- primary_wins is the token's primary side's wins:
---   1v1 cross tokens: blue's wins
---   2v1 tokens: pair's wins (matches matchup_2v1.pair_wins)
---   1vX/2vX/3vX synergy tokens: combo's total wins
+-- bin_idx is the 6002_1vx scaling bin:
+--   1 early-mid, 2 mid, 3 mid-late, 4 late
 
 DROP TABLE IF EXISTS game_data_filtered.ml_interaction_counts;
 
@@ -30,8 +19,37 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.ml_interaction_counts
 (
     matchid String,
     token_idx UInt16,
-    matchups UInt64,
-    primary_wins UInt64
+    bin_idx UInt8,
+
+    log_matchups Float32,
+    win_rate Float32,
+
+    avg_gold Float32,
+    avg_xp Float32,
+    avg_item_completions Float32,
+    avg_total_cs Float32,
+
+    avg_kills Float32,
+    avg_kills_assists Float32,
+    avg_total_damage_dealt Float32,
+
+    physical_damage_share Float32,
+    magic_damage_share Float32,
+    true_damage_share Float32,
+
+    avg_damage_taken Float32,
+    avg_durability Float32,
+    damage_to_taken_ratio Float32,
+
+    avg_time_ccing_others Float32,
+    avg_protection Float32,
+
+    avg_epic_monster_takedowns Float32,
+    avg_turret_takedowns Float32,
+    avg_damage_to_objectives Float32,
+
+    avg_vision_score Float32,
+    avg_control_wards_bought Float32
 )
 ENGINE = MergeTree
-ORDER BY (matchid, token_idx);
+ORDER BY (matchid, token_idx, bin_idx);

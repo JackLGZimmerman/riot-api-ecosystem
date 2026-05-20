@@ -1,12 +1,12 @@
 -- noqa: disable=PRS,RF01
 -- Filter pipeline: population in dependency order.
 --
--- Base population: filter 14 (gameduration > 1080 s) is applied first as an
+-- Base population: filter 14 (gameduration > 990 s) is applied first as an
 -- explicit pre-stage. All downstream stages SEMI JOIN filter_stg_f14_long_games
 -- instead of scanning game_data.info, so no stage touches short games.
 --
 -- Flow:
---   0.  f14_long_games         (pre-filter: matchids with gameduration > 1080)
+--   0.  f14_long_games         (pre-filter: matchids with gameduration > 990)
 --   1a. player_winrates        (from game_data.players)
 --   1b. player_role_rates      (from game_data.participant_stats SEMI JOIN f14)
 --   1c. team_flags             (from game_data.participant_stats SEMI JOIN f14)
@@ -33,7 +33,7 @@
 -- Run with clickhouse-client --multiquery after 4000_filter_schema.sql.
 
 -- =============================================================================
--- Pre-stage (f14): collect long-game matchids (gameduration > 1080 s).
+-- Pre-stage (f14): collect long-game matchids (gameduration > 990 s).
 -- All subsequent stages restrict to this set via SEMI JOIN.
 -- =============================================================================
 
@@ -41,8 +41,8 @@ TRUNCATE TABLE game_data.filter_stg_f14_long_games;
 
 INSERT INTO game_data.filter_stg_f14_long_games (matchid)
 SELECT matchid
-FROM game_data.info FINAL
-WHERE gameduration > 1080;
+FROM game_data.info
+WHERE gameduration > 990;
 
 -- =============================================================================
 -- Stage 1a: player win rates (from game_data.players, one row per puuid)
@@ -159,7 +159,7 @@ WITH suspect_games AS (
         FROM game_data.filter_stg_player_winrates
         WHERE wins + losses > 40 AND wins * 100 > (wins + losses) * 70
     ) AS sp ON ps.puuid = sp.puuid
-    ANY INNER JOIN game_data.info AS i FINAL ON ps.matchid = i.matchid
+    ANY INNER JOIN game_data.info AS i ON ps.matchid = i.matchid
 )
 SELECT
     matchid,
@@ -178,7 +178,7 @@ FROM suspect_games;
 
 -- =============================================================================
 -- Stage 1: per-participant flags for all active filters (long games only).
--- Only rows for games with gameduration > 1080 are inserted; short games never
+-- Only rows for games with gameduration > 990 are inserted; short games never
 -- enter the staging tables.
 -- =============================================================================
 

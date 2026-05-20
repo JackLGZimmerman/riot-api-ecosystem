@@ -35,15 +35,11 @@ logger = logging.getLogger(__name__)
 SWEEP_ROOT = CHECKPOINT_DIR
 TB_SWEEP_ROOT = (ML_DATA_DIR / "tensorboard" / "sweep").resolve()
 
-# Sweep defaults: aggressive early stopping, skip per-run test, no attention
-# diagnostics, no train_monitor (frees ~8% wall time, irrelevant for ranking).
+# Sweep defaults: aggressive early stopping, skip per-run test.
 SWEEP_DEFAULTS: dict[str, Any] = {
     "epochs": 1000,
     "early_stop_patience": 10,
     "run_final_test": False,
-    "attention_diagnostics_interval": 0,
-    "train_monitor_samples": 0,
-    "prediction_bands_enabled": False,
 }
 
 
@@ -83,7 +79,6 @@ def _parse_metrics(metrics_path: Path) -> dict[str, Any]:
                         "best_val_auc": row.get("val_auc"),
                         "best_val_brier": row.get("val_brier"),
                         "best_val_ece": row.get("val_ece"),
-                        "best_gen_loss_gap": row.get("gen_loss_gap"),
                     }
             elif event == "early_stop":
                 early_stop = {
@@ -355,9 +350,6 @@ def main(argv: list[str] | None = None) -> int:
                 "epochs": args.epochs,
                 "early_stop_patience": args.patience,
                 "run_final_test": True,
-                "attention_diagnostics_interval": 10,
-                "train_monitor_samples": 50_000,
-                "prediction_bands_enabled": True,
             }
         )
         run_one("final", args.name, overrides, skip_if_done=False)

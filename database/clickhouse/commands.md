@@ -99,21 +99,42 @@ docker exec clickhouse clickhouse-client --multiquery \
 
 docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/5900_ml_game_split_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6900_ml_game_player_pivot_schema.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6900_ml_game_player_pivot_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6002_1vx_aggregations_schema.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6002_1vx_aggregations_build.sql
 ```
 
 To rebuild from scratch (drops `game_data_filtered.*` first), run `5000`
 before the sequence above. Run `5001` only if `valid_game_ids` itself was
 dropped — `5000` deliberately does not touch it.
 
+After the SQL path finishes, rebuild the Python ML cache:
+
+```bash
+uv run python -m app.ml.build_dataset
+```
+
 Memory note: `5003` carries `max_threads=1, max_block_size=8192,
 max_insert_block_size=32768` and a 4-way hash split on
 `participant_challenges` to stay under the 4.5 GiB container cap.
 
-## Fast filter iteration (participant_stats only)
+## Fast filter iteration (participant_stats + profiling events)
 
-Use when validating filter changes and checks only need `filter_stg_*`,
-`valid_game_ids`, and `game_data_filtered.participant_stats`. Skips the
-expensive `tl_*` copies and derived analytical rebuilds.
+Use when validating filter changes and checks need `filter_stg_*`,
+`valid_game_ids`, `game_data_filtered.participant_stats`, and the timeline
+event tables required for profiling (`tl_participant_stats`,
+`tl_champion_kill`, `tl_item_purchased`, `tl_item_sold`, `tl_item_undo`,
+`tl_elite_monster_kill`, `tl_building_kill`). Skips the rest of the
+`tl_*` copies and derived analytical rebuilds.
 
 ```bash
 docker exec clickhouse clickhouse-client --multiquery \

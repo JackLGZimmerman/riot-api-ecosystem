@@ -1,6 +1,7 @@
 """Build the training cache.
 
-Streams one row per game from `game_data_filtered.ml_game_player_pivot`
+Streams one row per game from `game_data_filtered.ml_game_player_pivot`,
+joins 6002's `game_data_filtered.synergy_1vx` per-player profile features,
 and writes memory-mapped .npy arrays plus metadata.
 
 Run with:
@@ -12,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -20,27 +22,32 @@ from clickhouse_connect.driver.external import ExternalData
 
 from app.core.logging.logger import setup_logging_config
 from app.ml.cache_layout import (
-    ARRAY_FILES,
     BLUE_WIN_FILE,
     CACHE_FORMAT,
     CACHE_META_FILE,
     DISK_ARRAY_DTYPES,
-    OBSOLETE_ARRAY_FILES,
+    N_PROFILE_BINS,
+    N_PROFILE_FEATURES,
     PLAYER_CHAMPION_BUILD_IDX_FILE,
+    PLAYER_PROFILE_FILE,
+    PROFILE_FEATURE_COLUMNS,
     VOCAB_FILE,
     array_paths,
 )
 from app.ml.config import (
-    ITEM_VALUE_TABLE,
-    PARTICIPANT_TABLE,
+    CHAMPION_ID_NAME_DICT,
+    ITEM_VALUE_MAP_DICT,
     PLAYER_PIVOT_TABLE,
     POSITIONS,
     SPLIT_TABLE,
+    SYNERGY_1VX_TABLE,
     DatasetConfig,
 )
 from database.clickhouse.client import get_client
 
 N_PLAYER_TOKENS = 10
+_ITEM_VALUE_KEY_COLUMNS = frozenset({"championid", "teamposition", "itemid"})
+_EMPTY_BUILD_LABEL = "none"
 
 setup_logging_config()
 logger = logging.getLogger(__name__)
@@ -110,27 +117,38 @@ def _build_vocabularies() -> dict[str, object]:
     client = get_client()
     champions = client.query(
         f"""
-        SELECT DISTINCT championid
-        FROM {PARTICIPANT_TABLE}
-        ORDER BY championid
+        SELECT _key AS championid
+        FROM {CHAMPION_ID_NAME_DICT}
+        WHERE _key > 0
+        ORDER BY _key
         """
     ).result_rows
+    item_value_db, item_value_table = ITEM_VALUE_MAP_DICT.split(".", maxsplit=1)
+    key_column_sql = ", ".join(f"'{name}'" for name in sorted(_ITEM_VALUE_KEY_COLUMNS))
     builds = client.query(
         f"""
-        SELECT DISTINCT highest_value_label AS build
-        FROM {ITEM_VALUE_TABLE}
-        ORDER BY build
+        SELECT name
+        FROM system.columns
+        WHERE
+            database = '{item_value_db}'
+            AND table = '{item_value_table}'
+            AND startsWith(type, 'Float')
+            AND name NOT IN ({key_column_sql})
+        ORDER BY position
         """
     ).result_rows
 
     champion_to_idx = {int(c[0]): i for i, c in enumerate(champions)}
-    build_to_idx = {str(b[0]): i for i, b in enumerate(builds)}
+    build_labels = [_EMPTY_BUILD_LABEL, *(str(b[0]) for b in builds)]
+    build_to_idx = {label: i for i, label in enumerate(build_labels)}
     role_to_idx = {p: i for i, p in enumerate(POSITIONS)}
 
     return {
         "champion_to_idx": champion_to_idx,
         "build_to_idx": build_to_idx,
         "role_to_idx": role_to_idx,
+        "champion_vocab_source": CHAMPION_ID_NAME_DICT,
+        "build_vocab_source": f"{ITEM_VALUE_MAP_DICT} value columns",
         "n_champions": len(champion_to_idx),
         "n_builds": len(build_to_idx),
         "n_roles": len(role_to_idx),
@@ -171,7 +189,13 @@ def _allocate_arrays(n_games: int, cache_dir: Path) -> dict[str, np.ndarray]:
             cache_dir / PLAYER_CHAMPION_BUILD_IDX_FILE,
             mode="w+",
             dtype=DISK_ARRAY_DTYPES["player_champion_build_idx"],
-            shape=(n_games, 10),
+            shape=(n_games, N_PLAYER_TOKENS),
+        ),
+        "player_profile": np.lib.format.open_memmap(
+            cache_dir / PLAYER_PROFILE_FILE,
+            mode="w+",
+            dtype=DISK_ARRAY_DTYPES["player_profile"],
+            shape=(n_games, N_PLAYER_TOKENS, N_PROFILE_BINS, N_PROFILE_FEATURES),
         ),
         "blue_win": np.lib.format.open_memmap(
             cache_dir / BLUE_WIN_FILE,
@@ -224,15 +248,95 @@ def _build_champion_lut(vocab: dict) -> np.ndarray:
 
 
 def _player_pivot_query() -> str:
+    profile_columns = ",\n        ".join(PROFILE_FEATURE_COLUMNS)
+    profile_tuple_fields = ", ".join(
+        f"s.{column}" for column in PROFILE_FEATURE_COLUMNS
+    )
     return f"""
+    WITH
+    expanded AS (
+        SELECT
+            p.matchid,
+            p.blue_win,
+            p.blue_players,
+            p.red_players,
+            toUInt16(tupleElement(token, 2)) AS token_idx,
+            tupleElement(tupleElement(token, 1), 1) AS championid,
+            tupleElement(tupleElement(token, 1), 2) AS teamposition,
+            tupleElement(tupleElement(token, 1), 3) AS build
+        FROM {PLAYER_PIVOT_TABLE} AS p
+        INNER JOIN selected_matchids AS sg ON p.matchid = sg.matchid
+        ARRAY JOIN [
+            tuple(p.blue_players[1], toUInt16(0)),
+            tuple(p.blue_players[2], toUInt16(1)),
+            tuple(p.blue_players[3], toUInt16(2)),
+            tuple(p.blue_players[4], toUInt16(3)),
+            tuple(p.blue_players[5], toUInt16(4)),
+            tuple(p.red_players[1], toUInt16(5)),
+            tuple(p.red_players[2], toUInt16(6)),
+            tuple(p.red_players[3], toUInt16(7)),
+            tuple(p.red_players[4], toUInt16(8)),
+            tuple(p.red_players[5], toUInt16(9))
+        ] AS token
+    )
     SELECT
-        g.matchid,
-        g.blue_win,
-        g.blue_players,
-        g.red_players
-    FROM {PLAYER_PIVOT_TABLE} AS g
-    INNER JOIN selected_matchids AS sg ON g.matchid = sg.matchid
+        e.matchid,
+        any(e.blue_win) AS blue_win,
+        any(e.blue_players) AS blue_players,
+        any(e.red_players) AS red_players,
+        groupArrayIf(
+            (
+                e.token_idx,
+                s.bin_idx,
+                {profile_tuple_fields}
+            ),
+            s.bin_idx > 0
+        ) AS profile_rows
+    FROM expanded AS e
+    ALL LEFT JOIN (
+        SELECT
+            championid,
+            teamposition,
+            build,
+            bin_idx,
+            {profile_columns}
+        FROM {SYNERGY_1VX_TABLE}
+        WHERE split = 'train'
+    ) AS s
+        ON
+            s.championid = e.championid
+            AND s.teamposition = e.teamposition
+            AND s.build = e.build
+    GROUP BY e.matchid
+    SETTINGS join_algorithm = 'hash'
     """
+
+
+def _profile_rows_to_array(profile_rows: object) -> np.ndarray:
+    profile = np.zeros(
+        (N_PLAYER_TOKENS, N_PROFILE_BINS, N_PROFILE_FEATURES),
+        dtype=DISK_ARRAY_DTYPES["player_profile"],
+    )
+    if not isinstance(profile_rows, Sequence) or isinstance(profile_rows, (str, bytes)):
+        return profile
+
+    for row in profile_rows:
+        if not isinstance(row, Sequence):
+            raise TypeError(f"Unexpected 1vX profile row type: {type(row).__name__}")
+        if len(row) != 2 + N_PROFILE_FEATURES:
+            raise ValueError(
+                "Unexpected 1vX profile row shape from "
+                f"{SYNERGY_1VX_TABLE}: {len(row)}"
+            )
+        token_idx = int(row[0])
+        bin_idx = int(row[1])
+        if not (0 <= token_idx < N_PLAYER_TOKENS and 1 <= bin_idx <= N_PROFILE_BINS):
+            continue
+        profile[token_idx, bin_idx - 1] = np.asarray(
+            row[2:],
+            dtype=DISK_ARRAY_DTYPES["player_profile"],
+        )
+    return profile
 
 
 def _stream_into_arrays(
@@ -256,7 +360,9 @@ def _stream_into_arrays(
     )
     build_idx_chunk = np.zeros((n, N_PLAYER_TOKENS), dtype=np.uint8)
 
-    for i, (_matchid, blue_win, blue_players, red_players) in enumerate(pivot_rows):
+    for i, (_matchid, blue_win, blue_players, red_players, profile_rows) in enumerate(
+        pivot_rows
+    ):
         for slot, (cid, pos, build) in enumerate(blue_players):
             c, b = _resolve_player_idx(
                 int(cid), str(pos), str(build), champion_lut, role_map, build_map
@@ -270,6 +376,9 @@ def _stream_into_arrays(
             chunk_slot = len(POSITIONS) + slot
             champion_idx_chunk[i, chunk_slot] = c
             build_idx_chunk[i, chunk_slot] = b
+        arrays["player_profile"][start_write_idx + i] = _profile_rows_to_array(
+            profile_rows
+        )
         arrays["blue_win"][start_write_idx + i] = int(blue_win)
 
     arrays["player_champion_build_idx"][start_write_idx : start_write_idx + n] = (
@@ -289,13 +398,6 @@ def _flush_arrays(arrays: dict[str, np.ndarray]) -> None:
         flush = getattr(arr, "flush", None)
         if flush is not None:
             flush()
-
-
-def _remove_obsolete_cache_files(cache_dir: Path) -> None:
-    for filename in OBSOLETE_ARRAY_FILES:
-        path = cache_dir / filename
-        if path.exists():
-            path.unlink()
 
 
 # --------------------------------------------------------------------------
@@ -332,6 +434,10 @@ def build(cfg: DatasetConfig | None = None) -> Path:
         * (
             N_PLAYER_TOKENS
             * np.dtype(DISK_ARRAY_DTYPES["player_champion_build_idx"]).itemsize
+            + N_PLAYER_TOKENS
+            * N_PROFILE_BINS
+            * N_PROFILE_FEATURES
+            * np.dtype(DISK_ARRAY_DTYPES["player_profile"]).itemsize
             + np.dtype(DISK_ARRAY_DTYPES["blue_win"]).itemsize
         )
         / 1e6
@@ -359,6 +465,13 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             if chunk_written == 0:
                 logger.warning("Stopping %s split after an empty chunk", split_name)
                 break
+            if chunk_written != len(chunk):
+                raise RuntimeError(
+                    "Short cache chunk while streaming "
+                    f"{split_name}: expected {len(chunk)} games, "
+                    f"wrote {chunk_written}. Rebuild aborted so cache metadata "
+                    "cannot silently drift from SQL split counts."
+                )
             n_written += chunk_written
             split_counts[split_name] += chunk_written
     logger.info("Wrote %d / %d games", n_written, n_games)
@@ -382,6 +495,20 @@ def build(cfg: DatasetConfig | None = None) -> Path:
                     "champion_build": "packed_uint16_champion_idx_times_n_builds_plus_build_idx",
                     "role_idx": "implied_by_player_slot",
                 },
+                "player_profile": {
+                    "source_table": SYNERGY_1VX_TABLE,
+                    "source_schema": "database/clickhouse/schema/6002_1vx_aggregations_schema.sql",
+                    "shape": [
+                        "n_games",
+                        N_PLAYER_TOKENS,
+                        N_PROFILE_BINS,
+                        N_PROFILE_FEATURES,
+                    ],
+                    "bin_idx": "1..4 in source, stored as axis indices 0..3",
+                    "feature_columns": list(PROFILE_FEATURE_COLUMNS),
+                    "missing_profile_rows": "zero_filled",
+                    "grain": "per match, player token, and scaling bin; not pairwise interactions",
+                },
                 "splits": {
                     "strategy": "sql_ml_game_split",
                     "train": split_counts["train"],
@@ -404,18 +531,8 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     )
 
     logger.info("Done. n_games=%d", n_written)
-    _remove_obsolete_cache_files(cfg.cache_dir)
     return meta_path
 
 
 if __name__ == "__main__":
     build()
-
-
-__all__ = [
-    "ARRAY_FILES",
-    "CACHE_FORMAT",
-    "CACHE_META_FILE",
-    "VOCAB_FILE",
-    "build",
-]

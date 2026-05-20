@@ -8,5 +8,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_game_end
     gameid Nullable (UInt64),
     realtimestamp UInt64
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, winningteam, realtimestamp);

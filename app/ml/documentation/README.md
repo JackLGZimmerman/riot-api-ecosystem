@@ -1,6 +1,6 @@
 # ML Win Prediction
 
-Maintenance: keep this README as the live operating contract. Put dataset/cache mechanics in [DATASET.md](DATASET.md), experiment evidence in [OPTIMISATIONS.md](OPTIMISATIONS.md), repeatable sweep procedure in [TESTING.md](TESTING.md), and metric-field detail in [DIAGNOSTICS.md](DIAGNOSTICS.md).
+Maintenance: keep this README as the live operating contract. Put dataset/cache mechanics in [DATASET.md](DATASET.md), architecture / data-flow visualisation in [MODEL.md](MODEL.md), experiment evidence in [OPTIMISATIONS.md](OPTIMISATIONS.md), MoE-specific first-pass evidence in [MOE_EVALUATION.md](MOE_EVALUATION.md), repeatable sweep procedure in [TESTING.md](TESTING.md), and metric-field detail in [DIAGNOSTICS.md](DIAGNOSTICS.md).
 
 Predicts `blue_win` from the 10 fixed player slots. `HybridTokenModel` consumes champion, role, build, and side embeddings per player.
 
@@ -39,8 +39,61 @@ Current default `ModelConfig`:
 | `attention_dropout` | 0.10 |
 | `pooling` | `team_mean` |
 | `head_hidden` | 256 |
+| `use_moe` | true |
+| `n_experts` | 7 |
+| `expert_hidden` | 128 |
+| `router_hidden` | 32 |
+| `moe_top_k` | 2 |
+| `correction_scale` | 0.25 |
+| `expert_band_centers` | `(0.425, 0.450, 0.475, 0.500, 0.525, 0.550, 0.575)` |
+| `expert_band_width` | 0.05 |
+| `central_min` / `central_max` | `0.40` / `0.60` |
+| `router_temperature` | 1.0 |
+| `learned_router_adjustment` | false |
+| `moe_dropout` | 0.10 |
 
-This is about `2.62M` parameters with the current cache vocabulary. Keep architecture rationale and sweep evidence in `OPTIMISATIONS.md`.
+This is about `3.93M` parameters with the current cache vocabulary when the MoE residual is enabled. Keep architecture rationale and sweep evidence in `OPTIMISATIONS.md`.
+
+## Prediction-Band MoE Residual
+
+The model keeps the baseline Set Transformer and antisymmetric head intact, then adds a bounded residual correction:
+
+```text
+baseline_logit = head(m(b, r)) - head(m(r, b))
+moe_correction = moe(m(b, r), baseline_logit) - moe(m(r, b), -baseline_logit)
+final_logit = baseline_logit + moe_correction
+P(blue_win) = sigmoid(final_logit)
+```
+
+The MoE is a residual layer, not a replacement head. Expert routing is anchored only to the baseline probability band, so experts cannot specialize by champion, role, build, patch, temporal identity, or side. Routing uses deterministic triangular kernels over seven overlapping 5%-wide bands with 2.5% spacing:
+
+| expert | band | center |
+| ---: | --- | ---: |
+| 0 | 40.0-45.0% | 0.425 |
+| 1 | 42.5-47.5% | 0.450 |
+| 2 | 45.0-50.0% | 0.475 |
+| 3 | 47.5-52.5% | 0.500 |
+| 4 | 50.0-55.0% | 0.525 |
+| 5 | 52.5-57.5% | 0.550 |
+| 6 | 55.0-60.0% | 0.575 |
+
+Only the top `moe_top_k=2` active bands are mixed. Samples outside `central_min=0.40` and `central_max=0.60` have zero active routing weight, so tail predictions remain the baseline logit. `learned_router_adjustment` can add a small router correction, but it only sees baseline-derived scalar and band-kernel features; it does not see match identity features.
+
+Each expert receives:
+
+- `m(x, y)`
+- `baseline_logit`
+- `sigmoid(baseline_logit)`
+- `abs(sigmoid(baseline_logit) - 0.5)`
+- the seven deterministic band-kernel weights
+
+Experts emit residual logit deltas bounded as:
+
+```text
+expert_delta = correction_scale * tanh(raw_delta)
+```
+
+Because the final correction is antisymmetrized with the reverse match representation and negated baseline logit, swapping blue/red at the representation level still negates the final logit.
 
 ## Target Smoothing
 
@@ -73,16 +126,42 @@ Current 5070 Ti warm-path training uses `batch_size=16384`, BF16 AMP, fused Adam
 | `lr_eta_min_ratio` | 0.01 |
 | `grad_clip` | 0.0 |
 | `log_interval` | 10 |
-| `epochs` | 300 |
+| `epochs` | 500 |
+| `early_stop_patience` | 10 |
 | `target_min` / `target_max` | `0.05` / `0.95` |
-| `attention_diagnostics_interval` | 10 epochs |
-| `attention_diagnostics_batch_size` | 256 |
-| `attention_diagnostics_eval_samples` | 1024 |
-| `train_monitor_samples` | 50000 |
 | `tensorboard_dir` | `tensorboard` |
 | `tensorboard_raw_mirror` | false |
 | `use_amp` | true |
 | `amp_dtype` | `bfloat16` |
+
+## MoE Training Plan
+
+Start from the enabled residual defaults above with `learned_router_adjustment=false`, so routing is fully deterministic by baseline band. The residual experts are zero-initialized at their final layer, making step zero identical to the baseline model. Train end-to-end with the existing BCE-with-logits objective and target smoothing; no custom loss or loader change is required.
+
+Use validation loss as the promotion metric, with Brier and ECE as calibration guards. If central-band loss improves without hurting tails, sweep only small MoE levers first: `correction_scale`, `expert_hidden`, `moe_dropout`, `router_temperature`, then `learned_router_adjustment=true`.
+
+## MoE Evaluation Metrics
+
+Compare baseline vs MoE on:
+
+- validation/test BCE loss
+- AUC and accuracy
+- Brier score and ECE
+- graduated prediction-band diagnostics, especially 40-60%
+- tail bands below 40% and above 60% to confirm they remain effectively unchanged
+- central-band calibration error and realized win rate by 0.5% diagnostic bin
+- throughput and parameter count
+
+## MoE Ablations
+
+Minimal first-pass ablations:
+
+- `use_moe=false` baseline control
+- `correction_scale` in a small range such as `0.10`, `0.25`, `0.40`
+- `moe_top_k=1` vs `2`
+- `expert_hidden=64` vs `128`
+- `learned_router_adjustment=false` vs `true`
+- central-only experts vs a deliberately wider/tail-including variant, promoted only if tails improve without calibration regression
 
 Live training writes `best.pt`, `metrics.jsonl`, and `metrics_latest.json` to `app/ml/data/`. Preserved sweep runs live under `app/ml/data/checkpoints/`.
 
@@ -95,7 +174,7 @@ import torch
 
 base_lr = 2e-4
 warmup_steps = 125
-num_epochs = 300
+num_epochs = 500
 batches_per_epoch = len(train_loader)
 total_steps = max(1, batches_per_epoch * num_epochs)
 decay_steps = max(1, total_steps - warmup_steps)
@@ -140,10 +219,6 @@ Tuning parameters:
 - `lr_tail_strength` controls how slowly the post-centre tail decays (higher = faster decay).
 - `lr_eta_min_ratio` sets the final floor as a fraction of `lr`; the last step hits it exactly.
 - `epochs` controls the schedule length together with the number of batches per epoch.
-
-## Central Prediction Bands
-
-The headline central band is `0.475-0.525`, emitted every epoch for train-monitor, validation, TensorBoard, and generalization-gap tracking. Full prediction diagnostics also include `0.45-0.55` and `0.40-0.60` so the summary shows the tight requirement first, then progressively wider decision regions.
 
 ## Future Considerations
 

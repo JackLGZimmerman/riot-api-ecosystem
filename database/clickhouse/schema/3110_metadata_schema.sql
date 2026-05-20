@@ -5,5 +5,5 @@ CREATE TABLE IF NOT EXISTS game_data.metadata
     dataversion UInt8,
     participants Array (FixedString (78))
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid);

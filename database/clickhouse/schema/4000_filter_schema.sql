@@ -1,6 +1,6 @@
 -- Filter pipeline: complete table DDL for the 2-stage filter.
 --
--- Pre-filter (f14): games with gameduration > 1080 s are collected into
+-- Pre-filter (f14): games with gameduration > 990 s are collected into
 --          filter_stg_f14_long_games first. All subsequent stages operate
 --          exclusively on this long-game population via SEMI JOIN.
 -- Stage 1: cheap per-participant / per-team filters scanned over f14_long_games.
@@ -9,7 +9,7 @@
 --
 -- Run with clickhouse-client --multiquery before 4000_filter_build.sql.
 
--- Pre-filter stage: long games only (gameduration > 1080 s).
+-- Pre-filter stage: long games only (gameduration > 990 s).
 DROP TABLE IF EXISTS game_data.filter_stg_f14_long_games;
 
 CREATE TABLE game_data.filter_stg_f14_long_games

@@ -15,5 +15,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_building_kill
     teamid UInt8,
     towertype LowCardinality (Nullable (String))
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, lanetype, buildingtype, killerid);

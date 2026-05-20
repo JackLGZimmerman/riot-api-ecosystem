@@ -8,5 +8,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_dragon_soul_given
     name LowCardinality (String),
     teamid UInt8
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, teamid, name);

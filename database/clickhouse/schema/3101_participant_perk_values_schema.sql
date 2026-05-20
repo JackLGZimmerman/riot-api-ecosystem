@@ -25,5 +25,5 @@ CREATE TABLE IF NOT EXISTS game_data.participant_perk_values
     sub_var2_2 Int32,
     sub_var3_2 Int32
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, teamid, puuid);

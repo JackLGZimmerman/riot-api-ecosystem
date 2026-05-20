@@ -50,13 +50,6 @@ def persist_data(
     )
 
 
-def delete_by_run_id(table: str, run_id: UUID) -> None:
-    get_client().command(
-        f"ALTER TABLE {table} DELETE WHERE run_id = %(run_id)s SETTINGS mutations_sync = 2",
-        parameters={"run_id": str(run_id)},
-    )
-
-
 def _as_text(value: object) -> str:
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8").rstrip("\x00")

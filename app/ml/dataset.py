@@ -12,6 +12,8 @@ from app.ml.cache_layout import (
     CACHE_FORMAT,
     CACHE_META_FILE,
     LOAD_ARRAY_DTYPES,
+    N_PROFILE_BINS,
+    N_PROFILE_FEATURES,
     VOCAB_FILE,
     array_paths,
 )
@@ -48,8 +50,7 @@ def _decode_player_champion_build(
 
 
 def _implied_role_idx(n_games: int) -> np.ndarray:
-    roles = np.broadcast_to(_PLAYER_ROLE_IDX, (n_games, _PLAYER_ROLE_IDX.shape[0]))
-    return np.array(roles, dtype=LOAD_ARRAY_DTYPES["role_idx"], copy=True)
+    return np.broadcast_to(_PLAYER_ROLE_IDX, (n_games, _PLAYER_ROLE_IDX.shape[0]))
 
 
 @dataclass
@@ -57,6 +58,7 @@ class CachedTensors:
     champion_idx: torch.Tensor
     role_idx: torch.Tensor
     build_idx: torch.Tensor
+    player_profile: torch.Tensor
     blue_win: torch.Tensor
 
 
@@ -65,6 +67,8 @@ class Vocab:
     n_champions: int
     n_builds: int
     n_roles: int
+    n_profile_bins: int = N_PROFILE_BINS
+    n_profile_features: int = N_PROFILE_FEATURES
 
 
 def _cached_split(
@@ -103,6 +107,16 @@ def _validate_cache(
         )
 
 
+def _profile_shape(meta: dict[str, object]) -> tuple[int, int]:
+    profile_meta = meta.get("player_profile")
+    if not isinstance(profile_meta, dict):
+        return N_PROFILE_BINS, N_PROFILE_FEATURES
+    shape = profile_meta.get("shape")
+    if not isinstance(shape, list) or len(shape) != 4:
+        return N_PROFILE_BINS, N_PROFILE_FEATURES
+    return int(shape[2]), int(shape[3])
+
+
 class _SplitView:
     """Minimal proxy exposing split size for `len(loader.dataset)`."""
 
@@ -134,6 +148,7 @@ class InMemoryBatchLoader:
             "champion_idx": tensors.champion_idx,
             "role_idx": tensors.role_idx,
             "build_idx": tensors.build_idx,
+            "player_profile": tensors.player_profile,
             "blue_win": tensors.blue_win,
         }
         self._indices = indices
@@ -194,17 +209,24 @@ def load_cache(cfg: DatasetConfig) -> tuple[CachedTensors, Vocab, dict[str, obje
         n_builds,
     )
     role_idx = _implied_role_idx(n_games)
+    n_profile_bins, n_profile_features = _profile_shape(meta)
 
     tensors = CachedTensors(
         champion_idx=_in_memory_tensor("champion_idx", champion_idx),
         role_idx=_in_memory_tensor("role_idx", role_idx),
         build_idx=_in_memory_tensor("build_idx", build_idx),
+        player_profile=_in_memory_tensor(
+            "player_profile",
+            arrays["player_profile"],
+        ),
         blue_win=_in_memory_tensor("blue_win", arrays["blue_win"]),
     )
     vocab = Vocab(
         n_champions=int(vocab_meta["n_champions"]),
-        n_builds=int(vocab_meta["n_builds"]),
+        n_builds=n_builds,
         n_roles=int(vocab_meta["n_roles"]),
+        n_profile_bins=n_profile_bins,
+        n_profile_features=n_profile_features,
     )
     return tensors, vocab, meta
 
@@ -214,6 +236,7 @@ def _to_device(tensors: CachedTensors, device: torch.device) -> CachedTensors:
         champion_idx=tensors.champion_idx.to(device, non_blocking=True),
         role_idx=tensors.role_idx.to(device, non_blocking=True),
         build_idx=tensors.build_idx.to(device, non_blocking=True),
+        player_profile=tensors.player_profile.to(device, non_blocking=True),
         blue_win=tensors.blue_win.to(device, non_blocking=True),
     )
 
@@ -222,12 +245,10 @@ def build_loaders(
     cfg: DatasetConfig,
     batch_size: int,
     device: torch.device,
-    train_monitor_samples: int = 0,
 ) -> tuple[
     InMemoryBatchLoader,
     InMemoryBatchLoader,
     InMemoryBatchLoader,
-    InMemoryBatchLoader | None,
     Vocab,
 ]:
     tensors, vocab, meta = load_cache(cfg)
@@ -263,22 +284,4 @@ def build_loaders(
         shuffle=False,
         drop_last=False,
     )
-    # Held-in train slice: a fixed, unshuffled subset the model trains on,
-    # evaluated through the validation path so train/val gaps are comparable.
-    train_monitor_loader: InMemoryBatchLoader | None = None
-    if train_monitor_samples > 0 and train_idx.shape[0] > 0:
-        monitor_n = min(int(train_monitor_samples), int(train_idx.shape[0]))
-        train_monitor_loader = InMemoryBatchLoader(
-            tensors,
-            train_idx[:monitor_n],
-            batch_size,
-            shuffle=False,
-            drop_last=False,
-        )
-    return (
-        train_loader,
-        val_loader,
-        test_loader,
-        train_monitor_loader,
-        vocab,
-    )
+    return train_loader, val_loader, test_loader, vocab

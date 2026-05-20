@@ -15,5 +15,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_champion_kill
     position_x Int16,
     position_y Int16
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, champion_kill_event_id);

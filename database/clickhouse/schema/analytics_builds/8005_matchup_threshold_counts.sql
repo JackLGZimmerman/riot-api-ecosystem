@@ -1,9 +1,8 @@
 -- noqa: disable=AL03,LT14
--- Row counts per 6xxx aggregate at successive `matchups` thresholds, train
--- split only. Justifies the `matchups >= 5` cutoff applied in the
--- 6901_ml_interaction_counts build: low-support rows dominate the large
--- matchup/synergy right-hand sides and inflate the join hash table without
--- contributing usable signal. Re-run after rebuilding 6xxx to refresh.
+-- Row counts per aggregate at successive support thresholds, train split
+-- only. Most 6xxx tables store raw support as `matchups`; reduced
+-- `synergy_1vx` stores `log_matchups = log1p(matchups)`, so its block uses
+-- equivalent log-space thresholds. Re-run after rebuilding 6xxx to refresh.
 
 SELECT
     table_name,
@@ -74,10 +73,10 @@ FROM (
     SELECT
         'synergy_1vx',
         count(),
-        countIf(matchups >= 2),
-        countIf(matchups >= 3),
-        countIf(matchups >= 4),
-        countIf(matchups >= 5)
+        countIf(log_matchups >= log1p(2)),
+        countIf(log_matchups >= log1p(3)),
+        countIf(log_matchups >= log1p(4)),
+        countIf(log_matchups >= log1p(5))
     FROM game_data_filtered.synergy_1vx WHERE split = 'train'
     UNION ALL
     SELECT

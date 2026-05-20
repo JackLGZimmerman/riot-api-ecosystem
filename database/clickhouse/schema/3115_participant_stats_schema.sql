@@ -132,5 +132,5 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
     retreatpings Nullable (UInt16),
     unrealkills UInt8
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, participantid, puuid);

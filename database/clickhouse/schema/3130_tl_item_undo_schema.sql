@@ -9,5 +9,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_item_undo
     afterid UInt32,
     goldgain Int32
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, participantid, beforeid, afterid);

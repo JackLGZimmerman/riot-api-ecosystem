@@ -6,5 +6,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_pause_end
     timestamp UInt64,
     realtimestamp UInt64
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, realtimestamp);

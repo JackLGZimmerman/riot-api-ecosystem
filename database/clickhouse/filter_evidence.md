@@ -4,39 +4,39 @@ Per-rule evidence for the filter pipeline (`schema/4000_filter_schema.sql` + `sc
 
 ## Snapshot
 
-Base population is `filter_stg_f14_long_games` (gameduration > 1080 s). Numbers below are from the rebuild after the current changeset.
+Base population is `filter_stg_f14_long_games` (gameduration > 990 s, i.e. > 16.5 min). Numbers below are from the rebuild after lowering the f14 threshold from 1080 s back to 990 s.
 
 | Metric | Count | % of base |
 |---|---:|---:|
-| Long games (f14 base) | 2,341,241 | 100% |
-| Stage 1 survivors | 1,708,699 | 72.98% |
-| Valid games (`any_filter_triggered = 0`) | 1,678,311 | 71.68% |
-| Flagged by any rule | 662,930 | 28.32% |
+| Long games (f14 base) | 2,733,705 | 100% |
+| Stage 1 survivors | 1,986,090 | 72.65% |
+| Valid games (`any_filter_triggered = 0`) | 1,947,860 | 71.25% |
+| Flagged by any rule | 785,845 | 28.75% |
 | Baseline participant win rate | 0.500 | — |
 
-`game_data.participant_stats_corrected` was rebuilt before this snapshot and now contains one row per participant key: 23,412,410 rows for 23,412,410 distinct `(matchid, teamid, participantid)` keys.
+`game_data.participant_stats_corrected` was rebuilt before this snapshot and now contains one row per participant key: 27,337,050 rows for 27,337,050 distinct `(matchid, teamid, participantid)` keys (2,733,705 long games × 10 participants).
 
 Latest `analytics_builds/8003_filter_statistics.sql` output:
 
 | Filter | Games | Total games | % games |
 |---|---:|---:|---:|
-| stage1-survivors | 1,708,699 | 2,341,241 | 72.98 |
-| any-filter-triggered | 662,930 | 2,341,241 | 28.32 |
-| final-survivors | 1,678,311 | 2,341,241 | 71.68 |
-| 01-kda-lt-0.20 | 139,897 | 2,341,241 | 5.98 |
-| 02-spent-lt-50%-earned-on-loss | 6,382 | 2,341,241 | 0.27 |
-| 03-suspect-player-suffix-wr-gte-85% | 807 | 2,341,241 | 0.03 |
-| 04-team-kd-ratio-lt-0.50-vs-enemy | 570,085 | 2,341,241 | 24.35 |
-| 05-winning-player-kills-gt-75%-team-kills | 1,785 | 2,341,241 | 0.08 |
-| 06-non-utility-dmg-share-lt-2% | 1,455 | 2,341,241 | 0.06 |
-| 07-non-utility-cs-per-min-lt-3.0 | 10,116 | 2,341,241 | 0.43 |
-| 08-team-non-utility-avg-cs-per-min-gt-2.0-below-enemy | 46,033 | 2,341,241 | 1.97 |
-| 09-team-non-utility-dmg-to-champs-ratio-lt-1/2-vs-enemy | 21,363 | 2,341,241 | 0.91 |
-| 10-low-build-value-lt-1.0 | 30,388 | 2,341,241 | 1.30 |
+| stage1-survivors | 1,986,090 | 2,733,705 | 72.65 |
+| any-filter-triggered | 785,845 | 2,733,705 | 28.75 |
+| final-survivors | 1,947,860 | 2,733,705 | 71.25 |
+| 01-kda-lt-0.20 | 170,739 | 2,733,705 | 6.25 |
+| 02-spent-lt-50%-earned-on-loss | 9,097 | 2,733,705 | 0.33 |
+| 03-suspect-player-suffix-wr-gte-85% | 962 | 2,733,705 | 0.04 |
+| 04-team-kd-ratio-lt-0.50-vs-enemy | 671,471 | 2,733,705 | 24.56 |
+| 05-winning-player-kills-gt-75%-team-kills | 2,152 | 2,733,705 | 0.08 |
+| 06-non-utility-dmg-share-lt-2% | 1,821 | 2,733,705 | 0.07 |
+| 07-non-utility-cs-per-min-lt-3.0 | 12,569 | 2,733,705 | 0.46 |
+| 08-team-non-utility-avg-cs-per-min-gt-2.0-below-enemy | 56,885 | 2,733,705 | 2.08 |
+| 09-team-non-utility-dmg-to-champs-ratio-lt-1/2-vs-enemy | 25,760 | 2,733,705 | 0.94 |
+| 10-low-build-value-lt-1.0 | 38,230 | 2,733,705 | 1.40 |
 
 ## Methodology
 
-Flags are recorded at participant grain in `filter_stg_participant_flags`; team flags are denormalised to every participant on the affected team. Win rate is computed by joining each flag to `game_data.participant_stats.win`. `low_build_value` (f10) is participant-grained. `player_high_winrate` (f03) is precomputed in `filter_stg_player_high_winrate_flags` via a suffix-WR trim over each suspect player's collected games (sorted by `gamecreation`) and joined back into participant flags. Short games (≤ 1080 s) are excluded via an explicit pre-filter (`filter_stg_f14_long_games`) and never enter any staging table.
+Flags are recorded at participant grain in `filter_stg_participant_flags`; team flags are denormalised to every participant on the affected team. Win rate is computed by joining each flag to `game_data.participant_stats.win`. `low_build_value` (f10) is participant-grained. `player_high_winrate` (f03) is precomputed in `filter_stg_player_high_winrate_flags` via a suffix-WR trim over each suspect player's collected games (sorted by `gamecreation`) and joined back into participant flags. Short games (≤ 990 s) are excluded via an explicit pre-filter (`filter_stg_f14_long_games`) and never enter any staging table.
 
 | Scope | Expected WR behaviour | Reason |
 |---|---|---|
@@ -52,14 +52,14 @@ Target: WR ≤ 0.30 for player filters; ≤ 0.20 for team filters.
 
 | # | Filter | Scope | Bit | Games flagged | % games | Participants | WR |
 |---|---|---|---:|---:|---:|---:|---:|
-| 01 | `player_low_kda` KDA < 0.20 | Player | 0 | 139,897 | 5.98 | 157,130 | **0.025** |
-| 02 | `player_gold_spent` spent < 50% earned AND loss | Player | 1 | 6,382 | 0.27 | 6,438 | **0.000** |
-| 04 | `team_kills_to_deaths` team K/D < 0.50 | Team | 3 | 570,085 | 24.35 | 2,850,425 | **0.000** |
-| 06 | `too_little_damage` non-UTILITY dmg share < 2% | Player | 5 | 1,455 | 0.06 | 1,474 | **0.229** |
-| 07 | `low_minions_killed` non-UTILITY CS/min < 3.0 | Player | 6 | 10,116 | 0.43 | 10,308 | **0.287** |
-| 08 | `team_non_utility_avg_cs_per_min` gap > 2.0 | Team | 7 | 46,033 | 1.97 | 230,165 | **0.001** |
-| 09 | `team_non_utility_damage_to_champions_ratio` < 1/2 | Team | 8 | 21,363 | 0.91 | 106,815 | **0.001** |
-| 10 | `low_build_value` highest_value < 1.0 | Player | 9 | 30,388 | 1.30 | 31,264 | **0.253** |
+| 01 | `player_low_kda` KDA < 0.20 | Player | 0 | 170,739 | 6.25 | 192,981 | **0.026** |
+| 02 | `player_gold_spent` spent < 50% earned AND loss | Player | 1 | 9,097 | 0.33 | 9,216 | **0.000** |
+| 04 | `team_kills_to_deaths` team K/D < 0.50 | Team | 3 | 671,471 | 24.56 | 3,357,355 | **0.000** |
+| 06 | `too_little_damage` non-UTILITY dmg share < 2% | Player | 5 | 1,821 | 0.07 | 1,844 | **0.226** |
+| 07 | `low_minions_killed` non-UTILITY CS/min < 3.0 | Player | 6 | 12,569 | 0.46 | 12,828 | **0.271** |
+| 08 | `team_non_utility_avg_cs_per_min` gap > 2.0 | Team | 7 | 56,885 | 2.08 | 284,425 | **0.001** |
+| 09 | `team_non_utility_damage_to_champions_ratio` < 1/2 | Team | 8 | 25,760 | 0.94 | 128,800 | **0.001** |
+| 10 | `low_build_value` highest_value < 1.0 | Player | 9 | 38,230 | 1.40 | 39,759 | **0.261** |
 
 All Category A filters meet the WR target.
 
@@ -71,10 +71,10 @@ Identifies structurally imbalanced games. WR > 0.60 expected (inverse direction)
 
 | # | Filter | Scope | Bit | Games flagged | % games | Participants | WR |
 |---|---|---|---:|---:|---:|---:|---:|
-| 03 | `player_high_winrate` suspect + suffix-WR trim ≥ 85% | Player | 2 | 807 | 0.03 | 807 | **0.939** |
-| 05 | `solo_carried` win=1 AND kills > 75% of team kills | Player | 4 | 1,785 | 0.08 | 1,785 | **1.000** |
+| 03 | `player_high_winrate` suspect + suffix-WR trim ≥ 85% | Player | 2 | 962 | 0.04 | 962 | **0.931** |
+| 05 | `solo_carried` win=1 AND kills > 75% of team kills | Player | 4 | 2,152 | 0.08 | 2,152 | **1.000** |
 
-f03 fires aggressively (WR 0.939 — flagged games are deterministically winning, as intended). f05 is now active after rebuilding `participant_stats_corrected` without duplicate participant keys.
+f03 fires aggressively (WR 0.931 — flagged games are deterministically winning, as intended). f05 is now active after rebuilding `participant_stats_corrected` without duplicate participant keys.
 
 ---
 
@@ -231,7 +231,7 @@ The sharp WR jump from 0.307 → 0.393 at the 1.0 boundary confirms the threshol
 
 ## NN prediction model fitness
 
-The filter pipeline retains 71.68% of long games (1,678,311 valid matches). This section considers how the filtered dataset compares to the full population as a training signal for win-prediction models.
+The filter pipeline retains 71.25% of long games (1,947,860 valid matches). This section considers how the filtered dataset compares to the full population as a training signal for win-prediction models.
 
 ### Why the filtered set is the better training target
 
@@ -245,7 +245,7 @@ The filter pipeline retains 71.68% of long games (1,678,311 valid matches). This
 
 ### Tradeoffs
 
-**Dataset reduction.** Removing 28% of games shrinks training volume. For model families that benefit from massive datasets (large transformers, contrastive pre-training), this cost is non-trivial. A practical approach is to pre-train on the full population and fine-tune on the filtered set.
+**Dataset reduction.** Removing ~29% of games shrinks training volume. For model families that benefit from massive datasets (large transformers, contrastive pre-training), this cost is non-trivial. A practical approach is to pre-train on the full population and fine-tune on the filtered set.
 
 **Filter leakage.** The filter operates on end-of-game statistics, which are unavailable at prediction time if the model is used mid-game. If the deployment target is a mid-game model, the filtered population should be further restricted to exclude games whose outcome was already visible from early-game snapshots.
 
@@ -253,7 +253,7 @@ The filter pipeline retains 71.68% of long games (1,678,311 valid matches). This
 
 ### Summary
 
-For a win-prediction model targeting competitive play, the filtered set is strictly superior: it removes noise, sharpens feature gradients, and avoids over-reporting accuracy on trivially classified stomps. With ~1.68M valid games the dataset is large enough for all standard architectures. The full population is better suited to a dedicated anomaly/quality classifier.
+For a win-prediction model targeting competitive play, the filtered set is strictly superior: it removes noise, sharpens feature gradients, and avoids over-reporting accuracy on trivially classified stomps. With ~1.95M valid games the dataset is large enough for all standard architectures. The full population is better suited to a dedicated anomaly/quality classifier.
 
 ---
 
@@ -263,16 +263,16 @@ For a win-prediction model targeting competitive play, the filtered set is stric
 
 | # | Filter | Games removed |
 |---|---|---:|
-| 04 | `team_kills_to_deaths` | 570,085 (24.35%) |
-| 01 | `player_low_kda` | 139,897 (5.98%) |
-| 08 | `team_non_utility_avg_cs_per_min` gap > 2.0 | 46,033 (1.97%) |
-| 09 | `team_non_utility_damage_to_champions_ratio` < 1/2 | 21,363 (0.91%) |
-| 10 | `low_build_value` | 30,388 (1.30%) |
-| 07 | `low_minions_killed` | 10,116 (0.43%) |
-| 02 | `player_gold_spent` (losses only) | 6,382 (0.27%) |
-| 05 | `solo_carried` | 1,785 (0.08%) |
-| 06 | `too_little_damage` | 1,455 (0.06%) |
-| 03 | `player_high_winrate` (suffix-WR trim) | 807 (0.03%) |
+| 04 | `team_kills_to_deaths` | 671,471 (24.56%) |
+| 01 | `player_low_kda` | 170,739 (6.25%) |
+| 08 | `team_non_utility_avg_cs_per_min` gap > 2.0 | 56,885 (2.08%) |
+| 10 | `low_build_value` | 38,230 (1.40%) |
+| 09 | `team_non_utility_damage_to_champions_ratio` < 1/2 | 25,760 (0.94%) |
+| 07 | `low_minions_killed` | 12,569 (0.46%) |
+| 02 | `player_gold_spent` (losses only) | 9,097 (0.33%) |
+| 05 | `solo_carried` | 2,152 (0.08%) |
+| 06 | `too_little_damage` | 1,821 (0.07%) |
+| 03 | `player_high_winrate` (suffix-WR trim) | 962 (0.04%) |
 
 ### Loss-forcing filters vs WR target
 
@@ -282,10 +282,10 @@ For a win-prediction model targeting competitive play, the filtered set is stric
 | 02 `player_gold_spent` (losses only) | 0.000 | ✓ by construction |
 | 08 `team_non_utility_avg_cs_per_min` gap > 2.0 | 0.001 | ✓ (team ≤ 0.20) |
 | 09 `team_non_utility_damage_to_champions_ratio` < 1/2 | 0.001 | ✓ (team ≤ 0.20) |
-| 01 `player_low_kda` (< 0.20) | 0.025 | ✓ (player ≤ 0.30) |
-| 06 `too_little_damage` | 0.229 | ✓ (player ≤ 0.30) |
-| 10 `low_build_value` | 0.253 | ✓ (player ≤ 0.30) |
-| 07 `low_minions_killed` (< 3.0) | 0.287 | ✓ (player ≤ 0.30) |
+| 01 `player_low_kda` (< 0.20) | 0.026 | ✓ (player ≤ 0.30) |
+| 06 `too_little_damage` | 0.226 | ✓ (player ≤ 0.30) |
+| 10 `low_build_value` | 0.261 | ✓ (player ≤ 0.30) |
+| 07 `low_minions_killed` (< 3.0) | 0.271 | ✓ (player ≤ 0.30) |
 
 ---
 
@@ -303,7 +303,7 @@ For a win-prediction model targeting competitive play, the filtered set is stric
 | 08 | `team_non_utility_avg_cs_per_min_gt_1_0_below_enemy` | gap > 2.0 | gap > 1.0; before that > 1.8; > 2.2; > 2.5 (column name retained from prior threshold) |
 | 09 | `team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy` | team/enemy dmg < 1/2 (`team×2 < enemy`) | < 1/5 (3 games); before that < 1/3, < 1/4 |
 | 10 | `low_build_value` | `highest_value < 1.0` | (unchanged) |
-| Pre | `game_time_lte_18_0` | explicit pre-stage (`gameduration > 1080 s`) | gameduration > 990 s (16.5 min); before that inline WHERE in every stage |
+| Pre | `game_time_lte_16_5` | explicit pre-stage (`gameduration > 990 s`, i.e. > 16.5 min) | gameduration > 1080 s (18.0 min); before that > 990 s (16.5 min); before that inline WHERE in every stage |
 
 ---
 

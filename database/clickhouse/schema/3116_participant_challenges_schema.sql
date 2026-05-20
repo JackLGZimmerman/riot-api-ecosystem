@@ -139,5 +139,5 @@ CREATE TABLE IF NOT EXISTS game_data.participant_challenges
     wardtakedownsbefore20m Nullable (Float32),
     wardsguarded Nullable (Float32)
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, teamid, puuid);

@@ -41,7 +41,7 @@ class LiveMetrics:
             "elapsed_s": round(time.perf_counter() - self._t0, 3),
             **fields,
         }
-        row = {key: metric_value(value) for key, value in row.items()}
+        row = {key: metric_value(value, key) for key, value in row.items()}
         line = json.dumps(row, sort_keys=True)
         self._fh.write(f"{line}\n")
         self._fh.flush()

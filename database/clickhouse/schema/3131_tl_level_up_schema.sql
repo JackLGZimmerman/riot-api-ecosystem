@@ -7,5 +7,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_level_up
     participantid UInt8,
     level UInt8
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, participantid, level);

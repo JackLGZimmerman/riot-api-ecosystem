@@ -64,7 +64,7 @@ from app.worker.pipelines.stop_flag import raise_if_stop_requested
 from database.clickhouse.operations.matchdata import (
     delete_by_matchids,
 )
-from database.clickhouse.operations.utils import delete_by_run_id, persist_data
+from database.clickhouse.operations.utils import persist_data
 from database.clickhouse.operations.work_state import (
     claim_pending_matchids,
     mark_matchids_finished,
@@ -401,6 +401,12 @@ class MatchDataSaver(Saver):
         if not state.matchids:
             return
 
+        # Idempotency guard: scrub any residue left by a prior crashed run for
+        # the claimed matchids before writing anything. With raw tables on
+        # plain MergeTree, this is what guarantees zero duplicates without
+        # relying on FINAL/merge-time deduplication downstream.
+        await self.delete_failed_matchids(state.matchids)
+
         stream_successes: dict[str, set[StreamName]] = defaultdict(set)
         stream_terminals: dict[str, set[StreamName]] = defaultdict(set)
         aborted_match_ids: set[str] = set()
@@ -497,7 +503,6 @@ class MatchDataSaver(Saver):
 
         except Exception as exc:
             await self.delete_failed_matchids(state.matchids)
-            await self.rollback_run(ctx.run_id)
             logger.exception(
                 "MatchData batch exception run_id=%s: %s",
                 ctx.run_id,
@@ -505,23 +510,15 @@ class MatchDataSaver(Saver):
             )
             raise
 
-    async def _delete_tables(
-        self,
-        tables: tuple[str, ...],
-        func: Callable[..., Any],
-        *func_args: Any,
-    ) -> None:
-        for table in tables:
+    async def delete_failed_matchids(self, match_ids: list[str]) -> None:
+        for table in ALL_DELETE_TABLES:
             await run_sync_with_retry(
                 logger=logger,
                 component="MatchData",
-                op_name=f"{func.__name__}:{table}",
-                func=func,
-                args=(table, *func_args),
+                op_name=f"delete_by_matchids:{table}",
+                func=delete_by_matchids,
+                args=(table, match_ids),
             )
-
-    async def delete_failed_matchids(self, match_ids: list[str]) -> None:
-        await self._delete_tables(ALL_DELETE_TABLES, delete_by_matchids, match_ids)
 
     async def mark_finished_matchids(self, match_ids: list[str]) -> None:
         await run_sync_with_retry(
@@ -540,9 +537,6 @@ class MatchDataSaver(Saver):
             func=delete_by_matchids,
             args=("game_data.matchids", match_ids),
         )
-
-    async def rollback_run(self, run_id: UUID) -> None:
-        await self._delete_tables(ALL_DELETE_TABLES, delete_by_run_id, run_id)
 
     @staticmethod
     def _attach_match_id(parsed: Any, match_id: str) -> None:

@@ -6,5 +6,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_objective_bounty_finish
     timestamp UInt64,
     teamid UInt8
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, teamid);

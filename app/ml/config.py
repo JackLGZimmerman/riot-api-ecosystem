@@ -15,6 +15,9 @@ PARTICIPANT_TABLE = "game_data_filtered.participant_stats"
 ITEM_VALUE_TABLE = "game_data_filtered.participant_item_value_totals"
 SPLIT_TABLE = "game_data_filtered.ml_game_split"
 PLAYER_PIVOT_TABLE = "game_data_filtered.ml_game_player_pivot"
+SYNERGY_1VX_TABLE = "game_data_filtered.synergy_1vx"
+CHAMPION_ID_NAME_DICT = "game_data.championid_name_map_dict"
+ITEM_VALUE_MAP_DICT = "game_data.item_value_map_dict"
 
 POSITIONS: tuple[str, ...] = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
 
@@ -45,6 +48,19 @@ class ModelConfig:
         "team_attention",
     ] = "team_mean"
     head_hidden: int = 256
+    use_moe: bool = False
+    n_experts: int = 8
+    expert_hidden: int = 128
+    router_hidden: int = 64
+    moe_top_k: int = 2
+    router_temperature: float = 1.0
+    moe_dropout: float = 0.10
+    moe_aux_loss_coef: float = 0.01
+    # Steps to use dense routing (k=n_experts) before switching to top_k.
+    moe_warmup_steps: int = 81
+    # Shazeer-style Gaussian noise scale on routing logits in train mode only.
+    # 0 disables; default ~1/sqrt(n_experts) for n_experts=8.
+    moe_router_noise: float = 0.354
 
 
 @dataclass(frozen=True)
@@ -68,20 +84,9 @@ class TrainConfig:
     grad_clip: float = 0.0
     log_interval: int = 10
     # Early-stop on val_loss after N epochs without improvement; 0 disables.
-    early_stop_patience: int = 0
+    early_stop_patience: int = 10
     # When False, skip the final reload-best + test eval block (sweeps).
     run_final_test: bool = True
-    # Gates only the heavy sampled-attention + prediction-bucket diagnostics;
-    # core metrics log every epoch regardless.
-    attention_diagnostics_interval: int = 10
-    attention_diagnostics_batch_size: int = 256
-    attention_diagnostics_eval_samples: int = 1024
-    # Graduated prediction-band table (5%/1%/0.1% bins) emitted on heavy
-    # diagnostic epochs + final test as a `prediction_bands` event.
-    prediction_bands_enabled: bool = True
-    # Held-in train subset evaluated every epoch through the validation path so
-    # train-vs-val gaps are directly comparable. 0 disables (sweeps).
-    train_monitor_samples: int = 50_000
     checkpoint_dir: Path = ML_DATA_DIR
     metrics_dir: Path = ML_DATA_DIR
     metrics_file: str = "metrics.jsonl"

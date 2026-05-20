@@ -54,7 +54,7 @@ item_counts AS (
             ]
         )) AS legendary_item_count
     FROM game_data_filtered.participant_stats AS ps
-    ANY INNER JOIN game_data.info AS i FINAL
+    ANY INNER JOIN game_data.info AS i
         ON ps.matchid = i.matchid
 ),
 
@@ -139,7 +139,7 @@ weighted AS (
             1.0
         )) AS late
     FROM game_data_filtered.participant_stats AS ps
-    ANY INNER JOIN game_data.info AS i FINAL
+    ANY INNER JOIN game_data.info AS i
         ON ps.matchid = i.matchid
     CROSS JOIN phase_centers AS pc
 ),

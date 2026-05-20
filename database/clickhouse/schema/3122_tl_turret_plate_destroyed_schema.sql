@@ -11,5 +11,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_turret_plate_destroyed
     position_y Int16,
     teamid UInt8
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, teamid, lanetype, killerid);

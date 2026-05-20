@@ -17,5 +17,5 @@ CREATE TABLE IF NOT EXISTS game_data.tl_ck_victim_damage_received
     direction LowCardinality (String),
     idx UInt8
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, champion_kill_event_id, idx);
