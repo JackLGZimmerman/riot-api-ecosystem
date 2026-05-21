@@ -69,6 +69,10 @@ class Vocab:
     n_roles: int
     n_profile_bins: int = N_PROFILE_BINS
     n_profile_features: int = N_PROFILE_FEATURES
+    # Per-feature train mean/std for profile standardization (one per
+    # PROFILE_FEATURE_COLUMNS entry), written to cache metadata by build_dataset.
+    profile_mean: tuple[float, ...] = ()
+    profile_std: tuple[float, ...] = ()
 
 
 def _cached_split(
@@ -115,6 +119,20 @@ def _profile_shape(meta: dict[str, object]) -> tuple[int, int]:
     if not isinstance(shape, list) or len(shape) != 4:
         return N_PROFILE_BINS, N_PROFILE_FEATURES
     return int(shape[2]), int(shape[3])
+
+
+def _profile_standardization(
+    meta: dict[str, object],
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    std_meta = meta.get("profile_standardization")
+    if not isinstance(std_meta, dict):
+        raise ValueError(
+            "Dataset cache does not contain profile standardization metadata. "
+            "Run `python -m app.ml.build_dataset` to rebuild it."
+        )
+    mean = tuple(float(x) for x in std_meta["mean"])
+    std = tuple(float(x) for x in std_meta["std"])
+    return mean, std
 
 
 class _SplitView:
@@ -210,6 +228,7 @@ def load_cache(cfg: DatasetConfig) -> tuple[CachedTensors, Vocab, dict[str, obje
     )
     role_idx = _implied_role_idx(n_games)
     n_profile_bins, n_profile_features = _profile_shape(meta)
+    profile_mean, profile_std = _profile_standardization(meta)
 
     tensors = CachedTensors(
         champion_idx=_in_memory_tensor("champion_idx", champion_idx),
@@ -227,6 +246,8 @@ def load_cache(cfg: DatasetConfig) -> tuple[CachedTensors, Vocab, dict[str, obje
         n_roles=int(vocab_meta["n_roles"]),
         n_profile_bins=n_profile_bins,
         n_profile_features=n_profile_features,
+        profile_mean=profile_mean,
+        profile_std=profile_std,
     )
     return tensors, vocab, meta
 

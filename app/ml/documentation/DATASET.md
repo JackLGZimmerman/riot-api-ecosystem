@@ -31,3 +31,5 @@ Required path:
 | `blue_win.npy` | `(games,)` | `uint8` | `float32` | label |
 
 Champion/build ids are packed as `champion_idx * n_builds + build_idx`. Role ids are implied by fixed slot order: blue `TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY`, then red `TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY`.
+
+`build_dataset` also writes `profile_standardization` to `cache_meta.json`: per-feature mean/std over present (non-zero-filled) train profile rows, used to standardize the 22 profile fields before the model's profile encoder. A cache format bump (`npy-memmap-v9`) forces a rebuild for caches built before this metadata existed.

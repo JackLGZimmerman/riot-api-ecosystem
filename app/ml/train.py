@@ -24,10 +24,6 @@ from app.ml.dataset import InMemoryBatchLoader, build_loaders
 from app.ml.model import HybridTokenModel
 from app.ml.utils.live_metrics import LiveMetrics
 from app.ml.utils.metrics import metric_scalar
-from app.ml.utils.matched_diagnostics import (
-    log_matched_moe_diagnostics,
-    matched_moe_diagnostics,
-)
 from app.ml.utils.prediction_diagnostics import (
     log_prediction_bands,
     prediction_band_diagnostics,
@@ -65,11 +61,8 @@ def _project_relative(path: Path | str | None) -> str | None:
 def _forward_model(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
-    dense_routing: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return model(
-        *(batch[key] for key in MODEL_INPUT_KEYS), dense_routing=dense_routing
-    )
+) -> torch.Tensor:
+    return model(*(batch[key] for key in MODEL_INPUT_KEYS))
 
 
 @torch.inference_mode()
@@ -99,7 +92,7 @@ def evaluate(
             dtype=amp_dtype,
             enabled=use_amp,
         ):
-            logits, _ = _forward_model(model, batch)
+            logits = _forward_model(model, batch)
             target = batch["blue_win"]
             total_loss += loss_fn(logits, target).item()
         probs = torch.sigmoid(logits.float())
@@ -226,33 +219,6 @@ def _emit_prediction_bands(
     log_prediction_bands(logger, split, rows)
 
 
-@torch.inference_mode()
-def _collect_matched_moe_tensors(
-    model: HybridTokenModel,
-    loader: InMemoryBatchLoader,
-    use_amp: bool,
-    amp_dtype: torch.dtype,
-    device: torch.device,
-) -> dict[str, torch.Tensor] | None:
-    if model.moe_head is None:
-        return None
-    model.eval()
-    chunks: dict[str, list[torch.Tensor]] = {
-        "baseline_logit": [],
-        "final_logit": [],
-        "target": [],
-    }
-    for batch in loader:
-        with autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            output = model.matched_diagnostic_tensors(
-                *(batch[key] for key in MODEL_INPUT_KEYS)
-            )
-        for key, value in output.items():
-            chunks.setdefault(key, []).append(value.detach().float().cpu())
-        chunks["target"].append(batch["blue_win"].detach().float().cpu())
-    return {key: torch.cat(value) for key, value in chunks.items()}
-
-
 def _maybe_compute_grad_norm(
     *,
     model: nn.Module,
@@ -323,27 +289,6 @@ def _run_final_test(
     )
     band_rows = prediction_band_diagnostics(test_scores, test_targets)
     _emit_prediction_bands(metrics, "test", band_rows, step=step)
-    matched_tensors = _collect_matched_moe_tensors(
-        model, test_loader, use_amp, amp_dtype, device
-    )
-    if matched_tensors is not None:
-        matched_rows = matched_moe_diagnostics(
-            matched_tensors["baseline_logit"],
-            matched_tensors["final_logit"],
-            matched_tensors["target"],
-            {
-                key: value
-                for key, value in matched_tensors.items()
-                if key not in {"baseline_logit", "final_logit", "target"}
-            },
-        )
-        metrics.record(
-            "matched_moe_diagnostics",
-            split="test",
-            step=step,
-            **matched_rows,
-        )
-        log_matched_moe_diagnostics(logger, "test", matched_rows)
     logger.info(
         "test_loss %.4e test_auc %.4e test_accuracy %.4e "
         "test_brier %.4e test_ece %.4e n=%d",
@@ -512,17 +457,13 @@ def train(
                     dtype=amp_dtype,
                     enabled=use_amp,
                 ):
-                    logits, aux_loss = _forward_model(
-                        forward_model,
-                        batch,
-                        dense_routing=step < model_cfg.moe_warmup_steps,
-                    )
+                    logits = _forward_model(forward_model, batch)
                     target = smooth_binary_targets(
                         batch["blue_win"],
                         train_cfg.target_min,
                         train_cfg.target_max,
                     )
-                    loss = loss_fn(logits, target) + aux_loss
+                    loss = loss_fn(logits, target)
 
                 scaler.scale(loss).backward()
 

@@ -1,8 +1,8 @@
 # ML Win Prediction
 
-Maintenance: keep this README as the live operating contract. Put dataset/cache mechanics in [DATASET.md](DATASET.md), architecture / data-flow visualisation in [MODEL.md](MODEL.md), experiment evidence in [OPTIMISATIONS.md](OPTIMISATIONS.md), MoE-specific first-pass evidence in [MOE_EVALUATION.md](MOE_EVALUATION.md), repeatable sweep procedure in [TESTING.md](TESTING.md), and metric-field detail in [DIAGNOSTICS.md](DIAGNOSTICS.md).
+Maintenance: keep this README as the live operating contract. Put dataset/cache mechanics in [DATASET.md](DATASET.md), architecture / data-flow visualisation in [MODEL.md](MODEL.md), experiment evidence in [OPTIMISATIONS.md](OPTIMISATIONS.md), conditions for a future MoE head in [MOE_EVALUATION.md](MOE_EVALUATION.md), repeatable sweep procedure in [TESTING.md](TESTING.md), and metric-field detail in [DIAGNOSTICS.md](DIAGNOSTICS.md).
 
-Predicts `blue_win` from the 10 fixed player slots. `HybridTokenModel` consumes champion, role, build, and side embeddings per player.
+Predicts `blue_win` from the 10 fixed player slots. `HybridTokenModel` consumes champion, role, build, side, and the per-player historical profile tensor.
 
 championId, teamPosition, and build define what was picked. Historical profile features describe how that pick usually performs based on past games. So the first group is the lookup identity, while the second group is the expected behaviour attached to that identity.
 
@@ -14,6 +14,16 @@ Sequence length is `10`, fixed per game by the `6900` pivot:
 - Tokens `5-9` = red side (`teamid = 200`), same role order.
 
 `blue_win` is `anyIf(win, teamid = 100)`, so the label is always relative to the first 5 tokens. The implied role index in `dataset.py` is `[0,1,2,3,4, 0,1,2,3,4]`; side is inferred from token position, not stored.
+
+## Historical Profile Tensor
+
+`player_profile.npy` is loaded as `[B, 10, 4, 22]`:
+
+- `10` player slots in the fixed blue/red role order above.
+- `4` scaling-bin positions from `synergy_1vx.bin_idx`.
+- `22` historical profile fields from `PROFILE_FEATURE_COLUMNS`. `log_matchups` is reserved for confidence; the remaining 21 fields carry win rate, economy, combat, objective, durability, vision, and damage-share aggregates.
+
+The current model does not flatten this tensor directly. `log_matchups` is converted back to approximate sample count and used only as reliability confidence. Each player/bin vector of the other 21 metrics is standardized by per-feature train mean/std (stored in `cache_meta.json`), encoded by a shared MLP, and tagged with a learned bin-position embedding. The encoder is two-stage: a confidence-weighted attention pool gives a `level` summary, and a confidence-gated `late - early` half-mean gives an explicit trajectory `delta`. Both are fused into one profile token per player (`level + delta_proj(delta)`), so trajectory direction survives into the match transformer. Zero-filled missing profile rows are masked out; a token with no profile rows contributes a zero profile embedding, and the delta is gated to zero unless both bin halves have a present row. See [MODEL.md](MODEL.md) for the encoder detail.
 
 ## Flow
 
@@ -39,61 +49,9 @@ Current default `ModelConfig`:
 | `attention_dropout` | 0.10 |
 | `pooling` | `team_mean` |
 | `head_hidden` | 256 |
-| `use_moe` | true |
-| `n_experts` | 7 |
-| `expert_hidden` | 128 |
-| `router_hidden` | 32 |
-| `moe_top_k` | 2 |
-| `correction_scale` | 0.25 |
-| `expert_band_centers` | `(0.425, 0.450, 0.475, 0.500, 0.525, 0.550, 0.575)` |
-| `expert_band_width` | 0.05 |
-| `central_min` / `central_max` | `0.40` / `0.60` |
-| `router_temperature` | 1.0 |
-| `learned_router_adjustment` | false |
-| `moe_dropout` | 0.10 |
+| `profile_confidence_prior_count` | 64.0 |
 
-This is about `3.93M` parameters with the current cache vocabulary when the MoE residual is enabled. Keep architecture rationale and sweep evidence in `OPTIMISATIONS.md`.
-
-## Prediction-Band MoE Residual
-
-The model keeps the baseline Set Transformer and antisymmetric head intact, then adds a bounded residual correction:
-
-```text
-baseline_logit = head(m(b, r)) - head(m(r, b))
-moe_correction = moe(m(b, r), baseline_logit) - moe(m(r, b), -baseline_logit)
-final_logit = baseline_logit + moe_correction
-P(blue_win) = sigmoid(final_logit)
-```
-
-The MoE is a residual layer, not a replacement head. Expert routing is anchored only to the baseline probability band, so experts cannot specialize by champion, role, build, patch, temporal identity, or side. Routing uses deterministic triangular kernels over seven overlapping 5%-wide bands with 2.5% spacing:
-
-| expert | band | center |
-| ---: | --- | ---: |
-| 0 | 40.0-45.0% | 0.425 |
-| 1 | 42.5-47.5% | 0.450 |
-| 2 | 45.0-50.0% | 0.475 |
-| 3 | 47.5-52.5% | 0.500 |
-| 4 | 50.0-55.0% | 0.525 |
-| 5 | 52.5-57.5% | 0.550 |
-| 6 | 55.0-60.0% | 0.575 |
-
-Only the top `moe_top_k=2` active bands are mixed. Samples outside `central_min=0.40` and `central_max=0.60` have zero active routing weight, so tail predictions remain the baseline logit. `learned_router_adjustment` can add a small router correction, but it only sees baseline-derived scalar and band-kernel features; it does not see match identity features.
-
-Each expert receives:
-
-- `m(x, y)`
-- `baseline_logit`
-- `sigmoid(baseline_logit)`
-- `abs(sigmoid(baseline_logit) - 0.5)`
-- the seven deterministic band-kernel weights
-
-Experts emit residual logit deltas bounded as:
-
-```text
-expert_delta = correction_scale * tanh(raw_delta)
-```
-
-Because the final correction is antisymmetrized with the reverse match representation and negated baseline logit, swapping blue/red at the representation level still negates the final logit.
+With the current cache vocabulary and two-stage temporal profile encoder this is about `2.98M` parameters. Keep architecture rationale and sweep evidence in `OPTIMISATIONS.md`.
 
 ## Target Smoothing
 
@@ -134,34 +92,7 @@ Current 5070 Ti warm-path training uses `batch_size=16384`, BF16 AMP, fused Adam
 | `use_amp` | true |
 | `amp_dtype` | `bfloat16` |
 
-## MoE Training Plan
-
-Start from the enabled residual defaults above with `learned_router_adjustment=false`, so routing is fully deterministic by baseline band. The residual experts are zero-initialized at their final layer, making step zero identical to the baseline model. Train end-to-end with the existing BCE-with-logits objective and target smoothing; no custom loss or loader change is required.
-
-Use validation loss as the promotion metric, with Brier and ECE as calibration guards. If central-band loss improves without hurting tails, sweep only small MoE levers first: `correction_scale`, `expert_hidden`, `moe_dropout`, `router_temperature`, then `learned_router_adjustment=true`.
-
-## MoE Evaluation Metrics
-
-Compare baseline vs MoE on:
-
-- validation/test BCE loss
-- AUC and accuracy
-- Brier score and ECE
-- graduated prediction-band diagnostics, especially 40-60%
-- tail bands below 40% and above 60% to confirm they remain effectively unchanged
-- central-band calibration error and realized win rate by 0.5% diagnostic bin
-- throughput and parameter count
-
-## MoE Ablations
-
-Minimal first-pass ablations:
-
-- `use_moe=false` baseline control
-- `correction_scale` in a small range such as `0.10`, `0.25`, `0.40`
-- `moe_top_k=1` vs `2`
-- `expert_hidden=64` vs `128`
-- `learned_router_adjustment=false` vs `true`
-- central-only experts vs a deliberately wider/tail-including variant, promoted only if tails improve without calibration regression
+## Checkpoints
 
 Live training writes `best.pt`, `metrics.jsonl`, and `metrics_latest.json` to `app/ml/data/`. Preserved sweep runs live under `app/ml/data/checkpoints/`.
 

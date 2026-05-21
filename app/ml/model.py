@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import cast
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
+from app.ml.cache_layout import PROFILE_FEATURE_COLUMNS
 from app.ml.config import N_SIDES, SIDE_BLUE, SIDE_RED, ModelConfig
 from app.ml.dataset import Vocab
 
 # Fixed 10 player tokens (5 blue + 5 red).
 N_PLAYER_TOKENS = 10
 N_TEAM_TOKENS = 5
+LOG_MATCHUPS_FEATURE = "log_matchups"
+LOG_MATCHUPS_FEATURE_IDX = PROFILE_FEATURE_COLUMNS.index(LOG_MATCHUPS_FEATURE)
 # Pooling splits the encoder's player tokens by side, pools each team
-# independently into (blue_repr, red_repr), and builds the 5-way comparison
-# (b, r, b-r, |b-r|, b*r) used as the head input. Blue/red swap symmetry is
-# enforced at the head via antisymmetrization:
+# independently into (blue_repr, red_repr), and builds the comparison
+# (b, r, b-r, |b-r|, b*r, lane) used as the head input, where lane is an
+# attention-weighted summary of the 5 same-role blue-vs-red token diffs.
+# Blue/red swap symmetry is enforced at the head via antisymmetrization:
 #   logit = head(b, r, b-r, |b-r|, b*r) - head(r, b, r-b, |b-r|, b*r)
 # so logit(b, r) = -logit(r, b) exactly, by construction.
 
@@ -71,176 +76,176 @@ class _Encoder(nn.Module):
         return x
 
 
-class _MatchLevelMoEHead(nn.Module):
-    """Learned match-level MoE head with a dense-head skip."""
+class _TemporalProfileEncoder(nn.Module):
+    """Encodes a token's 6002 historical profile across scaling bins.
+
+    Input is [B, T, n_bins, n_features] of per-bin aggregates. `log_matchups`
+    is reserved strictly for reliability: n = expm1(log_matchups), confidence
+    = n / (n + k). The other profile features are standardized by per-feature
+    train mean/std (so absolute levels and incommensurate units survive,
+    unlike a per-row LayerNorm), encoded by a shared MLP (the GELU lets it
+    model nonlinear trajectory shape, not just linear early/late trends),
+    tagged with a learned bin-position embedding, then pooled across bins by
+    presence-masked attention.
+
+    The output is two-stage: the attention pool gives a `level` summary, and
+    a presence-masked `late - early` half-mean delta gives the trajectory
+    direction the pool's weighted sum structurally cannot represent. Both are
+    fused into one [B, T, d] token, so the temporal axis survives into the
+    match transformer's cross-player attention. `delta_proj` is zero-init, so
+    a fresh model starts identical to a level-only encoder and learns the
+    delta contribution from there.
+    """
 
     def __init__(
         self,
-        *,
-        match_dim: int,
-        cfg: ModelConfig,
+        n_bins: int,
+        n_features: int,
+        d: int,
+        dropout: float,
+        feature_mean: Sequence[float],
+        feature_std: Sequence[float],
+        confidence_prior_count: float,
     ):
         super().__init__()
-        if cfg.n_experts <= 0:
-            raise ValueError("n_experts must be positive")
-        if cfg.moe_top_k <= 0:
-            raise ValueError("moe_top_k must be positive")
-        if cfg.router_temperature <= 0.0:
-            raise ValueError("router_temperature must be positive")
-        if not 0.0 <= cfg.moe_dropout <= 1.0:
-            raise ValueError("moe_dropout must be in [0, 1]")
-        if cfg.expert_hidden <= 0:
-            raise ValueError("expert_hidden must be positive")
-        if cfg.router_hidden <= 0:
-            raise ValueError("router_hidden must be positive")
-
-        self.n_experts = cfg.n_experts
-        self.top_k = min(cfg.moe_top_k, cfg.n_experts)
-        self.router_temperature = cfg.router_temperature
-        self.aux_loss_coef = cfg.moe_aux_loss_coef
-        self.warmup_steps = cfg.moe_warmup_steps
-        self.router_noise = cfg.moe_router_noise
-
-        expert_input_dim = match_dim + 3
-        self.experts = nn.ModuleList(
-            self._make_expert(expert_input_dim, cfg.expert_hidden, cfg.moe_dropout)
-            for _ in range(cfg.n_experts)
-        )
-        self.router = nn.Sequential(
-            nn.LayerNorm(expert_input_dim),
-            nn.Linear(expert_input_dim, cfg.router_hidden),
-            nn.GELU(approximate="tanh"),
-            nn.Dropout(cfg.moe_dropout),
-            nn.Linear(cfg.router_hidden, cfg.n_experts),
-        )
-        router_final = cast(nn.Linear, self.router[-1])
-        nn.init.zeros_(router_final.weight)
-        nn.init.zeros_(router_final.bias)
-
-    @staticmethod
-    def _make_expert(
-        input_dim: int,
-        hidden_dim: int,
-        dropout: float,
-    ) -> nn.Sequential:
-        expert = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, hidden_dim),
+        if n_bins <= 0 or n_features <= 1:
+            raise ValueError("n_bins must be positive and n_features must exceed 1")
+        if n_features != len(PROFILE_FEATURE_COLUMNS):
+            raise ValueError(
+                "n_features must match PROFILE_FEATURE_COLUMNS so "
+                f"{LOG_MATCHUPS_FEATURE!r} can be used only as confidence"
+            )
+        if len(feature_mean) != n_features or len(feature_std) != n_features:
+            raise ValueError("feature_mean/feature_std must have n_features entries")
+        if confidence_prior_count <= 0.0:
+            raise ValueError("confidence_prior_count must be positive")
+        content_feature_idx = [
+            idx for idx in range(n_features) if idx != LOG_MATCHUPS_FEATURE_IDX
+        ]
+        self.bin_mlp = nn.Sequential(
+            nn.Linear(len(content_feature_idx), d),
             nn.GELU(approximate="tanh"),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(d, d),
         )
-        final_layer = cast(nn.Linear, expert[-1])
-        nn.init.zeros_(final_layer.weight)
-        nn.init.zeros_(final_layer.bias)
-        return expert
+        self.bin_pos_emb = nn.Embedding(n_bins, d)
+        self.attn_score = nn.Sequential(
+            nn.LayerNorm(d),
+            nn.Linear(d, 1, bias=False),
+        )
+        # Bins [0:split) are "early", [split:) are "late"; the delta is the
+        # late-minus-early half-mean. Zero-init projection keeps the encoder
+        # bit-identical to a level-only pool at start of training.
+        self.bin_split = n_bins // 2
+        self.delta_proj = nn.Sequential(
+            nn.LayerNorm(d),
+            nn.Linear(d, d),
+        )
+        delta_linear = cast(nn.Linear, self.delta_proj[-1])
+        nn.init.zeros_(delta_linear.weight)
+        nn.init.zeros_(delta_linear.bias)
+        self._bin_idx: torch.Tensor
+        self.register_buffer(
+            "_bin_idx", torch.arange(n_bins, dtype=torch.long), persistent=False
+        )
+        self.log_matchups_feature_idx = LOG_MATCHUPS_FEATURE_IDX
+        self._content_feature_idx: torch.Tensor
+        self.register_buffer(
+            "_content_feature_idx",
+            torch.tensor(content_feature_idx, dtype=torch.long),
+            persistent=False,
+        )
+        # Persistent so a loaded checkpoint carries its own standardization.
+        self._feature_mean: torch.Tensor
+        self._feature_std: torch.Tensor
+        self.register_buffer(
+            "_feature_mean", torch.tensor(feature_mean, dtype=torch.float32)
+        )
+        self.register_buffer(
+            "_feature_std", torch.tensor(feature_std, dtype=torch.float32)
+        )
+        self._confidence_prior_count: torch.Tensor
+        self.register_buffer(
+            "_confidence_prior_count",
+            torch.tensor(float(confidence_prior_count), dtype=torch.float32),
+        )
 
-    def forward(
+    @staticmethod
+    def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Mean of `values` over the bin axis, counting only present bins.
+
+        `values` is [B, T, k, d], `mask` is [B, T, k]. Tokens with no present
+        bin in the half divide by a clamped count of 1 and so return zeros.
+        """
+        weight = mask.to(values.dtype)
+        total = (values * weight.unsqueeze(-1)).sum(dim=-2)
+        count = weight.sum(dim=-1, keepdim=True).clamp(min=1.0)
+        return total / count
+
+    def _profile_confidence(
         self,
-        match_features: torch.Tensor,
-        dense_score: torch.Tensor,
-        route_logit: torch.Tensor,
-        dense_routing: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        score, aux, _ = self._forward(
-            match_features,
-            dense_score,
-            route_logit,
-            dense_routing=dense_routing,
-            return_diagnostics=False,
+        profile: torch.Tensor,
+        present: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sample-count reliability from raw `log_matchups`, not content signal."""
+        log_matchups = profile[..., self.log_matchups_feature_idx].clamp(
+            min=0.0,
+            max=20.0,
         )
-        return score, aux
+        support = torch.expm1(log_matchups)
+        prior_count = self._confidence_prior_count.to(dtype=support.dtype)
+        confidence = support / (support + prior_count)
+        confidence = confidence.clamp(min=0.0, max=1.0)
+        return torch.where(present, confidence, torch.zeros_like(confidence))
 
-    def forward_with_diagnostics(
-        self,
-        match_features: torch.Tensor,
-        dense_score: torch.Tensor,
-        route_logit: torch.Tensor,
-        dense_routing: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-        score, aux, diagnostics = self._forward(
-            match_features,
-            dense_score,
-            route_logit,
-            dense_routing=dense_routing,
-            return_diagnostics=True,
-        )
-        return score, aux, cast(dict[str, torch.Tensor], diagnostics)
+    def forward(self, player_profile: torch.Tensor) -> torch.Tensor:
+        profile = player_profile.to(self.bin_pos_emb.weight.dtype)
+        # A bin is present iff any feature is non-zero; absent bins are
+        # zero-filled by build_dataset, and any real bin has avg_gold > 0.
+        # Presence is read before standardization shifts zero-fills off zero.
+        present = profile.abs().sum(dim=-1) > 0
+        confidence = self._profile_confidence(profile, present)
+        content = profile.index_select(-1, self._content_feature_idx)
+        content_mean = self._feature_mean.index_select(0, self._content_feature_idx)
+        content_std = self._feature_std.index_select(0, self._content_feature_idx)
+        standardized = (content - content_mean) / content_std
+        bin_repr = self.bin_mlp(standardized) + self.bin_pos_emb(self._bin_idx)
+        scores = self.attn_score(bin_repr).squeeze(-1)
+        scores = scores + confidence.clamp_min(1e-6).log()
+        scores = scores.masked_fill(~present, float("-inf"))
+        # Tokens with no present bins yield all -inf; nan_to_num maps the
+        # resulting nan weights to 0 so the pooled profile is exactly zero.
+        weights = torch.nan_to_num(scores.softmax(dim=-1), nan=0.0)
+        level_values = bin_repr * confidence.unsqueeze(-1)
+        level = (level_values * weights.unsqueeze(-1)).sum(dim=-2)
 
-    def _forward(
-        self,
-        match_features: torch.Tensor,
-        dense_score: torch.Tensor,
-        route_logit: torch.Tensor,
-        *,
-        dense_routing: bool,
-        return_diagnostics: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor] | None]:
-        route_logit = route_logit.float()
-        baseline_prob = route_logit.sigmoid()
-        scalar_features = torch.cat(
-            [
-                route_logit.unsqueeze(-1),
-                baseline_prob.unsqueeze(-1),
-                (baseline_prob - 0.5).abs().unsqueeze(-1),
-            ],
-            dim=-1,
-        )
-
-        expert_input = torch.cat(
-            [match_features, scalar_features.to(match_features.dtype)],
-            dim=-1,
-        )
-        routing_logits = self.router(expert_input).float() / self.router_temperature
-        if self.training and not dense_routing and self.router_noise > 0.0:
-            routing_logits = routing_logits + self.router_noise * torch.randn_like(
-                routing_logits
-            )
-        full_probs = routing_logits.softmax(dim=-1)
-        k = self.n_experts if dense_routing else self.top_k
-        top_values, top_indices = routing_logits.topk(k, dim=-1)
-        top_weights = top_values.softmax(dim=-1)
-
-        # Switch-style load-balancing aux loss: P_i = mean router prob,
-        # f_i = fraction of (token, slot) assignments to expert i.
-        counts = full_probs.new_zeros(self.n_experts).scatter_add_(
-            0, top_indices.reshape(-1), full_probs.new_ones(top_indices.numel())
-        )
-        f = counts / top_indices.numel()
-        P = full_probs.mean(dim=0)
-        aux_loss = self.aux_loss_coef * self.n_experts * (f * P).sum()
-
-        selected_scores = expert_input.new_zeros(top_indices.shape)
-        for expert_id, expert in enumerate(self.experts):
-            rows, slots = (top_indices == expert_id).nonzero(as_tuple=True)
-            if rows.numel() > 0:
-                selected_scores[rows, slots] = expert(expert_input[rows]).squeeze(
-                    -1
-                ).to(selected_scores.dtype)
-        moe_score = (selected_scores * top_weights.to(selected_scores.dtype)).sum(
-            dim=-1
-        )
-        diagnostics = None
-        if return_diagnostics:
-            expert_weights = routing_logits.new_zeros(routing_logits.shape).scatter(
-                -1, top_indices, top_weights
-            )
-            expert_corrections = routing_logits.new_zeros(routing_logits.shape).scatter(
-                -1, top_indices, (selected_scores.float() * top_weights)
-            )
-            diagnostics = {
-                "expert_weights": expert_weights,
-                "router_probs": full_probs,
-                "expert_corrections": expert_corrections,
-            }
-        return dense_score + moe_score, aux_loss, diagnostics
+        # Trajectory direction: a weighted bin sum cannot represent "scales
+        # up" vs "falls off", so add an explicit late-minus-early delta. Each
+        # half is a presence-masked mean; the delta is gated to zero unless
+        # both halves have a present bin, so a one-sided profile (e.g. only
+        # early bins) cannot fake a slope.
+        split = self.bin_split
+        early = self._masked_mean(bin_repr[..., :split, :], present[..., :split])
+        late = self._masked_mean(bin_repr[..., split:, :], present[..., split:])
+        both_present = present[..., :split].any(-1) & present[..., split:].any(-1)
+        early_conf = self._masked_mean(
+            confidence[..., :split].unsqueeze(-1),
+            present[..., :split],
+        ).squeeze(-1)
+        late_conf = self._masked_mean(
+            confidence[..., split:].unsqueeze(-1),
+            present[..., split:],
+        ).squeeze(-1)
+        delta_conf = torch.minimum(early_conf, late_conf)
+        delta = (late - early) * both_present.unsqueeze(-1) * delta_conf.unsqueeze(-1)
+        return level + self.delta_proj(delta)
 
 
 class HybridTokenModel(nn.Module):
     """Champion set transformer over 10 player tokens.
 
     Each player token is the compositional sum of champion + role + build + side
-    embeddings plus the 6002-derived historical profile projection for that
+    embeddings plus the 6002-derived historical profile encoding for that
     token across scaling bins.
     """
 
@@ -256,13 +261,18 @@ class HybridTokenModel(nn.Module):
         self.role_emb = nn.Embedding(vocab.n_roles, d)
         self.build_emb = nn.Embedding(vocab.n_builds, d)
         self.side_emb = nn.Embedding(N_SIDES, d)
-        profile_input_dim = vocab.n_profile_bins * vocab.n_profile_features
-        if profile_input_dim <= 0:
-            raise ValueError("profile_input_dim must be positive")
-        self.profile_projection = nn.Sequential(
-            nn.LayerNorm(profile_input_dim),
-            nn.Linear(profile_input_dim, d, bias=False),
+        self.profile_encoder = _TemporalProfileEncoder(
+            n_bins=vocab.n_profile_bins,
+            n_features=vocab.n_profile_features,
+            d=d,
+            dropout=cfg.dropout,
+            feature_mean=vocab.profile_mean,
+            feature_std=vocab.profile_std,
+            confidence_prior_count=cfg.profile_confidence_prior_count,
         )
+        # Scalar gate on the profile stream, init 1.0 (identity at start);
+        # the learned value measures how much profile the model keeps.
+        self.profile_gate = nn.Parameter(torch.ones(()))
         self._player_side: torch.Tensor
         self.register_buffer(
             "_player_side",
@@ -288,18 +298,16 @@ class HybridTokenModel(nn.Module):
             if cfg.pooling == "team_attention"
             else None
         )
-        head_input_dim = d * 5
+        self.lane_attention_pool = nn.Sequential(
+            nn.LayerNorm(d), nn.Linear(d, 1, bias=False)
+        )
+        head_input_dim = d * 6
         self.head = nn.Sequential(
             nn.LayerNorm(head_input_dim),
             nn.Linear(head_input_dim, cfg.head_hidden),
             nn.GELU(approximate="tanh"),
             nn.Dropout(cfg.dropout),
             nn.Linear(cfg.head_hidden, 1),
-        )
-        self.moe_head = (
-            _MatchLevelMoEHead(match_dim=head_input_dim, cfg=cfg)
-            if cfg.use_moe
-            else None
         )
 
     def _player_tokens(
@@ -311,15 +319,24 @@ class HybridTokenModel(nn.Module):
     ) -> torch.Tensor:
         b = champion_idx.shape[0]
         side_idx = self._player_side.expand(b, -1)
-        profile = player_profile.reshape(b, N_PLAYER_TOKENS, -1)
-        profile = profile.to(self.champ_emb.weight.dtype)
         return (
             self.champ_emb(champion_idx)
             + self.role_emb(role_idx)
             + self.build_emb(build_idx)
             + self.side_emb(side_idx)
-            + self.profile_projection(profile)
+            + self.profile_gate * self.profile_encoder(player_profile)
         )
+
+    def _lane_pool(self, lane_diff: torch.Tensor) -> torch.Tensor:
+        """Attention-weighted summary of the 5 same-role blue-vs-red diffs.
+
+        `lane_diff[:, i]` is the encoded blue role-i token minus the red
+        role-i token. Team pooling washes out same-role matchups; a mean
+        pool here would just reproduce the `blue_repr - red_repr` diff, so
+        the weights are learned and input-dependent. Output [B, d].
+        """
+        weights = self.lane_attention_pool(lane_diff).squeeze(-1).softmax(dim=-1)
+        return (lane_diff * weights.unsqueeze(-1)).sum(dim=1)
 
     def _team_pool(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Pool 10 player tokens into separate blue/red team representations.
@@ -342,11 +359,14 @@ class HybridTokenModel(nn.Module):
         return blue_repr, red_repr
 
     @staticmethod
-    def _match_features(first: torch.Tensor, second: torch.Tensor) -> torch.Tensor:
-        """5-way comparison concat (first, second, first-second, |first-second|, first*second)."""
+    def _match_features(
+        first: torch.Tensor, second: torch.Tensor, lane: torch.Tensor
+    ) -> torch.Tensor:
+        """6-way concat: first, second, first-second, |first-second|,
+        first*second, and the same-role lane-matchup summary."""
         diff = first - second
         return torch.cat(
-            [first, second, diff, diff.abs(), first * second],
+            [first, second, diff, diff.abs(), first * second, lane],
             dim=-1,
         )
 
@@ -356,51 +376,7 @@ class HybridTokenModel(nn.Module):
         role_idx: torch.Tensor,
         build_idx: torch.Tensor,
         player_profile: torch.Tensor,
-        dense_routing: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        _, final_logit, aux_loss, _ = self._logit_parts(
-            champion_idx,
-            role_idx,
-            build_idx,
-            player_profile,
-            dense_routing=dense_routing,
-        )
-        return final_logit, aux_loss
-
-    def matched_diagnostic_tensors(
-        self,
-        champion_idx: torch.Tensor,
-        role_idx: torch.Tensor,
-        build_idx: torch.Tensor,
-        player_profile: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        baseline_logit, final_logit, _, route_diagnostics = self._logit_parts(
-            champion_idx,
-            role_idx,
-            build_idx,
-            player_profile,
-            include_route_weights=True,
-        )
-        output = {"baseline_logit": baseline_logit, "final_logit": final_logit}
-        if route_diagnostics is not None:
-            output.update(route_diagnostics)
-        return output
-
-    def _logit_parts(
-        self,
-        champion_idx: torch.Tensor,
-        role_idx: torch.Tensor,
-        build_idx: torch.Tensor,
-        player_profile: torch.Tensor,
-        *,
-        dense_routing: bool = False,
-        include_route_weights: bool = False,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        dict[str, torch.Tensor] | None,
-    ]:
+    ) -> torch.Tensor:
         player = self._player_tokens(
             champion_idx,
             role_idx,
@@ -410,45 +386,15 @@ class HybridTokenModel(nn.Module):
         x = self.input_dropout(self.input_norm(player))
         z = self.encoder(x)
         blue_repr, red_repr = self._team_pool(z)
-        match_bvr = self._match_features(blue_repr, red_repr)
-        match_rvb = self._match_features(red_repr, blue_repr)
+        blue_tokens = z[:, :N_TEAM_TOKENS]
+        red_tokens = z[:, N_TEAM_TOKENS:]
+        lane_bvr = self._lane_pool(blue_tokens - red_tokens)
+        lane_rvb = self._lane_pool(red_tokens - blue_tokens)
+        match_bvr = self._match_features(blue_repr, red_repr, lane_bvr)
+        match_rvb = self._match_features(red_repr, blue_repr, lane_rvb)
         score_bvr = self.head(match_bvr).squeeze(-1)
         score_rvb = self.head(match_rvb).squeeze(-1)
-        baseline_logit = score_bvr - score_rvb
-        if self.moe_head is None:
-            zero = baseline_logit.new_zeros(())
-            return baseline_logit, baseline_logit, zero, None
-        if include_route_weights:
-            score_bvr, aux_bvr, bvr_diagnostics = (
-                self.moe_head.forward_with_diagnostics(
-                    match_bvr, score_bvr, baseline_logit, dense_routing
-                )
-            )
-            score_rvb, aux_rvb, rvb_diagnostics = (
-                self.moe_head.forward_with_diagnostics(
-                    match_rvb, score_rvb, -baseline_logit, dense_routing
-                )
-            )
-            route_diagnostics = {
-                f"bvr_{key}": value for key, value in bvr_diagnostics.items()
-            }
-            route_diagnostics.update(
-                {f"rvb_{key}": value for key, value in rvb_diagnostics.items()}
-            )
-        else:
-            score_bvr, aux_bvr = self.moe_head(
-                match_bvr, score_bvr, baseline_logit, dense_routing
-            )
-            score_rvb, aux_rvb = self.moe_head(
-                match_rvb, score_rvb, -baseline_logit, dense_routing
-            )
-            route_diagnostics = None
-        return (
-            baseline_logit,
-            score_bvr - score_rvb,
-            aux_bvr + aux_rvb,
-            route_diagnostics,
-        )
+        return score_bvr - score_rvb
 
 
 __all__ = ["HybridTokenModel"]

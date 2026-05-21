@@ -393,6 +393,36 @@ def _stream_into_arrays(
     return n
 
 
+def _profile_standardization(
+    profile: np.ndarray,
+    n_train: int,
+    chunk: int = 100_000,
+) -> dict[str, list[float]]:
+    """Per-feature mean/std over present train profile rows.
+
+    A bin row is present iff any feature is non-zero (matches the model's
+    presence mask); zero-filled missing rows are excluded so sparsity does
+    not pull the stats toward zero. Accumulated in chunks to bound memory.
+    """
+    s1 = np.zeros(N_PROFILE_FEATURES, dtype=np.float64)
+    s2 = np.zeros(N_PROFILE_FEATURES, dtype=np.float64)
+    count = 0
+    for start in range(0, n_train, chunk):
+        block = np.asarray(
+            profile[start : min(start + chunk, n_train)], dtype=np.float64
+        ).reshape(-1, N_PROFILE_FEATURES)
+        rows = block[np.abs(block).sum(axis=1) > 0]
+        count += rows.shape[0]
+        s1 += rows.sum(axis=0)
+        s2 += np.square(rows).sum(axis=0)
+    if count == 0:
+        raise ValueError("No present train profile rows for standardization")
+    mean = s1 / count
+    std = np.sqrt(np.maximum(s2 / count - np.square(mean), 0.0))
+    std[std < 1e-6] = 1.0
+    return {"mean": mean.tolist(), "std": std.tolist()}
+
+
 def _flush_arrays(arrays: dict[str, np.ndarray]) -> None:
     for arr in arrays.values():
         flush = getattr(arr, "flush", None)
@@ -482,6 +512,11 @@ def build(cfg: DatasetConfig | None = None) -> Path:
 
     _flush_arrays(arrays)
 
+    logger.info("Computing train profile standardization")
+    profile_standardization = _profile_standardization(
+        arrays["player_profile"], split_counts["train"]
+    )
+
     vocab_path = cfg.cache_dir / VOCAB_FILE
     meta_path = cfg.cache_dir / CACHE_META_FILE
 
@@ -508,6 +543,10 @@ def build(cfg: DatasetConfig | None = None) -> Path:
                     "feature_columns": list(PROFILE_FEATURE_COLUMNS),
                     "missing_profile_rows": "zero_filled",
                     "grain": "per match, player token, and scaling bin; not pairwise interactions",
+                },
+                "profile_standardization": {
+                    "scope": "per-feature mean/std over present train profile rows",
+                    **profile_standardization,
                 },
                 "splits": {
                     "strategy": "sql_ml_game_split",

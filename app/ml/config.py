@@ -46,21 +46,11 @@ class ModelConfig:
     pooling: Literal[
         "team_mean",
         "team_attention",
-    ] = "team_mean"
+    ] = "team_attention"
     head_hidden: int = 256
-    use_moe: bool = False
-    n_experts: int = 8
-    expert_hidden: int = 128
-    router_hidden: int = 64
-    moe_top_k: int = 2
-    router_temperature: float = 1.0
-    moe_dropout: float = 0.10
-    moe_aux_loss_coef: float = 0.01
-    # Steps to use dense routing (k=n_experts) before switching to top_k.
-    moe_warmup_steps: int = 81
-    # Shazeer-style Gaussian noise scale on routing logits in train mode only.
-    # 0 disables; default ~1/sqrt(n_experts) for n_experts=8.
-    moe_router_noise: float = 0.354
+    # `log_matchups` is interpreted only as profile reliability. This is the
+    # pseudo-count k in confidence = n / (n + k), where n = expm1(log_matchups).
+    profile_confidence_prior_count: float = 64.0
 
 
 @dataclass(frozen=True)
@@ -77,7 +67,7 @@ class TrainConfig:
     target_max: float = 0.95
     warmup_steps: int = 125
     # Smooth heavy-tail decay after warmup; see README "Learning-Rate Schedule".
-    lr_center_epoch: int = 10
+    lr_center_epoch: int = 5
     lr_sharpness: float = 8.0
     lr_tail_strength: float = 0.5
     lr_eta_min_ratio: float = 0.01

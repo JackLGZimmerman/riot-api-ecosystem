@@ -6,7 +6,7 @@ import numpy as np
 
 VOCAB_FILE = "vocab.json"
 CACHE_META_FILE = "cache_meta.json"
-CACHE_FORMAT = "npy-memmap-v8"
+CACHE_FORMAT = "npy-memmap-v9"
 
 PLAYER_CHAMPION_BUILD_IDX_FILE = "player_champion_build_idx.npy"
 PLAYER_PROFILE_FILE = "player_profile.npy"

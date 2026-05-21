@@ -146,59 +146,6 @@ def _prediction_density(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _weighted_band_mean(
-    rows: list[dict[str, Any]],
-    field: str,
-    *,
-    min_lo: float | None = None,
-    max_hi: float | None = None,
-) -> float | None:
-    total = 0
-    weighted_sum = 0.0
-    for row in rows:
-        parsed = _parse_percent_band(str(row.get("baseline_band", "")))
-        if parsed is None:
-            continue
-        lo, hi = parsed
-        if min_lo is not None and lo < min_lo:
-            continue
-        if max_hi is not None and hi > max_hi:
-            continue
-        count = _as_int(row.get("count"))
-        value = _as_float(row.get(field))
-        if count is None or value is None or math.isnan(value):
-            continue
-        total += count
-        weighted_sum += count * value
-    if total == 0:
-        return None
-    return weighted_sum / total
-
-
-def _top_experts(telemetry: dict[str, Any] | None, limit: int = 2) -> str:
-    if telemetry is None:
-        return "-"
-    combined = telemetry.get("combined")
-    if not isinstance(combined, dict):
-        return "-"
-    experts = combined.get("experts")
-    if not isinstance(experts, list):
-        return "-"
-    ranked = sorted(
-        (row for row in experts if isinstance(row, dict)),
-        key=lambda row: _as_float(row.get("selected_share")) or 0.0,
-        reverse=True,
-    )
-    parts = []
-    for row in ranked[:limit]:
-        expert = row.get("expert")
-        share = _as_float(row.get("selected_share"))
-        if expert is None or share is None:
-            continue
-        parts.append(f"E{expert} {_fmt_pct(share, 1)}")
-    return " / ".join(parts) if parts else "-"
-
-
 def summarize_metrics_file(path: Path) -> dict[str, Any]:
     metrics_path = _resolve_metrics_path(path)
     rows = _iter_rows(metrics_path)
@@ -206,10 +153,6 @@ def summarize_metrics_file(path: Path) -> dict[str, Any]:
         raise ValueError(f"no readable metrics rows in {metrics_path}")
 
     run_start = next((row for row in rows if row.get("event") == "run_start"), {})
-    model_ready = next((row for row in rows if row.get("event") == "model_ready"), {})
-    model_config = model_ready.get("model_config")
-    if not isinstance(model_config, dict):
-        model_config = {}
 
     epoch_rows = [row for row in rows if row.get("event") == "epoch_end"]
     best_loss_row = min(
@@ -243,29 +186,6 @@ def summarize_metrics_file(path: Path) -> dict[str, Any]:
         ),
         None,
     )
-    matched = next(
-        (
-            row
-            for row in reversed(rows)
-            if row.get("event") == "matched_moe_diagnostics"
-        ),
-        {},
-    )
-    central = matched.get("central") if isinstance(matched, dict) else None
-    if not isinstance(central, dict):
-        central = {}
-    central_delta = central.get("delta")
-    if not isinstance(central_delta, dict):
-        central_delta = {}
-    telemetry = matched.get("route_telemetry") if isinstance(matched, dict) else None
-    if not isinstance(telemetry, dict):
-        telemetry = None
-    combined = telemetry.get("combined") if telemetry is not None else None
-    if not isinstance(combined, dict):
-        combined = {}
-    baseline_band_rows = matched.get("baseline_band_rows")
-    if not isinstance(baseline_band_rows, list):
-        baseline_band_rows = []
 
     return {
         "path": str(metrics_path),
@@ -276,16 +196,6 @@ def summarize_metrics_file(path: Path) -> dict[str, Any]:
         "lr_center_epoch": run_start.get("lr_center_epoch"),
         "lr_sharpness": run_start.get("lr_sharpness"),
         "lr_tail_strength": run_start.get("lr_tail_strength"),
-        "use_moe": model_config.get("use_moe"),
-        "n_experts": model_config.get("n_experts"),
-        "moe_top_k": model_config.get("moe_top_k"),
-        "expert_hidden": model_config.get("expert_hidden"),
-        "router_hidden": model_config.get("router_hidden"),
-        "router_temperature": model_config.get("router_temperature"),
-        "moe_dropout": model_config.get("moe_dropout"),
-        "moe_aux_loss_coef": model_config.get("moe_aux_loss_coef"),
-        "moe_warmup_steps": model_config.get("moe_warmup_steps"),
-        "moe_router_noise": model_config.get("moe_router_noise"),
         "best_epoch": best_loss_row.get("epoch"),
         "best_val_loss": best_loss_row.get("val_loss"),
         "best_val_accuracy": best_loss_row.get("val_accuracy"),
@@ -302,24 +212,6 @@ def summarize_metrics_file(path: Path) -> dict[str, Any]:
         "test_brier": test.get("test_brier"),
         "test_ece": test.get("test_ece"),
         "test_n": test.get("test_n"),
-        "central_count": central.get("count"),
-        "central_bce_delta": central_delta.get("bce"),
-        "central_accuracy_delta": central_delta.get("accuracy"),
-        "central_auc_delta": central_delta.get("auc"),
-        "central_ece_delta": central_delta.get("ece"),
-        "route_entropy": combined.get("router_entropy_mean"),
-        "route_top_k_margin": combined.get("top_k_margin_mean"),
-        "top_experts": _top_experts(telemetry),
-        "low_probability_delta": _weighted_band_mean(
-            baseline_band_rows,
-            "mean_probability_delta",
-            max_hi=0.4,
-        ),
-        "high_probability_delta": _weighted_band_mean(
-            baseline_band_rows,
-            "mean_probability_delta",
-            min_lo=0.6,
-        ),
         "prediction_density": (
             _prediction_density(prediction_bands)
             if isinstance(prediction_bands, list)
@@ -350,13 +242,6 @@ def format_summary_table(
         "max acc",
         "test",
         "test acc",
-        "central dBCE",
-        "central dECE",
-        "entropy",
-        "margin",
-        "low dP",
-        "high dP",
-        "top experts",
     ]
     lines = ["| " + " | ".join(headers) + " |"]
     lines.append("| " + " | ".join("---" for _ in headers) + " |")
@@ -370,13 +255,6 @@ def format_summary_table(
             _fmt_pct(summary.get("max_val_accuracy"), 3),
             _fmt_float(summary.get("test_loss")),
             _fmt_pct(summary.get("test_accuracy"), 3),
-            _fmt_delta(summary.get("central_bce_delta"), 4),
-            _fmt_delta(summary.get("central_ece_delta"), 4),
-            _fmt_float(summary.get("route_entropy"), 4),
-            _fmt_float(summary.get("route_top_k_margin"), 4),
-            _fmt_delta(summary.get("low_probability_delta"), 4),
-            _fmt_delta(summary.get("high_probability_delta"), 4),
-            str(summary.get("top_experts") or "-"),
         ]
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
@@ -400,17 +278,6 @@ def _format_run_details(summary: dict[str, Any]) -> str:
                 f" ({_fmt_pct(item.get('share'), 2)},"
                 f" acc {_fmt_pct(item.get('accuracy'), 2)})"
             )
-    model_bits = [
-        f"moe={summary.get('use_moe')}",
-        f"experts={summary.get('n_experts')}",
-        f"top_k={summary.get('moe_top_k')}",
-        f"expert_hidden={summary.get('expert_hidden')}",
-        f"router_hidden={summary.get('router_hidden')}",
-        f"temp={summary.get('router_temperature')}",
-        f"aux={summary.get('moe_aux_loss_coef')}",
-        f"noise={summary.get('moe_router_noise')}",
-        f"moe_dropout={summary.get('moe_dropout')}",
-    ]
     train_bits = [
         f"lr={summary.get('lr')}",
         f"wd={summary.get('weight_decay')}",
@@ -424,7 +291,6 @@ def _format_run_details(summary: dict[str, Any]) -> str:
             f"### {summary.get('name')}",
             f"- path: `{summary.get('path')}`",
             f"- train: {', '.join(train_bits)}",
-            f"- model: {', '.join(model_bits)}",
             f"- best: epoch {summary.get('best_epoch')} val_loss "
             f"{_fmt_float(summary.get('best_val_loss'))}, val_acc "
             f"{_fmt_pct(summary.get('best_val_accuracy'), 3)}",
