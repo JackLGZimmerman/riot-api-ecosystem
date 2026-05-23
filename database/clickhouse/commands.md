@@ -107,10 +107,7 @@ docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/6900_ml_game_player_pivot_build.sql
 
 docker exec clickhouse clickhouse-client --multiquery \
-  --queries-file /docker-entrypoint-initdb.d/6002_1vx_aggregations_schema.sql
-
-docker exec clickhouse clickhouse-client --multiquery \
-  --queries-file /docker-entrypoint-initdb.d/6002_1vx_aggregations_build.sql
+  --queries-file /docker-entrypoint-initdb.d/6002_1vx_aggregations_simple.sql
 ```
 
 To rebuild from scratch (drops `game_data_filtered.*` first), run `5000`

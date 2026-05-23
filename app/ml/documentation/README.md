@@ -1,159 +1,104 @@
-# ML Win Prediction
+# ML Win-Rate Model
 
-Maintenance: keep this README as the live operating contract. Put dataset/cache mechanics in [DATASET.md](DATASET.md), architecture / data-flow visualisation in [MODEL.md](MODEL.md), experiment evidence in [OPTIMISATIONS.md](OPTIMISATIONS.md), conditions for a future MoE head in [MOE_EVALUATION.md](MOE_EVALUATION.md), repeatable sweep procedure in [TESTING.md](TESTING.md), and metric-field detail in [DIAGNOSTICS.md](DIAGNOSTICS.md).
+This documents the current win prediction baseline in `app/ml`.
 
-Predicts `blue_win` from the 10 fixed player slots. `HybridTokenModel` consumes champion, role, build, side, and the per-player historical profile tensor.
+## Model Type
 
-championId, teamPosition, and build define what was picked. Historical profile features describe how that pick usually performs based on past games. So the first group is the lookup identity, while the second group is the expected behaviour attached to that identity.
-
-## Token Layout
-
-Sequence length is `10`, fixed per game by the `6900` pivot:
-
-- Tokens `0-4` = blue side (`teamid = 100`), ordered TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY.
-- Tokens `5-9` = red side (`teamid = 200`), same role order.
-
-`blue_win` is `anyIf(win, teamid = 100)`, so the label is always relative to the first 5 tokens. The implied role index in `dataset.py` is `[0,1,2,3,4, 0,1,2,3,4]`; side is inferred from token position, not stored.
-
-## Historical Profile Tensor
-
-`player_profile.npy` is loaded as `[B, 10, 4, 22]`:
-
-- `10` player slots in the fixed blue/red role order above.
-- `4` scaling-bin positions from `synergy_1vx.bin_idx`.
-- `22` historical profile fields from `PROFILE_FEATURE_COLUMNS`. `log_matchups` is reserved for confidence; the remaining 21 fields carry win rate, economy, combat, objective, durability, vision, and damage-share aggregates.
-
-The current model does not flatten this tensor directly. `log_matchups` is converted back to approximate sample count and used only as reliability confidence. Each player/bin vector of the other 21 metrics is standardized by per-feature train mean/std (stored in `cache_meta.json`), encoded by a shared MLP, and tagged with a learned bin-position embedding. The encoder is two-stage: a confidence-weighted attention pool gives a `level` summary, and a confidence-gated `late - early` half-mean gives an explicit trajectory `delta`. Both are fused into one profile token per player (`level + delta_proj(delta)`), so trajectory direction survives into the match transformer. Zero-filled missing profile rows are masked out; a token with no profile rows contributes a zero profile embedding, and the delta is gated to zero unless both bin halves have a present row. See [MODEL.md](MODEL.md) for the encoder detail.
-
-## Flow
-
-See [DATASET.md](DATASET.md) for the exact ClickHouse rebuild order and cache layout.
-
-1. Build `game_data_filtered.ml_game_split` with `5900`.
-2. Build `game_data_filtered.ml_game_player_pivot` with `6900`.
-3. Cache: `CLICKHOUSE_HOST=localhost python -m app.ml.build_dataset`.
-4. Train: `CLICKHOUSE_HOST=localhost python -m app.ml.train`.
-5. Curves: `uv run tensorboard --logdir app/ml/data/tensorboard`.
-
-## Model
-
-Current default `ModelConfig`:
-
-| Parameter | Value |
-| --- | ---: |
-| `d_model` | 256 |
-| `n_heads` | 4 |
-| `n_layers` | 3 |
-| `dim_feedforward` | 1024 |
-| `dropout` | 0.15 |
-| `attention_dropout` | 0.10 |
-| `pooling` | `team_mean` |
-| `head_hidden` | 256 |
-| `profile_confidence_prior_count` | 64.0 |
-
-With the current cache vocabulary and two-stage temporal profile encoder this is about `2.98M` parameters. Keep architecture rationale and sweep evidence in `OPTIMISATIONS.md`.
-
-## Target Smoothing
-
-`blue_win.npy` remains the hard outcome: red win `0`, blue win `1`. Training smooths BCE targets only:
+The implementation is a linear probability model, not true logistic regression.
+It fits the blue-side win label with least squares:
 
 ```text
-smoothed_target = blue_win * (target_max - target_min) + target_min
+predicted_blue_win = intercept + sum(feature_weight[i] * engineered_feature[i])
 ```
 
-Defaults are `0 -> 0.05` and `1 -> 0.95`. Validation/test metrics always use hard labels, so `val_loss`, `test_loss`, AUC, Brier, ECE, positive rates, and bucket diagnostics remain comparable to real outcomes.
+`predict()` clips the result into `[0.0, 1.0]`. A true logistic regression would
+apply a sigmoid/logit link and train with a logistic loss; this code uses
+`np.linalg.lstsq`.
 
-## Throughput
+## Input
 
-Current 5070 Ti warm-path training uses `batch_size=16384`, BF16 AMP, fused AdamW, `torch.compile(mode="reduce-overhead")`, and `grad_clip=0.0`. Recent `train_step` rows sit around `190k` samples/s after compile/warmup. `16384` reserves ~8 GB, leaving headroom for larger configs in sweeps.
+Each cached game starts with 10 player win-rate priors:
 
-## Training Defaults
+```text
+0-4 = blue TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
+5-9 = red  TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
+```
 
-| Parameter | Value |
+For each slot, `build_dataset.py` looks up the historical `win_rate` for that
+player's `(championid, teamposition, build)` from
+`game_data_filtered.synergy_1vx` using only rows where `split = 'train'`.
+It then applies Bayesian smoothing toward a `0.5` prior:
+
+```text
+smoothed_win_rate = (wins + 0.5 * prior_strength) / (matchups + prior_strength)
+```
+
+The default `prior_strength` is `20`, equivalent to adding 10 wins and 10
+losses to each aggregate. This mainly affects low-sample champion/role/build
+combinations; high-sample priors stay close to their empirical win rate.
+Missing priors have `matchups = 0`, so they remain `0.5`.
+
+The target is `blue_win`, where `1` means the blue side won and `0` means the
+red side won.
+
+## Engineered Features
+
+`model.py` turns the 10 slot priors into 17 linear-model features:
+
+| Group | Features |
 | --- | --- |
-| `batch_size` | 16384 |
-| `optimizer` | `adamw` |
-| `lr` / base LR | 2e-4 |
-| `weight_decay` | 5e-3 |
-| `adamw_betas` | `(0.9, 0.999)` |
-| `compile_mode` | `reduce-overhead` |
-| `warmup_steps` | 125 |
-| `lr_center_epoch` | 10 |
-| `lr_sharpness` | 8.0 |
-| `lr_tail_strength` | 0.5 |
-| `lr_eta_min_ratio` | 0.01 |
-| `grad_clip` | 0.0 |
-| `log_interval` | 10 |
-| `epochs` | 500 |
-| `early_stop_patience` | 10 |
-| `target_min` / `target_max` | `0.05` / `0.95` |
-| `tensorboard_dir` | `tensorboard` |
-| `tensorboard_raw_mirror` | false |
-| `use_amp` | true |
-| `amp_dtype` | `bfloat16` |
+| Role differences | `top_diff`, `jungle_diff`, `middle_diff`, `bottom_diff`, `utility_diff` |
+| Blue team stats | `blue_mean`, `blue_min`, `blue_max`, `blue_variance` |
+| Red team stats | `red_mean`, `red_min`, `red_max`, `red_variance` |
+| Team stat differences | `mean_diff`, `min_diff`, `max_diff`, `variance_diff` |
 
-## Checkpoints
+Each role difference is `blue_role - red_role`. Each stat difference is the
+blue team statistic minus the red team statistic.
 
-Live training writes `best.pt`, `metrics.jsonl`, and `metrics_latest.json` to `app/ml/data/`. Preserved sweep runs live under `app/ml/data/checkpoints/`.
+Skew and kurtosis are left as comments in `model.py`. They can be added later,
+but each team has only five values, so those higher moments are noisy first-pass
+features.
 
-## Learning-Rate Schedule
+## Cache
 
-Training uses a single `LambdaLR` stepped once after each optimizer step: a linear warmup ramps to the base LR, then a smooth heavy-tail decay holds the LR near peak early, falls off smoothly around `lr_center_epoch`, and decays slowly through a long tail to `lr_eta_min_ratio * base_lr`. The floor is reached exactly at the final step; the curve is continuous and smooth after warmup.
+`uv run python -m app.ml.build_dataset` writes:
 
-```python
-import torch
+| File | Shape | Meaning |
+| --- | --- | --- |
+| `app/ml/data/cache/win_rate.npy` | `[games, 10]` | Slot smoothed historical win-rate priors |
+| `app/ml/data/cache/blue_win.npy` | `[games]` | Hard blue-win labels |
+| `app/ml/data/cache/cache_meta.json` | object | Cache format, total rows, split counts |
 
-base_lr = 2e-4
-warmup_steps = 125
-num_epochs = 500
-batches_per_epoch = len(train_loader)
-total_steps = max(1, batches_per_epoch * num_epochs)
-decay_steps = max(1, total_steps - warmup_steps)
-center_step = batches_per_epoch * 10  # smooth fall-off around epoch 10
-center_progress = center_step / decay_steps
-sharpness = 8.0
-tail_strength = 0.5
-eta_min_ratio = 0.01
+The cache order is train, validation, then test. `dataset.py` reads
+`cache_meta.json` and slices the arrays back into those splits.
 
-raw_end = (1.0 + (1.0 / center_progress) ** sharpness) ** (-tail_strength)
+## Training
 
-def lr_lambda(step: int) -> float:
-    if step < warmup_steps:
-        start = 1.0 / warmup_steps
-        return start + (1.0 - start) * (step / warmup_steps)
-    progress = min(1.0, (step - warmup_steps) / decay_steps)
-    raw = (1.0 + (progress / center_progress) ** sharpness) ** (-tail_strength)
-    remaining = (raw - raw_end) / (1.0 - raw_end)
-    return eta_min_ratio + (1.0 - eta_min_ratio) * remaining
+`uv run python -m app.ml.train` loads the train split and solves:
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=5e-3)
-scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-
-for epoch in range(num_epochs):
-    model.train()
-    for batch in train_loader:
-        optimizer.zero_grad(set_to_none=True)
-        loss = model_loss(model, batch)
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-
-    validate(model, val_loader)
+```text
+[1, engineered_feature_0, ..., engineered_feature_16] @ coefficients ~= blue_win
 ```
 
-Tuning parameters:
+The first coefficient is the intercept. The remaining coefficients are one
+weight per engineered feature. `metrics_latest.json` includes `feature_names`
+next to `weights` so the coefficients can be inspected by name.
 
-- `lr` is the base (peak) learning rate after warmup.
-- `warmup_steps` controls how many optimizer steps ramp up to the base LR.
-- `lr_center_epoch` is the epoch around which the main fall-off happens.
-- `lr_sharpness` controls how steep the fall-off transition is (higher = sharper).
-- `lr_tail_strength` controls how slowly the post-centre tail decays (higher = faster decay).
-- `lr_eta_min_ratio` sets the final floor as a fraction of `lr`; the last step hits it exactly.
-- `epochs` controls the schedule length together with the number of batches per epoch.
+Training writes:
 
-## Future Considerations
+| File | Meaning |
+| --- | --- |
+| `app/ml/data/linear_winrate_model.npz` | Saved intercept and weights |
+| `app/ml/data/metrics_latest.json` | Config, coefficients, and split metrics |
 
-Removed during the most recent simplification pass; reinstate only if the listed need re-emerges.
+## Evaluation
 
-- `head_dropout` (`ModelConfig`): per-head attention drop applied inside `_DiagnosticEncoderLayer`. Removed because the default `0.0` was never swept. To reinstate: add the field back, restore `_apply_head_dropout` on `_DiagnosticEncoderLayer`, and gate `_sa_block`'s manual-attention path on `self.training and self.head_dropout > 0.0` so non-diagnostic forward passes still take the SDPA fast path when the knob is off.
-- `train_matchids_hash` (`cache_meta.json`): 12-char SHA1 over the ordered train matchids. Removed because no loader consumed it. Reinstate as a cheap integrity check that the cache still matches the current `ml_game_split` rows.
+The saved model is evaluated on train, validation, and test with:
+
+- `mse` and `rmse` for probability error.
+- `accuracy` using `prediction >= 0.5`.
+- `auc` using prediction ranking.
+
+Validation and test rows use priors built from the train split only, so their
+labels are not used to create their input priors. Train metrics are in-sample:
+train rows can be reflected in the train aggregate priors used as features.

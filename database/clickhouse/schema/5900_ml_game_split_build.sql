@@ -1,8 +1,8 @@
 -- noqa: disable=AL09,LT02,LT05,RF02,ST09
 -- Label eligible filtered games as chronological train/validation/test splits.
 -- Eligibility mirrors the ML input shape needed by downstream builds: one row
--- per selected game with exactly 10 usable participants, item-build labels,
--- and one blue/red player in each standard role.
+-- per selected game with exactly 10 usable participants and one blue/red
+-- player in each standard role.
 --
 -- Read ordering timestamps from source game_data.info filtered by the current
 -- valid_game_ids set. This keeps ML splits aligned during fast filter iteration,
@@ -35,10 +35,6 @@ eligible_games AS (
     FROM game_data_filtered.participant_stats AS ps
     INNER JOIN info_one_row AS info
         ON ps.matchid = info.matchid
-    INNER JOIN game_data_filtered.participant_item_value_totals AS ivt
-        ON
-            ps.matchid = ivt.matchid
-            AND ps.participantid = ivt.participantid
     WHERE
         ps.championid IS NOT NULL
         AND ps.teamid IN (100, 200)

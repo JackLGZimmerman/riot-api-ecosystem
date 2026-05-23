@@ -2,8 +2,7 @@
 
 -- Per-game pivot of the 5 blue + 5 red player tuples in fixed role order
 -- (TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY). Used as the join input for the
--- per-token interaction-feature build (6901) and to feed champion / role /
--- build embedding ids into the Python cache builder.
+-- Python ML cache builder and build-labeled matchup aggregates.
 
 DROP TABLE IF EXISTS game_data_filtered.ml_game_player_pivot;
 
