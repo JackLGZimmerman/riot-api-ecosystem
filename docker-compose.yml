@@ -15,6 +15,7 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./database/clickhouse/schema:/docker-entrypoint-initdb.d:ro
+      - ./database/clickhouse/config.d:/etc/clickhouse-server/config.d:ro
       - ./database/clickhouse/support:/var/lib/clickhouse/user_files/clickhouse_support
     healthcheck:
       test: [ "CMD", "wget", "-qO-", "http://localhost:8123/ping" ]

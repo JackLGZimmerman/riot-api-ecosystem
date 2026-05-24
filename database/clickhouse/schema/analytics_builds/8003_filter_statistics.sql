@@ -34,7 +34,11 @@ rules AS (
                     countIf(solo_carried)
                 ),
                 tuple(6, '06-non-utility-dmg-share-lt-2%', countIf(too_little_damage)),
-                tuple(7, '07-non-utility-cs-per-min-lt-3.0', countIf(low_minions_killed)),
+                tuple(
+                    7,
+                    '07-non-utility-cs-per-min-lt-3.0',
+                    countIf(low_minions_killed)
+                ),
                 tuple(
                     8,
                     '08-team-non-utility-avg-cs-per-min-gt-2.0-below-enemy',
@@ -45,7 +49,12 @@ rules AS (
                     '09-team-non-utility-dmg-to-champs-ratio-lt-1/2-vs-enemy',
                     countIf(team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy)
                 ),
-                tuple(10, '10-low-build-value-lt-1.0', countIf(low_build_value))
+                tuple(10, '10-low-build-value-lt-1.0', countIf(low_build_value)),
+                tuple(
+                    11,
+                    '11-unknown-teamposition',
+                    countIf(unknown_teamposition)
+                )
             ]) AS rule
         FROM game_data.filter_stg_game_flags
     )

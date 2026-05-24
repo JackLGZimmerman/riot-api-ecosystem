@@ -3,7 +3,8 @@
 -- Pre-filter (f14): games with gameduration > 990 s are collected into
 --          filter_stg_f14_long_games first. All subsequent stages operate
 --          exclusively on this long-game population via SEMI JOIN.
--- Stage 1: cheap per-participant / per-team filters scanned over f14_long_games.
+-- Stage 1: cheap per-participant / per-team / per-game filters scanned over
+--          f14_long_games.
 -- Stage 2: build label computation + low-build-value detection
 --          (highest_value < 1.0) over stage-1-clean games only.
 --
@@ -30,17 +31,8 @@ CREATE TABLE game_data.filter_stg_player_winrates
 ENGINE = MergeTree
 ORDER BY puuid;
 
+-- Legacy unused stage; retained as a drop so rebuilds clean old deployments.
 DROP TABLE IF EXISTS game_data.filter_stg_player_role_rates;
-
-CREATE TABLE game_data.filter_stg_player_role_rates
-(
-    puuid FixedString (78),
-    teamposition LowCardinality (String),
-    role_games UInt32,
-    total_games UInt32
-)
-ENGINE = MergeTree
-ORDER BY (puuid, teamposition);
 
 -- Per-game player_high_winrate flag: precomputed via suffix-WR trim
 -- over the games of suspect players (lifetime > 40 games AND WR > 70%).
@@ -90,7 +82,8 @@ CREATE TABLE game_data.filter_stg_participant_flags
     too_little_damage UInt8,
     low_minions_killed UInt8,
     team_non_utility_avg_cs_per_min_gt_1_0_below_enemy UInt8,
-    team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy UInt8
+    team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy UInt8,
+    unknown_teamposition UInt8
 )
 ENGINE = MergeTree
 ORDER BY (matchid, teamid, participantid);
@@ -138,6 +131,7 @@ CREATE TABLE game_data.filter_stg_game_flags
     low_minions_killed UInt8,
     team_non_utility_avg_cs_per_min_gt_1_0_below_enemy UInt8,
     team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy UInt8,
+    unknown_teamposition UInt8,
     low_build_value UInt8,
     any_filter_triggered UInt8
 )

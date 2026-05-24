@@ -1,8 +1,6 @@
 -- noqa: disable=AL09,LT02,LT05,RF02,ST09
 -- Pivot each game's participants into per-side, role-ordered arrays of
--- (championid, teamposition, build) tuples. The split table already selects
--- 10-participant games; this build also guards that the joined rows still
--- contain exactly one TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY player per side.
+-- (championid, teamposition, build) tuples.
 -- teamid 100 = blue, teamid 200 = red.
 
 TRUNCATE TABLE game_data_filtered.ml_game_player_pivot;
@@ -25,10 +23,6 @@ players AS (
         ON
             ps.matchid = ivt.matchid
             AND ps.participantid = ivt.participantid
-    WHERE
-        ps.championid IS NOT NULL
-        AND ps.teamid IN (100, 200)
-        AND ps.teamposition IN ('TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'UTILITY')
 )
 
 SELECT
@@ -50,7 +44,4 @@ SELECT
         anyIf((championid, teamposition, build), teamid = 200 AND teamposition = 'UTILITY')
     ] AS red_players
 FROM players
-GROUP BY matchid
-HAVING
-    count() = 10
-    AND uniqExact((teamid, teamposition)) = 10;
+GROUP BY matchid;

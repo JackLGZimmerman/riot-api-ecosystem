@@ -46,8 +46,7 @@ FROM (
             AND ps.participantid = ivt.participantid
     WHERE
         s.split = 'train'
-        AND ps.championid IS NOT NULL
-        AND ps.teamposition IN ('TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'UTILITY')
+
 )
 GROUP BY
     championid,

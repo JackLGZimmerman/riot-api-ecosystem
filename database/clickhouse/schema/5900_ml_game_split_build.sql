@@ -1,8 +1,5 @@
 -- noqa: disable=AL09,LT02,LT05,RF02,ST09
--- Label eligible filtered games as chronological train/validation/test splits.
--- Eligibility mirrors the ML input shape needed by downstream builds: one row
--- per selected game with exactly 10 usable participants and one blue/red
--- player in each standard role.
+-- Label filtered games as chronological train/validation/test splits.
 --
 -- Read ordering timestamps from source game_data.info filtered by the current
 -- valid_game_ids set. This keeps ML splits aligned during fast filter iteration,
@@ -12,91 +9,43 @@ TRUNCATE TABLE game_data_filtered.ml_game_split;
 
 INSERT INTO game_data_filtered.ml_game_split
 WITH
-0.1 AS validation_fraction,
-0.1 AS test_fraction,
-
 info_one_row AS (
     SELECT
-        info.matchid AS matchid,
-        min(info.gamestarttimestamp) AS gamestarttimestamp,
-        min(info.gamecreation) AS gamecreation
-    FROM game_data.info AS info
-    INNER JOIN game_data_filtered.valid_game_ids AS valid
-        ON info.matchid = valid.matchid
-    GROUP BY info.matchid
-),
-
-eligible_games AS (
-    SELECT
-        ps.matchid AS matchid,
-        min(info.gamestarttimestamp) AS gamestarttimestamp,
-        min(info.gamecreation) AS gamecreation,
-        toUInt8(count()) AS participant_count
-    FROM game_data_filtered.participant_stats AS ps
-    INNER JOIN info_one_row AS info
-        ON ps.matchid = info.matchid
-    WHERE
-        ps.championid IS NOT NULL
-        AND ps.teamid IN (100, 200)
-        AND ps.teamposition IN ('TOP', 'JUNGLE', 'MIDDLE', 'BOTTOM', 'UTILITY')
-    GROUP BY ps.matchid
-    HAVING
-        count() = 10
-        AND uniqExact((ps.teamid, ps.teamposition)) = 10
+        matchid,
+        min(gamestarttimestamp) AS gamestarttimestamp,
+        min(gamecreation) AS gamecreation
+    FROM game_data.info
+    WHERE matchid IN (SELECT matchid FROM game_data_filtered.valid_game_ids)
+    GROUP BY matchid
 ),
 
 ranked_games AS (
     SELECT
         matchid,
-        gamestarttimestamp,
-        gamecreation,
-        participant_count,
         row_number() OVER (
             ORDER BY gamestarttimestamp ASC, gamecreation ASC, matchid ASC
         ) AS split_index,
         count() OVER () AS total_games
-    FROM eligible_games
+    FROM info_one_row
 ),
 
-sized_splits AS (
+split_info AS (
     SELECT
         matchid,
-        gamestarttimestamp,
-        gamecreation,
-        participant_count,
         split_index,
-        total_games,
-        toUInt64(round(total_games * validation_fraction)) AS validation_games,
-        toUInt64(round(total_games * test_fraction)) AS test_games
+        total_games
+            - toUInt64(round(total_games * 0.1))  -- test
+            - toUInt64(round(total_games * 0.1))  -- validation
+            AS train_games,
+        toUInt64(round(total_games * 0.1)) AS validation_games
     FROM ranked_games
-),
-
-bounded_splits AS (
-    SELECT
-        matchid,
-        gamestarttimestamp,
-        gamecreation,
-        participant_count,
-        split_index,
-        total_games,
-        total_games - validation_games - test_games AS train_games,
-        validation_games
-    FROM sized_splits
 )
 
 SELECT
     matchid,
     multiIf(
-        split_index <= train_games,
-        'train',
-        split_index <= train_games + validation_games,
-        'validation',
+        split_index <= train_games, 'train',
+        split_index <= train_games + validation_games, 'validation',
         'test'
-    ) AS split,
-    split_index,
-    total_games,
-    gamestarttimestamp,
-    gamecreation,
-    participant_count
-FROM bounded_splits
-ORDER BY split_index;
+    ) AS split
+FROM split_info;

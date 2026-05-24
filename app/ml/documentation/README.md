@@ -102,3 +102,11 @@ The saved model is evaluated on train, validation, and test with:
 Validation and test rows use priors built from the train split only, so their
 labels are not used to create their input priors. Train metrics are in-sample:
 train rows can be reflected in the train aggregate priors used as features.
+
+## Future Considerations
+
+- Bayesian Smoothing
+
+We want to address the sparsity issue by applying bayesian smoothing with the most appropriate priors, to do this effectively we need to find similar classes to group together, that way the priors we use will be the most contextually relevant and adjust the win rate of the data accordingly.
+
+- Neural Embeddings with Cosine Similarity

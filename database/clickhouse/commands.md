@@ -176,6 +176,48 @@ docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/4000_filter_build.sql
 ```
 
+## Named collection for dictionary reloads
+
+`SOURCE(CLICKHOUSE(...))` dictionaries that pull from this server (the ML
+priors in `7004`/`7005`/`7006`) need credentials because the `default`
+user no longer exists. Credentials live in the `ch_internal` named
+collection so they stay out of the schema files.
+
+Create it once per environment (and re-run if the password rotates):
+
+```bash
+docker exec clickhouse clickhouse-client -q "
+CREATE NAMED COLLECTION IF NOT EXISTS ch_internal AS
+    host = 'localhost',
+    port = 9000,
+    user = '<ml_loader_user>',
+    password = '<ml_loader_password>',
+    db = 'game_data_filtered'
+;"
+```
+
+The dictionary `SOURCE` clauses reference it by `NAME 'ch_internal'`; only
+the `QUERY` is per-dictionary.
+
+## ML prior dictionary refresh
+
+After rebuilding the aggregations in `6003`/`6000`/`6004`, reload each
+matching prior dictionary so `build_dataset.py` sees fresh values:
+
+```bash
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/7004_synergy_1vx_dict_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/7005_matchup_1v1_dict_build.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/7006_synergy_2vx_dict_build.sql
+```
+
+If a dictionary was renamed or its column list changed, re-run the
+matching `*_schema.sql` first, then the build above.
+
 ## Item-value dictionary refresh
 
 The item-value dictionary (`game_data.item_value_map_dict`, from

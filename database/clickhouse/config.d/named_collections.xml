@@ -1,0 +1,11 @@
+<clickhouse>
+    <named_collections>
+        <ch_internal>
+            <host>localhost</host>
+            <port>9000</port>
+            <user>app</user>
+            <password>1234</password>
+            <db>game_data_filtered</db>
+        </ch_internal>
+    </named_collections>
+</clickhouse>

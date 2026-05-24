@@ -9,11 +9,6 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.ml_game_split
 (
     matchid String,
     split LowCardinality(String),
-    split_index UInt64,
-    total_games UInt64,
-    gamestarttimestamp UInt64,
-    gamecreation UInt64,
-    participant_count UInt8
 )
 ENGINE = MergeTree
-ORDER BY (split, split_index, matchid);
+ORDER BY (split, matchid);
