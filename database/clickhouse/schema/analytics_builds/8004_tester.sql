@@ -10,4 +10,4 @@
 -- WHERE ps.matchid IN (SELECT fm.matchid FROM filtered_matches AS fm)
 -- ORDER BY ps.matchid
 
-select count() from game_data.info;
+select count() from game_data_filtered.participant_stats;
