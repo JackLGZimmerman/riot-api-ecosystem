@@ -1,7 +1,8 @@
-"""HTML report for baseline embedding groups."""
+"""HTML report for specialist embedding groups."""
 
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import logging
@@ -14,12 +15,9 @@ import numpy as np
 
 from app.classification.embeddings.config import (
     EmbeddingConfig,
-    IdentityType,
-)
-from app.classification.embeddings.embed import LevelEmbeddings
-from app.classification.embeddings.similarity import (
-    cosine_similarity_matrix,
-    group_by_threshold,
+    SPECIALIST_CACHE_DIR,
+    SPECIALISTS,
+    SpecialistSpec,
 )
 from app.core.config.settings import PROJECT_ROOT
 
@@ -28,41 +26,53 @@ logger = logging.getLogger(__name__)
 CHAMPION_NAMES_PATH = (
     PROJECT_ROOT / "database" / "clickhouse" / "support" / "championid_name_map.jsonl"
 )
+SPECIALIST_DISPLAY_NAMES = {"self_sustain": "Restorationist"}
 
 
 @dataclass(frozen=True)
-class GroupSummary:
+class SpecialistGroup:
     rank: int
+    label_id: int
     members: list[int]
-    label: str
     builds: Counter[str]
     roles: Counter[str]
     champions: Counter[int]
-    pairwise: np.ndarray
 
 
 @dataclass(frozen=True)
-class ThresholdReport:
-    threshold: float
-    groups: list[GroupSummary]
-    singletons: list[int]
-    coverage: float
-    dominant_build_share: float
-    within_pairwise: np.ndarray
+class SpecialistReport:
+    name: str
+    display_name: str
+    feature_set: tuple[str, ...]
+    groups: list[SpecialistGroup]
+    unlabelled: list[int]
+    keys: list[tuple]
+    columns: dict[str, int]
+    updated_at: datetime
 
     @property
-    def group_count(self) -> int:
-        return len(self.groups) + len(self.singletons)
+    def coverage(self) -> float:
+        return (
+            (len(self.keys) - len(self.unlabelled)) / len(self.keys)
+            if self.keys
+            else float("nan")
+        )
 
     @property
     def largest_group(self) -> int:
-        return max(
-            (len(g.members) for g in self.groups), default=1 if self.singletons else 0
-        )
+        return max((len(group.members) for group in self.groups), default=0)
 
 
 def _html(value: object) -> str:
     return html.escape(str(value), quote=True)
+
+
+def _fmt_label(label: str) -> str:
+    return label.replace("_", " ")
+
+
+def _pct(value: float) -> str:
+    return "n/a" if not np.isfinite(value) else f"{100.0 * value:.1f}%"
 
 
 def _hue(label: str) -> int:
@@ -73,24 +83,16 @@ def _style(label: str) -> str:
     return f"--h:{_hue(label)}"
 
 
-def _fmt_label(label: str) -> str:
-    return label.replace("_", " ")
+def _anchor(name: str) -> str:
+    return name.replace("_", "-").replace(".", "-")
 
 
-def _fmt_float(value: float) -> str:
-    return "n/a" if not np.isfinite(value) else f"{value:.3f}"
+def _normalise(value: str) -> str:
+    return value.casefold().replace("-", "_").replace(" ", "_")
 
 
-def _pct(value: float) -> str:
-    return "n/a" if not np.isfinite(value) else f"{100.0 * value:.1f}%"
-
-
-def _threshold_id(threshold: float) -> str:
-    return f"threshold-{threshold:g}".replace(".", "-")
-
-
-def _thresholds(cfg: EmbeddingConfig) -> tuple[float, ...]:
-    return (float(cfg.similarity_threshold),)
+def _display_name(name: str) -> str:
+    return SPECIALIST_DISPLAY_NAMES.get(name, _fmt_label(name).title())
 
 
 def _load_champion_names(path: Path = CHAMPION_NAMES_PATH) -> dict[int, str]:
@@ -103,60 +105,54 @@ def _load_champion_names(path: Path = CHAMPION_NAMES_PATH) -> dict[int, str]:
     return names
 
 
-def _key_columns(embeddings: LevelEmbeddings) -> dict[str, int]:
-    required = {"championid", "teamposition", "build"}
-    columns = {name: i for i, name in enumerate(embeddings.key_columns)}
-    missing = required - columns.keys()
+def _required_columns(key_columns: tuple[str, ...], source: str) -> dict[str, int]:
+    columns = {name: i for i, name in enumerate(key_columns)}
+    missing = {"championid", "teamposition", "build"} - columns.keys()
     if missing:
-        raise ValueError(
-            f"grouping report requires baseline keys, missing {sorted(missing)}"
-        )
+        raise ValueError(f"{source} requires keys, missing {sorted(missing)}")
     return columns
 
 
-def _pairwise_values(sim: np.ndarray, members: list[int]) -> np.ndarray:
-    if len(members) < 2:
-        return np.array([], dtype=np.float32)
-    idx = np.asarray(members, dtype=np.int64)
-    left, right = np.triu_indices(idx.size, k=1)
-    return sim[idx[left], idx[right]]
+def _counter(keys: list[tuple], members: list[int], columns: dict[str, int], name: str) -> Counter:
+    return Counter(str(keys[index][columns[name]]) for index in members)
 
 
-def _group_label(builds: Counter[str]) -> str:
-    ranked = builds.most_common()
-    if not ranked:
-        return "unknown"
-    top_build, top_count = ranked[0]
-    total = builds.total()
-    if len(ranked) == 1 or top_count / total >= 0.6:
-        return _fmt_label(top_build)
-    kept = [build for build, count in ranked[:3] if count / total >= 0.15]
-    return " + ".join(_fmt_label(build) for build in (kept or [top_build]))
+def _champion_counter(
+    keys: list[tuple],
+    members: list[int],
+    columns: dict[str, int],
+) -> Counter[int]:
+    return Counter(int(keys[index][columns["championid"]]) for index in members)
 
 
 def _chip(label: str, count: int | None = None) -> str:
-    count_html = "" if count is None else f"<b>{count}</b>"
+    suffix = "" if count is None else f"<b>{count}</b>"
     return (
         f'<span class="chip" style="{_style(label)}">'
-        f"{_html(_fmt_label(label))}{count_html}</span>"
+        f"{_html(_fmt_label(label))}{suffix}</span>"
     )
 
 
-def _chips(counter: Counter[str], limit: int | None = None) -> str:
-    ranked = counter.most_common(limit)
-    return "".join(_chip(label, count) for label, count in ranked)
+def _chips(values: Counter[str], limit: int | None = None) -> str:
+    return "".join(_chip(label, count) for label, count in values.most_common(limit))
+
+
+def _champion_label(championid: int, champion_names: dict[int, str]) -> str:
+    return f"{champion_names.get(championid, championid)} #{championid}"
 
 
 def _top_champions(
-    champions: Counter[int], names: dict[int, str], limit: int = 8
+    champions: Counter[int],
+    champion_names: dict[int, str],
+    limit: int = 5,
 ) -> str:
     return ", ".join(
-        f"{_html(names.get(championid, championid))}({count})"
+        f"{_html(_champion_label(championid, champion_names))}({count})"
         for championid, count in champions.most_common(limit)
     )
 
 
-def _member_html(
+def _identity_chip(
     key: tuple,
     columns: dict[str, int],
     champion_names: dict[int, str],
@@ -165,261 +161,334 @@ def _member_html(
     build = str(key[columns["build"]])
     return (
         f'<span class="member" style="{_style(build)}">'
-        f'<span class="name">{_html(champion_names.get(championid, championid))}</span>'
-        f'<span class="role">{_html(key[columns["teamposition"]])}</span>'
+        f'<b>{_html(champion_names.get(championid, championid))}</b>'
+        f'<span>#{championid}</span>'
+        f'<span>{_html(key[columns["teamposition"]])}</span>'
         f"<span>{_html(_fmt_label(build))}</span></span>"
     )
 
 
-def _summarise_group(
-    rank: int,
+def _members_html(
+    keys: list[tuple],
     members: list[int],
-    embeddings: LevelEmbeddings,
     columns: dict[str, int],
-    sim: np.ndarray,
-) -> GroupSummary:
-    keys = [embeddings.keys[i] for i in members]
-    builds = Counter(str(key[columns["build"]]) for key in keys)
-    return GroupSummary(
-        rank=rank,
-        members=members,
-        label=_group_label(builds),
-        builds=builds,
-        roles=Counter(str(key[columns["teamposition"]]) for key in keys),
-        champions=Counter(int(key[columns["championid"]]) for key in keys),
-        pairwise=_pairwise_values(sim, members),
-    )
+    champion_names: dict[int, str],
+) -> str:
+    return "".join(_identity_chip(keys[index], columns, champion_names) for index in members)
 
 
-def _threshold_report(
-    embeddings: LevelEmbeddings,
-    threshold: float,
-    columns: dict[str, int],
-    sim: np.ndarray,
-) -> ThresholdReport:
-    raw_groups = group_by_threshold(embeddings.embeddings, threshold)
-    non_singletons = [group for group in raw_groups if len(group) > 1]
+def _load_specialist_report(path: Path, spec: SpecialistSpec | None) -> SpecialistReport:
+    with np.load(path, allow_pickle=True) as data:
+        keys = [tuple(key) for key in data["keys"].tolist()]
+        columns = _required_columns(
+            tuple(str(column) for column in data["key_columns"].tolist()),
+            f"{path.name}",
+        )
+        labels = data["labels"].astype(np.int32)
+
+    groups: list[SpecialistGroup] = []
+    for rank, label in enumerate([v for v in np.unique(labels) if v >= 0], start=1):
+        members = np.flatnonzero(labels == label).astype(int).tolist()
+        groups.append(
+            SpecialistGroup(
+                rank=rank,
+                label_id=int(label),
+                members=members,
+                builds=_counter(keys, members, columns, "build"),
+                roles=_counter(keys, members, columns, "teamposition"),
+                champions=_champion_counter(keys, members, columns),
+            )
+        )
+    groups.sort(key=lambda group: len(group.members), reverse=True)
     groups = [
-        _summarise_group(i, group, embeddings, columns, sim)
-        for i, group in enumerate(non_singletons, start=1)
+        SpecialistGroup(
+            rank=rank,
+            label_id=group.label_id,
+            members=group.members,
+            builds=group.builds,
+            roles=group.roles,
+            champions=group.champions,
+        )
+        for rank, group in enumerate(groups, start=1)
     ]
-    covered = sum(len(group.members) for group in groups)
-    dominant = sum(max(group.builds.values()) for group in groups)
-    pairwise = [group.pairwise for group in groups if group.pairwise.size]
-    return ThresholdReport(
-        threshold=threshold,
+    return SpecialistReport(
+        name=path.stem,
+        display_name=_display_name(path.stem),
+        feature_set=spec.feature_set if spec else (),
         groups=groups,
-        singletons=[group[0] for group in raw_groups if len(group) == 1],
-        coverage=covered / len(embeddings.keys) if embeddings.keys else float("nan"),
-        dominant_build_share=dominant / covered if covered else float("nan"),
-        within_pairwise=np.concatenate(pairwise) if pairwise else np.array([]),
+        unlabelled=np.flatnonzero(labels < 0).astype(int).tolist(),
+        keys=keys,
+        columns=columns,
+        updated_at=datetime.fromtimestamp(path.stat().st_mtime),
     )
 
 
-def _summary_table(reports: list[ThresholdReport]) -> str:
-    rows = []
-    for report in reports:
-        values = report.within_pairwise
-        p05, p25, p50 = (
-            np.percentile(values, [5, 25, 50]) if values.size else [float("nan")] * 3
-        )
-        worst = min(
-            (float(g.pairwise.min()) for g in report.groups), default=float("nan")
-        )
-        rows.append(
-            "<tr>"
-            f'<td><a href="#{_threshold_id(report.threshold)}">{report.threshold:g}</a></td>'
-            f"<td>{report.group_count}</td><td>{len(report.singletons)}</td>"
-            f"<td>{report.largest_group}</td><td>{_pct(report.coverage)}</td>"
-            f"<td>{_pct(report.dominant_build_share)}</td>"
-            f"<td>{_fmt_float(float(p05))} / {_fmt_float(float(p25))} / {_fmt_float(float(p50))}</td>"
-            f"<td>{_fmt_float(worst)}</td></tr>"
-        )
-    return (
-        "<table><thead><tr><th>Threshold</th><th>Groups</th><th>Singletons</th>"
-        "<th>Largest</th><th>Non-singleton coverage</th><th>Dominant build</th>"
-        "<th>Within sim p05 / p25 / median</th><th>Worst min sim</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+def _specialist_paths(specialist_dir: Path, focus: str | None) -> list[Path]:
+    paths = sorted(specialist_dir.glob("*.npz"))
+    if focus is None:
+        by_name = {path.stem: path for path in paths}
+        return [by_name[spec.name] for spec in SPECIALISTS if spec.name in by_name]
+
+    wanted = _normalise(focus)
+    matches = [
+        path
+        for path in paths
+        if wanted in {_normalise(path.stem), _normalise(_display_name(path.stem))}
+    ]
+    if matches:
+        return matches
+    options = ", ".join(path.stem for path in paths)
+    raise ValueError(f"No specialist matched {focus!r}. Available: {options}")
 
 
-def _group_details(
-    group: GroupSummary,
-    threshold: float,
-    embeddings: LevelEmbeddings,
-    columns: dict[str, int],
-    champion_names: dict[int, str],
-) -> str:
-    below = float((group.pairwise < threshold).mean()) if group.pairwise.size else 0.0
-    members = "".join(
-        _member_html(embeddings.keys[i], columns, champion_names) for i in group.members
-    )
-    return (
-        '<details class="group">'
-        '<summary><span class="group-title">'
-        f'<span class="small">#{group.rank}</span>'
-        f'<span class="badge" style="{_style(group.label)}">{_html(group.label)}</span>'
-        f"<b>{len(group.members)} identities</b>"
-        f'<span class="small">{len(group.champions)} champions</span></span>'
-        f'<span class="small">median {_fmt_float(float(np.median(group.pairwise)))}'
-        f" | min {_fmt_float(float(group.pairwise.min()))}"
-        f" | below threshold {_pct(below)}</span></summary>"
-        '<div class="group-body"><div class="meta">'
-        f"<span>Builds: {_chips(group.builds)}</span>"
-        f"<span>Roles: {_chips(group.roles)}</span></div>"
-        f'<div class="members">{members}</div></div></details>'
-    )
-
-
-def _singletons_block(
-    singletons: list[int],
-    embeddings: LevelEmbeddings,
-    columns: dict[str, int],
-    champion_names: dict[int, str],
-) -> str:
-    if not singletons:
-        return ""
-    members = "".join(
-        _member_html(embeddings.keys[i], columns, champion_names) for i in singletons
-    )
-    return (
-        '<details class="group"><summary><span class="group-title">'
-        f'<span class="badge">SINGLE</span><b>{len(singletons)} singleton identities</b>'
-        f'</span></summary><div class="group-body"><div class="members">{members}'
-        "</div></div></details>"
-    )
-
-
-def _primary_section(
-    primary: ThresholdReport,
-    embeddings: LevelEmbeddings,
-    columns: dict[str, int],
-    champion_names: dict[int, str],
-) -> str:
-    values = primary.within_pairwise
-    median_sim = _fmt_float(float(np.median(values))) if values.size else "n/a"
-    groups = "".join(
-        _group_details(g, primary.threshold, embeddings, columns, champion_names)
-        for g in primary.groups
-    )
-    return (
-        f'<section class="section" id="{_threshold_id(primary.threshold)}">'
-        f"<h2>Groups at threshold {primary.threshold:g}</h2>"
-        '<div class="kpi-grid">'
-        f'<div class="kpi"><b>{primary.group_count}</b><span>groups</span></div>'
-        f'<div class="kpi"><b>{len(primary.singletons)}</b><span>singletons</span></div>'
-        f'<div class="kpi"><b>{_pct(primary.coverage)}</b><span>coverage</span></div>'
-        f'<div class="kpi"><b>{median_sim}</b><span>median within-pair</span></div>'
-        "</div>"
-        f'<div class="group-list">{groups}'
-        f"{_singletons_block(primary.singletons, embeddings, columns, champion_names)}"
-        "</div></section>"
-    )
+def _load_specialist_reports(
+    specialist_dir: Path,
+    focus: str | None = None,
+) -> list[SpecialistReport]:
+    if not specialist_dir.exists():
+        return []
+    specs = {spec.name: spec for spec in SPECIALISTS}
+    return [
+        _load_specialist_report(path, specs.get(path.stem))
+        for path in _specialist_paths(specialist_dir, focus)
+    ]
 
 
 STYLE = """
 <style>
-:root { color-scheme: light; --bg:#f6f7f9; --panel:#fff; --text:#1e252d; --muted:#667085; --line:#d9dee7; --soft:#eef1f5; }
-* { box-sizing: border-box; }
-body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
-main { max-width:1240px; margin:0 auto; padding:28px 24px 56px; }
-h1 { margin:0 0 4px; font-size:28px; }
-h2 { margin:32px 0 12px; font-size:20px; }
-h3 { margin:22px 0 10px; font-size:16px; }
-p { margin:0 0 16px; color:var(--muted); }
+:root { color-scheme: light; --bg:#f7f8fa; --panel:#fff; --text:#202831; --muted:#667085; --line:#d8dee8; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }
+main { max-width:1180px; margin:0 auto; padding:28px 22px 54px; }
+h1 { margin:0 0 6px; font-size:28px; }
+h2 { margin:28px 0 10px; font-size:20px; }
+p { margin:0 0 14px; color:var(--muted); }
 a { color:#175cd3; text-decoration:none; }
-table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-th, td { padding:9px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
-th { background:#eef1f5; font-size:12px; text-transform:uppercase; color:#475467; }
-tr:last-child td { border-bottom:0; }
-nav { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 22px; }
-nav a { display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:var(--text); }
-.kpi-grid { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:10px; margin:14px 0; }
-.kpi { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; }
+nav, .kpis, .meta, .members, .feature-list { display:flex; flex-wrap:wrap; gap:8px; }
+nav { margin:18px 0 22px; }
+nav a, .kpi, details.group, table { background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+nav a { padding:5px 9px; border-radius:999px; color:var(--text); }
+.kpis { margin:14px 0; }
+.kpi { min-width:132px; padding:10px; }
 .kpi b { display:block; font-size:20px; }
 .kpi span, .small { color:var(--muted); font-size:12px; }
-.section { margin-top:28px; padding-top:6px; border-top:2px solid var(--line); }
-.group-list { display:grid; grid-template-columns:1fr; gap:10px; margin-top:10px; }
-details.group { background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-details.group > summary { cursor:pointer; display:flex; gap:10px; align-items:center; justify-content:space-between; padding:10px 12px; background:#fbfcfe; }
+table { width:100%; border-collapse:collapse; overflow:hidden; }
+th, td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+th { background:#eef1f5; color:#475467; font-size:12px; text-transform:uppercase; }
+tr:last-child td { border-bottom:0; }
+.section { margin-top:28px; padding-top:8px; border-top:2px solid var(--line); }
+.group-list { display:grid; gap:9px; margin-top:10px; }
+details.group { overflow:hidden; }
+summary { cursor:pointer; display:flex; justify-content:space-between; gap:12px; padding:10px 12px; background:#fbfcfe; }
 .group-title { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 .group-body { padding:10px 12px 12px; border-top:1px solid var(--line); }
-.meta, .members { display:flex; flex-wrap:wrap; gap:6px; }
-.meta { margin-bottom:10px; color:var(--muted); gap:8px; }
-.chip, .badge, .member { --h:210; border:1px solid hsl(var(--h) 55% 75%); background:hsl(var(--h) 78% 96%); color:hsl(var(--h) 50% 30%); }
-.chip { display:inline-flex; align-items:center; gap:5px; padding:3px 7px; border-radius:999px; font-size:12px; margin:2px 3px 2px 0; }
-.chip b { font-weight:700; color:#344054; }
-.badge { display:inline-flex; align-items:center; min-width:48px; justify-content:center; border-radius:6px; padding:3px 6px; font-weight:800; font-size:12px; }
-.member { display:inline-flex; gap:5px; align-items:center; border-radius:6px; padding:4px 6px; font-size:12px; }
-.member .name { font-weight:700; color:#1e252d; }
-.member .role { color:var(--muted); }
-@media (max-width:820px) { main { padding:18px 12px 42px; } .kpi-grid { grid-template-columns:repeat(2, minmax(0, 1fr)); } table { font-size:12px; } th, td { padding:7px 6px; } details.group > summary { align-items:flex-start; flex-direction:column; } }
+.meta { margin-bottom:10px; color:var(--muted); }
+.feature-list { margin:8px 0 10px; }
+.chip, .badge, .member { --h:210; border:1px solid hsl(var(--h) 55% 75%); background:hsl(var(--h) 78% 96%); color:hsl(var(--h) 48% 30%); }
+.chip, .member { display:inline-flex; align-items:center; gap:5px; border-radius:999px; padding:3px 7px; font-size:12px; }
+.chip b { color:#344054; }
+.badge { display:inline-flex; min-width:46px; justify-content:center; border-radius:6px; padding:3px 6px; font-weight:800; font-size:12px; }
+.member { border-radius:6px; }
+.member b { color:#202831; }
+.member span { color:#667085; }
+@media (max-width:820px) { main { padding:18px 12px 42px; } summary { flex-direction:column; } table { font-size:12px; } th, td { padding:7px 6px; } }
 </style>
 """
 
 
-def _build_html(
-    embeddings: LevelEmbeddings,
-    reports: list[ThresholdReport],
-    columns: dict[str, int],
-    champion_names: dict[int, str],
-    primary_threshold: float,
-) -> str:
-    primary = next(
-        (r for r in reports if abs(r.threshold - primary_threshold) < 1e-9),
-        reports[0],
-    )
+def _page(title: str, intro: str, nav: str, body: str) -> str:
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>Classification Grouping Report</title>"
-        f"{STYLE}</head><body><main>"
-        "<h1>Classification Grouping Report</h1>"
-        f"<p>Identity unit: <b>(championid, teamposition, build)</b>. "
-        "Clustering: average-link agglomerative over cosine distance. "
-        f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}.</p>"
-        "<h2>Threshold summary</h2>"
-        f"{_summary_table(reports)}"
-        f"{_primary_section(primary, embeddings, columns, champion_names)}"
-        "</main></body></html>"
+        f"<title>{_html(title)}</title>{STYLE}</head><body><main>"
+        f"<h1>{_html(title)}</h1>{intro}{nav}{body}</main></body></html>"
     )
 
 
-def write_grouping_report(
-    embeddings: LevelEmbeddings,
-    cfg: EmbeddingConfig,
-    champion_names_path: Path = CHAMPION_NAMES_PATH,
-) -> Path:
-    if embeddings.level is not IdentityType.BASELINE:
-        raise ValueError("grouping report currently expects baseline embeddings")
-    columns = _key_columns(embeddings)
-    sim = cosine_similarity_matrix(embeddings.embeddings)
-    reports = [
-        _threshold_report(embeddings, threshold, columns, sim)
-        for threshold in _thresholds(cfg)
+def _kpis(values: list[tuple[str, str]]) -> str:
+    return '<div class="kpis">' + "".join(
+        f'<div class="kpi"><b>{_html(value)}</b><span>{_html(label)}</span></div>'
+        for value, label in values
+    ) + "</div>"
+
+
+def _group_html(
+    *,
+    rank: int,
+    badge: str,
+    badge_style: str,
+    count: int,
+    champions: Counter[int],
+    builds: Counter[str],
+    roles: Counter[str],
+    members: str,
+    champion_names: dict[int, str],
+    stats: str = "",
+    open_group: bool = False,
+) -> str:
+    open_attr = " open" if open_group else ""
+    right = stats or _top_champions(champions, champion_names)
+    return (
+        f'<details class="group"{open_attr}><summary><span class="group-title">'
+        f'<span class="small">#{rank}</span>'
+        f'<span class="badge" style="{badge_style}">{_html(badge)}</span>'
+        f"<b>{count} identities</b>"
+        f'<span class="small">{len(champions)} champions</span></span>'
+        f'<span class="small">{right}</span></summary>'
+        '<div class="group-body">'
+        f'<div class="meta"><span>Builds: {_chips(builds, 8)}</span>'
+        f"<span>Roles: {_chips(roles)}</span></div>"
+        f'<div class="members">{members}</div></div></details>'
+    )
+
+
+def _specialist_table(reports: list[SpecialistReport]) -> str:
+    rows = "".join(
+        "<tr>"
+        f'<td><a href="#specialist-{_anchor(report.name)}">{_html(report.display_name)}</a>'
+        f'<div class="small">{_html(report.name)}</div></td>'
+        f"<td>{len(report.groups)}</td><td>{len(report.unlabelled)}</td>"
+        f"<td>{report.largest_group}</td><td>{_pct(report.coverage)}</td></tr>"
+        for report in reports
+    )
+    return (
+        "<table><thead><tr><th>Specialist</th><th>Groups</th><th>Unlabelled</th>"
+        f"<th>Largest</th><th>Coverage</th></tr></thead><tbody>{rows}</tbody></table>"
+    )
+
+
+def _specialist_section(
+    report: SpecialistReport,
+    champion_names: dict[int, str],
+    *,
+    open_groups: bool,
+) -> str:
+    groups = [
+        _group_html(
+            rank=group.rank,
+            badge=f"G{group.label_id}",
+            badge_style=_style(f"{report.name}{group.label_id}"),
+            count=len(group.members),
+            champions=group.champions,
+            builds=group.builds,
+            roles=group.roles,
+            members=_members_html(report.keys, group.members, report.columns, champion_names),
+            champion_names=champion_names,
+            open_group=open_groups,
+        )
+        for group in report.groups
     ]
+    if report.unlabelled:
+        groups.append(
+            _group_html(
+                rank=len(report.groups) + 1,
+                badge="-1",
+                badge_style="",
+                count=len(report.unlabelled),
+                champions=_champion_counter(report.keys, report.unlabelled, report.columns),
+                builds=_counter(report.keys, report.unlabelled, report.columns, "build"),
+                roles=_counter(report.keys, report.unlabelled, report.columns, "teamposition"),
+                members=_members_html(
+                    report.keys, report.unlabelled, report.columns, champion_names
+                ),
+                champion_names=champion_names,
+                stats=f"no coherent {report.display_name} read",
+                open_group=open_groups,
+            )
+        )
+
+    return (
+        f'<section class="section" id="specialist-{_anchor(report.name)}">'
+        f"<h2>{_html(report.display_name)}</h2>"
+        f'<p class="small">{_html(report.name)}.npz updated '
+        f"{report.updated_at.strftime('%Y-%m-%d %H:%M')}</p>"
+        + _kpis(
+            [
+                (str(len(report.groups)), "groups"),
+                (str(len(report.unlabelled)), "unlabelled"),
+                (_pct(report.coverage), "coverage"),
+                (str(report.largest_group), "largest"),
+            ]
+        )
+        + f'<div class="feature-list">{"".join(_chip(feature) for feature in report.feature_set)}</div>'
+        + f'<div class="group-list">{"".join(groups)}</div></section>'
+    )
+
+
+def _specialist_body(
+    reports: list[SpecialistReport],
+    champion_names: dict[int, str],
+    *,
+    focus: str | None,
+) -> str:
+    table = "" if focus else f"<h2>Summary</h2>{_specialist_table(reports)}"
+    return table + "".join(
+        _specialist_section(report, champion_names, open_groups=focus is not None)
+        for report in reports
+    )
+
+
+def write_specialist_report(
+    cfg: EmbeddingConfig,
+    specialist_dir: Path = SPECIALIST_CACHE_DIR,
+    champion_names_path: Path = CHAMPION_NAMES_PATH,
+    *,
+    focus: str | None = None,
+    output_path: Path | None = None,
+) -> Path:
+    reports = _load_specialist_reports(specialist_dir, focus)
+    if not reports:
+        raise FileNotFoundError(f"No specialist embedding caches found in {specialist_dir}")
+
+    title = (
+        f"Classification Specialist: {reports[0].display_name}"
+        if focus
+        else "Classification Specialist Report"
+    )
+    target_path = output_path or (
+        cfg.specialist_report_path.with_name(f"specialist_{reports[0].name}_report.html")
+        if focus
+        else cfg.specialist_report_path
+    )
+    if focus:
+        nav = (
+            f'<nav><a href="{_html(cfg.specialist_report_path.name)}">All specialists</a></nav>'
+        )
+    else:
+        nav = "<nav>" + "".join(
+            f'<a href="#specialist-{_anchor(report.name)}">{_html(report.display_name)}</a>'
+            for report in reports
+        ) + "</nav>"
+
     champion_names = _load_champion_names(champion_names_path)
-    cfg.report_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg.report_path.write_text(
-        _build_html(
-            embeddings, reports, columns, champion_names, cfg.similarity_threshold
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(
+        _page(
+            title,
+            (
+                "<p>Each section asks one narrow behavioural question over the "
+                f"same <b>(championid, teamposition, build)</b> identities. Generated "
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M')}.</p>"
+            ),
+            nav,
+            _specialist_body(reports, champion_names, focus=focus),
         ),
         encoding="utf-8",
     )
-    logger.info("Wrote grouping report: %s", cfg.report_path)
-    return cfg.report_path
+    logger.info("Wrote specialist report: %s", target_path)
+    return target_path
 
 
 def main() -> None:
-    from app.classification.embeddings.embed import load
     from app.core.logging.logger import setup_logging_config
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--specialist", "--focus", dest="focus")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+
     setup_logging_config()
-    cfg = EmbeddingConfig()
-    baseline = load(cfg.cache_dir).get(IdentityType.BASELINE)
-    if baseline is None:
-        raise SystemExit(f"No baseline embedding cache found in {cfg.cache_dir}")
-    write_grouping_report(baseline, cfg)
+    write_specialist_report(EmbeddingConfig(), focus=args.focus, output_path=args.output)
 
 
 if __name__ == "__main__":

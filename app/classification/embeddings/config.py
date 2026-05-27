@@ -14,27 +14,12 @@ from app.core.config.settings import PROJECT_ROOT
 EMBEDDINGS_CACHE_DIR = (
     PROJECT_ROOT / "app" / "classification" / "data" / "embeddings" / "cache"
 )
-GROUPING_REPORT_PATH = EMBEDDINGS_CACHE_DIR.parent / "groupings_report.html"
+SPECIALIST_REPORT_PATH = EMBEDDINGS_CACHE_DIR.parent / "specialist_report.html"
 
 SOURCE_TABLE = "game_data_filtered.synergy_1vx_temporal"
 
-# Phases ordered earliest -> latest for temporal sequencing.
 PHASES: tuple[str, ...] = ("early_mid", "mid", "mid_late", "late")
 PHASE_INDEX: dict[str, int] = {p: i for i, p in enumerate(PHASES)}
-
-BUILD_LABELS: tuple[str, ...] = (
-    "attack_damage",
-    "ability_power",
-    "lethality",
-    "on_hit",
-    "crit",
-    "utility_enchanter",
-    "utility_protection",
-    "ar_tank",
-    "mr_tank",
-    "ad_off_tank",
-    "ap_off_tank",
-)
 
 BUILD_GROUPS: dict[str, tuple[str, ...]] = {
     "ap": ("ability_power", "ap_off_tank"),
@@ -42,11 +27,8 @@ BUILD_GROUPS: dict[str, tuple[str, ...]] = {
     "tank": ("ar_tank", "mr_tank"),
     "utility": ("utility_enchanter", "utility_protection"),
 }
-SIBLING_BUILD_PAIRS: tuple[tuple[str, str], ...] = (
-    ("ability_power", "ap_off_tank"),
-    ("attack_damage", "ad_off_tank"),
-    ("ar_tank", "mr_tank"),
-    ("utility_enchanter", "utility_protection"),
+SIBLING_BUILD_PAIRS: tuple[tuple[str, str], ...] = tuple(
+    (labels[0], labels[1]) for labels in BUILD_GROUPS.values()
 )
 SIBLING_BUILD_BY_LABEL: dict[str, str] = {}
 for _left, _right in SIBLING_BUILD_PAIRS:
@@ -85,29 +67,13 @@ class IdentityType(str, Enum):
 
 PRIOR_TABLE: dict[IdentityType, str] = {
     IdentityType.SIBLING: "game_data_filtered.synergy_1vx_temporal_prior_sibling",
-    IdentityType.CHAMPION_ROLE: (
-        "game_data_filtered.synergy_1vx_temporal_prior_champion_role"
-    ),
+    IdentityType.CHAMPION_ROLE: "game_data_filtered.synergy_1vx_temporal_prior_champion_role",
     IdentityType.ROLE_BUILD: "game_data_filtered.synergy_1vx_temporal_prior_role_build",
-    IdentityType.CHAMPION_BUILD: (
-        "game_data_filtered.synergy_1vx_temporal_prior_champion_build"
-    ),
+    IdentityType.CHAMPION_BUILD: "game_data_filtered.synergy_1vx_temporal_prior_champion_build",
     IdentityType.BUILD: "game_data_filtered.synergy_1vx_temporal_prior_build",
 }
 
 
-DEFAULT_GROUP_MIN_MATCHUPS: dict[IdentityType, float] = {
-    IdentityType.BASELINE: 0.0,
-    IdentityType.BUILD: 0.0,
-    IdentityType.ROLE_BUILD: 100.0,
-    IdentityType.CHAMPION_ROLE: 10.0,
-    IdentityType.CHAMPION_BUILD: 100.0,
-    IdentityType.SIBLING: 100.0,
-}
-
-
-# Key columns identifying a unique identity instance at each level. Phase is a
-# temporal axis and is appended on top of these keys for per-row lookups.
 LEVEL_KEY: dict[IdentityType, tuple[str, ...]] = {
     IdentityType.BASELINE: ("championid", "teamposition", "build"),
     IdentityType.SIBLING: ("championid", "teamposition", "build"),
@@ -117,8 +83,6 @@ LEVEL_KEY: dict[IdentityType, tuple[str, ...]] = {
     IdentityType.BUILD: ("build_group",),
 }
 
-# Prior lookup and strength order follows the 9000 -> 9040 table sequence:
-# most contextually relevant first, broadest fallback last.
 PRIOR_LEVELS: tuple[IdentityType, ...] = (
     IdentityType.SIBLING,
     IdentityType.CHAMPION_ROLE,
@@ -127,38 +91,33 @@ PRIOR_LEVELS: tuple[IdentityType, ...] = (
     IdentityType.BUILD,
 )
 
-EMBEDDING_LEVELS: tuple[IdentityType, ...] = (IdentityType.BASELINE,)
+# Prior strength caps. Two dicts because the two metric families have different
+# effective-N denominators and therefore different natural scales:
+#   * rate metrics use `matchups` (~10^1-10^3) as effective N
+#   * per-minute metrics use `sum_w_timeplayed` seconds (~10^3-10^5) as effective N
+# Per-minute caps are rate caps scaled by the typical sum_w_timeplayed per matchup.
+PRIOR_PER_MINUTE_SCALE: float = 200.0
 
-# Role+build archetype priors dominate so embeddings cluster across champions
-# along the role/build axis. Sibling pulls (champion, role, build) toward its
-# sibling build; champion_role/champion_build are kept low so single-champion
-# rows don't collapse into within-champion micro-clusters.
 DEFAULT_PRIOR_RATE_STRENGTHS: dict[IdentityType, float] = {
-    IdentityType.SIBLING: 12.0,
-    IdentityType.CHAMPION_ROLE: 4.0,
-    IdentityType.CHAMPION_BUILD: 4.0,
-    IdentityType.ROLE_BUILD: 30.0,
-    IdentityType.BUILD: 12.0,
+    IdentityType.SIBLING: 20.0,
+    IdentityType.CHAMPION_BUILD: 12.0,
+    IdentityType.CHAMPION_ROLE: 7.0,
+    IdentityType.ROLE_BUILD: 7.0,
+    IdentityType.BUILD: 4.0,
 }
 
 DEFAULT_PRIOR_PER_MINUTE_STRENGTHS: dict[IdentityType, float] = {
-    IdentityType.SIBLING: 2_400.0,
-    IdentityType.CHAMPION_ROLE: 800.0,
-    IdentityType.CHAMPION_BUILD: 800.0,
-    IdentityType.ROLE_BUILD: 6_000.0,
-    IdentityType.BUILD: 2_400.0,
+    k: v * PRIOR_PER_MINUTE_SCALE for k, v in DEFAULT_PRIOR_RATE_STRENGTHS.items()
 }
 
-# Raw metrics loaded and smoothed. `DEFAULT_RAW_FEATURE_SET` keeps the curated
-# archetype-defining subset, while `DEFAULT_EMBEDDING_FEATURE_SET` adds the
-# promoted ratio-derived features. Extra raw columns above the curated set are
-# loaded so the experiment harness can mix in derived metrics that need them
-# (e.g. damage-type shares, first-blood/tower participation, kda, epic_kills).
-#
-# Permanently excluded from source: damage-taken type splits, structure-kill
-# detail (turret/inhibitor takedowns/slots), jungle CS splits, ward placement
-# detail (collapsed into visionscore), triplekills/killingsprees, and
-# damagedealtto{buildings,turrets,epicmonsters}.
+
+# ---------------------------------------------------------------------------
+# Metrics catalogues. Two stages:
+#   1. Source: every raw column loaded from 6010 / 9000-9040 (ALL_METRICS).
+#   2. Derived: pre-divided ratios computed from smoothed source columns
+#      (DERIVED_METRIC_FUNCS).
+# Both are kept full so future specialists can pull from them.
+# ---------------------------------------------------------------------------
 
 # Per-game event rates in [0, 1]; smoothed with matchups as effective N.
 RATE_METRICS: tuple[str, ...] = (
@@ -182,6 +141,8 @@ PER_MINUTE_METRICS: tuple[str, ...] = (
     "deaths",
     "assists",
     "doublekills",
+    "triplekills",
+    "killingsprees",
     "goldearned",
     "champexperience",
     "totaldamagedealt",
@@ -191,18 +152,38 @@ PER_MINUTE_METRICS: tuple[str, ...] = (
     "magicdamagedealt",
     "magicdamagedealttochampions",
     "truedamagedealt",
+    "truedamagedealttochampions",
+    "damagedealttobuildings",
+    "damagedealttoturrets",
+    "damagedealttoobjectives",
+    "damagedealttoepicmonsters",
     "totaldamagetaken",
+    "physicaldamagetaken",
+    "magicdamagetaken",
+    "truedamagetaken",
     "damageselfmitigated",
     "totalheal",
     "totalhealsonteammates",
     "totaldamageshieldedonteammates",
     "timeccingothers",
+    "totaltimeccdealt",
     "totalminionskilled",
     "neutralminionskilled",
+    "totalallyjungleminionskilled",
+    "totalenemyjungleminionskilled",
     "baronkills",
     "dragonkills",
-    "damagedealttoobjectives",
+    "inhibitorkills",
+    "inhibitortakedowns",
+    "inhibitorslost",
+    "turretkills",
+    "turrettakedowns",
+    "turretslost",
     "visionscore",
+    "wardsplaced",
+    "wardskilled",
+    "detectorwardsplaced",
+    "visionwardsboughtingame",
 )
 
 RATE_LIKE_METRICS: tuple[str, ...] = (*RATE_METRICS, *LARGEST_AVG_METRICS)
@@ -215,252 +196,163 @@ def _safe_divide(num: np.ndarray, denom: np.ndarray) -> np.ndarray:
     return out.astype(np.float32)
 
 
-# Derived metric formulas operate on smoothed per-row arrays. Each callable
-# takes a dict mapping `smoothed_<metric>` -> ndarray and returns one ndarray.
+# Full derived-metric catalogue. Each callable takes a metric-name ->
+# ndarray dict and returns one ndarray. The catalogue is preserved as a research
+# menu — future specialists pick from here without recomputing source columns.
 DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]] = {
-    "kda_ratio": lambda d: _safe_divide(
-        d["smoothed_kills"] + d["smoothed_assists"],
-        np.maximum(d["smoothed_deaths"], 1e-6),
+    # Durability
+    "all_sources_taken": lambda d: (
+        d["damageselfmitigated"]
+        + (d["totalheal"] - d["totalhealsonteammates"])
+        + d["totaldamagetaken"]
     ),
-    "assist_to_kill_ratio": lambda d: _safe_divide(
-        d["smoothed_assists"], np.maximum(d["smoothed_kills"], 1e-6)
+    "all_sources_taken_to_death_ratio": lambda d: _safe_divide(
+        d["damageselfmitigated"]
+        + (d["totalheal"] - d["totalhealsonteammates"])
+        + d["totaldamagetaken"],
+        d["deaths"],
     ),
-    "net_kills": lambda d: (d["smoothed_kills"] - d["smoothed_deaths"]).astype(
-        np.float32
-    ),
-    "kill_share_proxy": lambda d: _safe_divide(
-        d["smoothed_kills"], d["smoothed_kills"] + d["smoothed_assists"]
-    ),
-    "assist_share_proxy": lambda d: _safe_divide(
-        d["smoothed_assists"], d["smoothed_kills"] + d["smoothed_assists"]
-    ),
-    "death_pressure_ratio": lambda d: _safe_divide(
-        d["smoothed_deaths"], d["smoothed_kills"] + d["smoothed_assists"]
-    ),
-    "combat_events": lambda d: (
-        d["smoothed_kills"] + d["smoothed_deaths"] + d["smoothed_assists"]
-    ).astype(np.float32),
-    "positive_combat_events": lambda d: (
-        d["smoothed_kills"] + d["smoothed_assists"]
-    ).astype(np.float32),
-    "multikill_rate_per_kill": lambda d: _safe_divide(
-        d["smoothed_doublekills"], d["smoothed_kills"]
-    ),
-    "first_blood_participation": lambda d: (
-        d["smoothed_firstbloodkill"] + d["smoothed_firstbloodassist"]
-    ).astype(np.float32),
-    "first_blood_kill_share": lambda d: _safe_divide(
-        d["smoothed_firstbloodkill"],
-        d["smoothed_firstbloodkill"] + d["smoothed_firstbloodassist"],
-    ),
-    "first_blood_assist_share": lambda d: _safe_divide(
-        d["smoothed_firstbloodassist"],
-        d["smoothed_firstbloodkill"] + d["smoothed_firstbloodassist"],
-    ),
-    "first_tower_participation": lambda d: (
-        d["smoothed_firsttowerkill"] + d["smoothed_firsttowerassist"]
-    ).astype(np.float32),
-    "first_tower_kill_share": lambda d: _safe_divide(
-        d["smoothed_firsttowerkill"],
-        d["smoothed_firsttowerkill"] + d["smoothed_firsttowerassist"],
-    ),
-    "first_tower_assist_share": lambda d: _safe_divide(
-        d["smoothed_firsttowerassist"],
-        d["smoothed_firsttowerkill"] + d["smoothed_firsttowerassist"],
-    ),
-    "physical_damage_share": lambda d: _safe_divide(
-        d["smoothed_physicaldamagedealt"], d["smoothed_totaldamagedealt"]
-    ),
-    "magic_damage_share": lambda d: _safe_divide(
-        d["smoothed_magicdamagedealt"], d["smoothed_totaldamagedealt"]
-    ),
-    "true_damage_share": lambda d: _safe_divide(
-        d["smoothed_truedamagedealt"], d["smoothed_totaldamagedealt"]
-    ),
-    "physical_champion_damage_share": lambda d: _safe_divide(
-        d["smoothed_physicaldamagedealttochampions"],
-        d["smoothed_totaldamagedealttochampions"],
-    ),
-    "magic_champion_damage_share": lambda d: _safe_divide(
-        d["smoothed_magicdamagedealttochampions"],
-        d["smoothed_totaldamagedealttochampions"],
-    ),
-    "physical_champion_damage_focus": lambda d: _safe_divide(
-        d["smoothed_physicaldamagedealttochampions"],
-        d["smoothed_physicaldamagedealt"],
-    ),
-    "magic_champion_damage_focus": lambda d: _safe_divide(
-        d["smoothed_magicdamagedealttochampions"],
-        d["smoothed_magicdamagedealt"],
-    ),
-    "champion_damage_focus": lambda d: _safe_divide(
-        d["smoothed_totaldamagedealttochampions"], d["smoothed_totaldamagedealt"]
-    ),
-    "non_champion_damage_share": lambda d: _safe_divide(
-        np.maximum(
-            d["smoothed_totaldamagedealt"]
-            - d["smoothed_totaldamagedealttochampions"],
-            0.0,
-        ),
-        d["smoothed_totaldamagedealt"],
-    ),
-    "physical_vs_magic_champion_damage": lambda d: _safe_divide(
-        d["smoothed_physicaldamagedealttochampions"],
-        np.maximum(d["smoothed_magicdamagedealttochampions"], 1e-6),
-    ),
-    "damage_mitigated_ratio": lambda d: _safe_divide(
-        d["smoothed_damageselfmitigated"], d["smoothed_totaldamagetaken"]
-    ),
-    "effective_damage_load": lambda d: (
-        d["smoothed_totaldamagetaken"] + d["smoothed_damageselfmitigated"]
-    ).astype(np.float32),
-    "damage_dealt_taken_ratio": lambda d: _safe_divide(
-        d["smoothed_totaldamagedealttochampions"], d["smoothed_totaldamagetaken"]
-    ),
-    "net_champion_damage_trade": lambda d: (
-        d["smoothed_totaldamagedealttochampions"] - d["smoothed_totaldamagetaken"]
-    ).astype(np.float32),
     "self_or_non_teammate_heal": lambda d: np.maximum(
-        d["smoothed_totalheal"] - d["smoothed_totalhealsonteammates"], 0.0
+        d["totalheal"] - d["totalhealsonteammates"], 0.0
     ).astype(np.float32),
-    "teammate_heal_share": lambda d: _safe_divide(
-        d["smoothed_totalhealsonteammates"],
-        np.maximum(d["smoothed_totalheal"], 1e-6),
+    "self_heal_to_taken_ratio": lambda d: _safe_divide(
+        np.maximum(d["totalheal"] - d["totalhealsonteammates"], 0.0),
+        d["damageselfmitigated"]
+        + (d["totalheal"] - d["totalhealsonteammates"])
+        + d["totaldamagetaken"],
     ),
-    "ally_protection": lambda d: (
-        d["smoothed_totalhealsonteammates"]
-        + d["smoothed_totaldamageshieldedonteammates"]
-    ).astype(np.float32),
-    "shield_to_teammate_heal_ratio": lambda d: _safe_divide(
-        d["smoothed_totaldamageshieldedonteammates"],
-        np.maximum(d["smoothed_totalhealsonteammates"], 1e-6),
+    "magic_damage_to_total_taken_ratio": lambda d: _safe_divide(
+        d["magicdamagetaken"],
+        d["damageselfmitigated"]
+        + (d["totalheal"] - d["totalhealsonteammates"])
+        + d["totaldamagetaken"],
     ),
-    "protection_to_damage_taken": lambda d: _safe_divide(
-        d["smoothed_totalhealsonteammates"]
-        + d["smoothed_totaldamageshieldedonteammates"],
-        d["smoothed_totaldamagetaken"],
+    "physical_damage_to_total_taken_ratio": lambda d: _safe_divide(
+        d["physicaldamagetaken"],
+        d["damageselfmitigated"]
+        + (d["totalheal"] - d["totalhealsonteammates"])
+        + d["totaldamagetaken"],
     ),
-    "protection_to_champion_damage": lambda d: _safe_divide(
-        d["smoothed_totalhealsonteammates"]
-        + d["smoothed_totaldamageshieldedonteammates"],
-        d["smoothed_totaldamagedealttochampions"],
+    "self_mitigation_to_total_taken_ratio": lambda d: _safe_divide(
+        d["damageselfmitigated"],
+        d["damageselfmitigated"]
+        + (d["totalheal"] - d["totalhealsonteammates"])
+        + d["totaldamagetaken"],
     ),
-    "champion_damage_per_gold": lambda d: _safe_divide(
-        d["smoothed_totaldamagedealttochampions"], d["smoothed_goldearned"]
+    "all_sources_taken_to_gold_ratio": lambda d: _safe_divide(
+        d["damageselfmitigated"]
+        + (d["totalheal"] - d["totalhealsonteammates"])
+        + d["totaldamagetaken"],
+        d["goldearned"],
     ),
-    "damage_taken_per_gold": lambda d: _safe_divide(
-        d["smoothed_totaldamagetaken"], d["smoothed_goldearned"]
+    # Sustained Damage
+    "physical_damage_ratio": lambda d: _safe_divide(
+        d["physicaldamagedealttochampions"],
+        d["totaldamagedealttochampions"],
     ),
-    "gold_per_xp": lambda d: _safe_divide(
-        d["smoothed_goldearned"], d["smoothed_champexperience"]
+    # Damage applied per unit of "risk": taken damage compounded by death rate.
+    # Catches safe long-range applicators (Xerath, Ziggs) that combine high
+    # output, low taken, and low deaths into one axis.
+    "damage_to_taken_to_death_ratio": lambda d: _safe_divide(
+        _safe_divide(
+            d["totaldamagedealttochampions"],
+            d["totaldamagedealt"],
+        ),
+        d["deaths"],
     ),
-    "xp_per_gold": lambda d: _safe_divide(
-        d["smoothed_champexperience"], d["smoothed_goldearned"]
+    "damage_dealt_to_gold_ratio": lambda d: _safe_divide(
+        d["totaldamagedealttochampions"],
+        d["goldearned"],
     ),
-    "gold_per_takedown": lambda d: _safe_divide(
-        d["smoothed_goldearned"],
-        d["smoothed_kills"] + d["smoothed_assists"],
+    # Burst Damage
+    "burst_kills_to_assists_ratio": lambda d: _safe_divide(
+        d["kills"],
+        d["assists"],
     ),
-    "objective_damage_per_gold": lambda d: _safe_divide(
-        d["smoothed_damagedealttoobjectives"], d["smoothed_goldearned"]
+    "burst_kills_to_assists_to_gold_ratio": lambda d: _safe_divide(
+        _safe_divide(
+            d["kills"],
+            d["assists"],
+        ),
+        d["goldearned"],
     ),
-    "xp_per_takedown": lambda d: _safe_divide(
-        d["smoothed_champexperience"],
-        d["smoothed_kills"] + d["smoothed_assists"],
+    # Vision
+    "visionscore_to_wards_placed_killed_ratio": lambda d: _safe_divide(
+        d["visionscore"],
+        d["detectorwardsplaced"] + d["wardsplaced"] + d["wardskilled"],
+    ),
+    "visionscore_to_gold_ratio": lambda d: _safe_divide(
+        d["visionscore"],
+        d["goldearned"],
+    ),
+    "wards_killed_to_placed_ratio": lambda d: _safe_divide(
+        d["wardskilled"],
+        d["detectorwardsplaced"] + d["wardsplaced"],
+    ),
+    # Farming
+    "jungle_to_lane_minions_ratio": lambda d: _safe_divide(
+        d["totalallyjungleminionskilled"] + d["totalenemyjungleminionskilled"],
+        d["totalminionskilled"],
     ),
     "total_farm": lambda d: (
-        d["smoothed_totalminionskilled"] + d["smoothed_neutralminionskilled"]
-    ).astype(np.float32),
-    "neutral_farm_share": lambda d: _safe_divide(
-        d["smoothed_neutralminionskilled"],
-        d["smoothed_totalminionskilled"] + d["smoothed_neutralminionskilled"],
+        d["totalallyjungleminionskilled"]
+        + d["totalenemyjungleminionskilled"]
+        + d["totalminionskilled"]
     ),
-    "lane_farm_share": lambda d: _safe_divide(
-        d["smoothed_totalminionskilled"],
-        d["smoothed_totalminionskilled"] + d["smoothed_neutralminionskilled"],
+    "enemy_to_ally_jungle_ratio": lambda d: _safe_divide(
+        d["totalenemyjungleminionskilled"],
+        d["totalallyjungleminionskilled"],
     ),
-    "gold_per_farm": lambda d: _safe_divide(
-        d["smoothed_goldearned"],
-        d["smoothed_totalminionskilled"] + d["smoothed_neutralminionskilled"],
+    "total_farm_to_gold_ratio": lambda d: _safe_divide(
+        d["totalallyjungleminionskilled"]
+        + d["totalenemyjungleminionskilled"]
+        + d["totalminionskilled"],
+        d["goldearned"],
     ),
-    "xp_per_farm": lambda d: _safe_divide(
-        d["smoothed_champexperience"],
-        d["smoothed_totalminionskilled"] + d["smoothed_neutralminionskilled"],
+    "total_farm_to_deaths_ratio": lambda d: _safe_divide(
+        d["totalallyjungleminionskilled"]
+        + d["totalenemyjungleminionskilled"]
+        + d["totalminionskilled"],
+        d["deaths"],
     ),
-    "epic_kills": lambda d: (
-        d["smoothed_baronkills"] + d["smoothed_dragonkills"]
-    ).astype(np.float32),
-    "baron_to_dragon_ratio": lambda d: _safe_divide(
-        d["smoothed_baronkills"], np.maximum(d["smoothed_dragonkills"], 1e-6)
+    # Structures
+    "structure_pressure": lambda d: (
+        d["turretkills"]
+        + d["turrettakedowns"]
+        + d["inhibitorkills"]
+        + d["inhibitortakedowns"]
     ),
-    "objective_damage_share": lambda d: _safe_divide(
-        d["smoothed_damagedealttoobjectives"], d["smoothed_totaldamagedealt"]
+    "structure_loss": lambda d: d["turretslost"] + d["inhibitorslost"],
+    "structure_damage_focus": lambda d: (
+        d["damagedealttobuildings"] + d["damagedealttoturrets"]
     ),
-    "objective_vs_champion_damage": lambda d: _safe_divide(
-        d["smoothed_damagedealttoobjectives"],
-        d["smoothed_totaldamagedealttochampions"],
+    "structure_conversion": lambda d: _safe_divide(
+        d["turretkills"]
+        + d["turrettakedowns"]
+        + d["inhibitorkills"]
+        + d["inhibitortakedowns"],
+        np.maximum(d["damagedealttobuildings"] + d["damagedealttoturrets"], 1.0),
     ),
-    "vision_per_gold": lambda d: _safe_divide(
-        d["smoothed_visionscore"], d["smoothed_goldearned"]
+    "structure_net_control": lambda d: (
+        d["turretkills"]
+        + d["turrettakedowns"]
+        + d["inhibitorkills"]
+        + d["inhibitortakedowns"]
+        - d["turretslost"]
+        - d["inhibitorslost"]
     ),
-    "vision_per_death": lambda d: _safe_divide(
-        d["smoothed_visionscore"], np.maximum(d["smoothed_deaths"], 1e-6)
+    # Epic Objectives
+    "objective_pressure": lambda d: d["baronkills"] + d["dragonkills"],
+    "objective_farm_control": lambda d: d["neutralminionskilled"],
+    "objective_damage_focus": lambda d: d["damagedealttoobjectives"],
+    "objective_conversion": lambda d: _safe_divide(
+        d["baronkills"] + d["dragonkills"],
+        np.maximum(d["damagedealttoobjectives"], 1.0),
     ),
-    "cc_to_takedowns": lambda d: _safe_divide(
-        d["smoothed_timeccingothers"],
-        d["smoothed_kills"] + d["smoothed_assists"],
-    ),
-    "cc_to_champion_damage": lambda d: _safe_divide(
-        d["smoothed_timeccingothers"], d["smoothed_totaldamagedealttochampions"]
-    ),
-    "cc_taken_pressure_ratio": lambda d: _safe_divide(
-        d["smoothed_timeccingothers"], d["smoothed_totaldamagetaken"]
+    "objective_total_control": lambda d: (
+        d["baronkills"] + d["dragonkills"] + d["neutralminionskilled"]
     ),
 }
-
-
-# Raw feature set: the curated metric subset (excluding the extended columns
-# added to support derived metrics). Mirrors the pre-experiment block.
-DEFAULT_RAW_FEATURE_SET: tuple[str, ...] = (
-    "win",
-    "firstbloodkill",
-    "firsttowerkill",
-    "largestkillingspree",
-    "largestmultikill",
-    "largestcriticalstrike",
-    "kills",
-    "deaths",
-    "assists",
-    "goldearned",
-    "totaldamagedealttochampions",
-    "physicaldamagedealttochampions",
-    "magicdamagedealttochampions",
-    "totaldamagetaken",
-    "damageselfmitigated",
-    "totalhealsonteammates",
-    "totaldamageshieldedonteammates",
-    "timeccingothers",
-    "totalminionskilled",
-    "neutralminionskilled",
-    "visionscore",
-)
-
-# Ratio-derived features selected by the 2026-05-26 deep sweep. They sharpen
-# broad AD/AP/tank/jungle/support axes without increasing anti-pair leakage.
-DEFAULT_DERIVED_RATIO_FEATURE_SET: tuple[str, ...] = (
-    "physical_damage_share",
-    "magic_damage_share",
-    "damage_mitigated_ratio",
-    "champion_damage_per_gold",
-    "damage_taken_per_gold",
-    "neutral_farm_share",
-    "champion_damage_focus",
-)
-
-DEFAULT_EMBEDDING_FEATURE_SET: tuple[str, ...] = (
-    *DEFAULT_RAW_FEATURE_SET,
-    *DEFAULT_DERIVED_RATIO_FEATURE_SET,
-)
 
 
 @dataclass(frozen=True)
@@ -468,41 +360,126 @@ class EmbeddingConfig:
     cache_dir: Path = EMBEDDINGS_CACHE_DIR
     split: str = "train"
 
-    # Bayesian shrinkage strengths by prior level. Rate strengths are in
-    # pseudo-matchups; per-minute strengths in pseudo-sum_w_timeplayed seconds.
     prior_rate_strengths: dict[IdentityType, float] = field(
         default_factory=DEFAULT_PRIOR_RATE_STRENGTHS.copy
     )
     prior_per_minute_strengths: dict[IdentityType, float] = field(
         default_factory=DEFAULT_PRIOR_PER_MINUTE_STRENGTHS.copy
     )
-
-    # Sample-size scale for smooth prior amplification: every row's prior
-    # weights are multiplied by `1 + threshold / matchups`, so amplification
-    # decays continuously from extreme at low matchups to ~1x at high matchups.
-    # 50 was selected by the sweep in `experiments.py`: it still reins in rare
-    # rows, but keeps enough observed signal to improve semantic grouping and
-    # avoid over-pulling specialised identities into broad prior families.
     extreme_low_sample_threshold: float = 50.0
-
-    # Threshold for forming similarity groups.
     similarity_threshold: float = 0.82
-    group_min_matchups: dict[IdentityType, float] = field(
-        default_factory=DEFAULT_GROUP_MIN_MATCHUPS.copy
-    )
-    # The HTML report is intentionally single-threshold. Compare thresholds in
-    # the experiment harness, then render only the selected production lens.
-    report_thresholds: tuple[float, ...] = ()
-    report_path: Path = GROUPING_REPORT_PATH
-
-    # PCA truncation drops trailing eigen-axes whose cumulative variance is
-    # below `1 - projection_keep_variance`. With the curated 21-metric
-    # snapshot block this collapses 84 dims to ~8 high-signal axes — keeping
-    # only the archetype-defining variance and dropping the long tail that
-    # was spreading semantically-similar identities across noise directions.
+    specialist_report_path: Path = SPECIALIST_REPORT_PATH
     projection_keep_variance: float = 0.91
+    feature_set: tuple[str, ...] = ()
 
-    # Metrics that form the per-phase feature block. Entries are either
-    # raw metric names (column exists in ALL_METRICS) or derived metric names
-    # registered in DERIVED_METRIC_FUNCS.
-    feature_set: tuple[str, ...] = DEFAULT_EMBEDDING_FEATURE_SET
+
+SPECIALIST_CACHE_DIR = EMBEDDINGS_CACHE_DIR / "specialists"
+
+
+@dataclass(frozen=True)
+class SpecialistSpec:
+    """Narrow single-question embedding.
+
+    Features are selected for independent PCA directions relevant to the
+    specialist. Groups with median pairwise cosine below `min_median_sim` or
+    size below `min_group_size` are dropped.
+    """
+
+    name: str
+    feature_set: tuple[str, ...]
+    similarity_threshold: float
+    projection_keep_variance: float
+    min_median_sim: float = 0.95
+    min_group_size: int = 3
+
+
+# Active specialist registry. Previously registered names
+# (kept for reference): temporal, damage_profile, burst, team_utility,
+# crowd_control, vision, engage, objective, farming.
+SPECIALISTS: tuple[SpecialistSpec, ...] = (
+    SpecialistSpec(
+        name="durability",
+        feature_set=(
+            "all_sources_taken_to_death_ratio",
+            "all_sources_taken_to_gold_ratio",
+            "self_heal_to_taken_ratio",
+            "self_mitigation_to_total_taken_ratio",
+            "magic_damage_to_total_taken_ratio",
+            "physical_damage_to_total_taken_ratio",
+        ),
+        similarity_threshold=0.72,
+        projection_keep_variance=0.90,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="sustained_damage",
+        feature_set=(
+            "physical_damage_ratio",
+            "damage_to_taken_to_death_ratio",
+            "damage_dealt_to_gold_ratio",
+        ),
+        similarity_threshold=0.70,
+        projection_keep_variance=0.85,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="burst_damage",
+        feature_set=(
+            "largestcriticalstrike",
+            "burst_kills_to_assists_ratio",
+            "burst_kills_to_assists_to_gold_ratio",
+        ),
+        similarity_threshold=0.60,
+        projection_keep_variance=0.85,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="vision",
+        feature_set=(
+            "visionscore_to_gold_ratio",
+            "visionscore_to_wards_placed_killed_ratio",
+            "wards_killed_to_placed_ratio",
+        ),
+        similarity_threshold=0.68,
+        projection_keep_variance=0.85,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="farming",
+        feature_set=(
+            "totalminionskilled",
+            "neutralminionskilled",
+            "total_farm_to_gold_ratio",
+            "total_farm_to_deaths_ratio",
+        ),
+        similarity_threshold=0.88,
+        projection_keep_variance=0.95,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="epic_objectives",
+        feature_set=(
+            "objective_pressure",
+            "objective_farm_control",
+            "objective_damage_focus",
+            "objective_conversion",
+            "objective_total_control",
+        ),
+        similarity_threshold=0.70,
+        projection_keep_variance=0.85,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="structure",
+        feature_set=(
+            "structure_pressure",
+            "structure_loss",
+            "structure_damage_focus",
+            "structure_conversion",
+            "structure_net_control",
+        ),
+        similarity_threshold=0.70,
+        projection_keep_variance=0.85,
+        min_median_sim=0.85,
+    ),
+)

@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
 from app.classification.embeddings.config import (
-    EMBEDDING_LEVELS,
     EmbeddingConfig,
     IdentityType,
 )
@@ -71,44 +69,4 @@ def embed_all(
     out = {level: embed_level(m, cfg) for level, m in matrices.items()}
     for level, e in out.items():
         logger.info("Embedded %s: n=%d, D=%d", level.value, *e.embeddings.shape)
-    return out
-
-
-def save(embeddings: dict[IdentityType, LevelEmbeddings], cache_dir: Path) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    expected = {f"{level.value}.npz" for level in embeddings}
-    for path in cache_dir.glob("*.npz"):
-        if path.name not in expected:
-            path.unlink()
-    for level, e in embeddings.items():
-        keys_arr = np.array(e.keys, dtype=object)
-        np.savez(
-            cache_dir / f"{level.value}.npz",
-            keys=keys_arr,
-            key_columns=np.array(e.key_columns, dtype=object),
-            embeddings=e.embeddings,
-            feature_names=np.array(e.feature_names, dtype=object),
-            matchups=e.matchups,
-        )
-    logger.info("Saved %d levels to %s", len(embeddings), cache_dir)
-
-
-def load(
-    cache_dir: Path,
-    levels: tuple[IdentityType, ...] = EMBEDDING_LEVELS,
-) -> dict[IdentityType, LevelEmbeddings]:
-    out: dict[IdentityType, LevelEmbeddings] = {}
-    for level in levels:
-        path = cache_dir / f"{level.value}.npz"
-        if not path.exists():
-            continue
-        with np.load(path, allow_pickle=True) as data:
-            out[level] = LevelEmbeddings(
-                level=level,
-                keys=[tuple(k) for k in data["keys"].tolist()],
-                key_columns=tuple(data["key_columns"].tolist()),
-                embeddings=data["embeddings"].astype(np.float32),
-                feature_names=tuple(data["feature_names"].tolist()),
-                matchups=data["matchups"].astype(np.float32),
-            )
     return out

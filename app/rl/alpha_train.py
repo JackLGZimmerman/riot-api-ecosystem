@@ -34,7 +34,8 @@ from app.core.logging.logger import setup_logging_config
 from app.ml.predictor import load_predictor
 from app.rl.alpha_net import AlphaNetConfig, AlphaZeroNet, auto_device
 from app.rl.mcts import MCTSConfig
-from app.rl.reward import RewardMode
+from app.rl.pool import DEFAULT_POOL_PATH, load_pool
+from app.rl.reward import RewardMode, make_pool_sampler
 from app.rl.rollout import _state_to_bytes
 from app.rl.selfplay import EpisodeSamples, play_episode
 
@@ -44,14 +45,16 @@ logger = logging.getLogger(__name__)
 RL_DATA_DIR = PROJECT_ROOT / "app" / "rl" / "data"
 
 
-@dataclass
+@dataclass(kw_only=True)
 class AlphaTrainConfig:
+    top_k_build_configs: int
     iterations: int = 50
     episodes_per_iter: int = 16
     n_workers: int = 1
     device: str = "auto"  # "auto" | "cuda" | "mps" | "cpu"
     reward_mode: RewardMode = "expected_value"
     risk_lambda: float = 0.5
+    pool_path: Path = DEFAULT_POOL_PATH
     # MCTS
     simulations: int = 64
     c_puct: float = 1.5
@@ -109,14 +112,19 @@ def _worker_init(net_cfg_dict: dict, train_cfg_dict: dict, device_str: str) -> N
     net_cfg = AlphaNetConfig(**net_cfg_dict)
     device = torch.device(device_str)
     net = AlphaZeroNet(net_cfg).to(device).eval()
+    train_cfg = AlphaTrainConfig(**train_cfg_dict)
+    sampler = make_pool_sampler(
+        load_pool(train_cfg.pool_path), train_cfg.top_k_build_configs
+    )
     _WORKER.update(
         {
             "predictor": predictor,
             "net": net,
             "device": device,
-            "train_cfg": AlphaTrainConfig(**train_cfg_dict),
+            "train_cfg": train_cfg,
             "champion_ids": predictor.champion_ids,
             "n_champions": len(predictor.champion_ids),
+            "sampler": sampler,
         }
     )
 
@@ -137,6 +145,7 @@ def _worker_play(args: tuple[bytes, int]) -> EpisodeSamples:
         device=_WORKER["device"],
         reward_mode=cfg.reward_mode,
         risk_lambda=cfg.risk_lambda,
+        sampler=_WORKER["sampler"],
         rng=np.random.default_rng(seed),
     )
 
@@ -149,6 +158,7 @@ def _generate_inline(
     cfg: AlphaTrainConfig,
     device,
     base_seed: int,
+    sampler,
 ) -> list[EpisodeSamples]:
     out: list[EpisodeSamples] = []
     net.eval()
@@ -163,6 +173,7 @@ def _generate_inline(
                 device=device,
                 reward_mode=cfg.reward_mode,
                 risk_lambda=cfg.risk_lambda,
+                sampler=sampler,
                 rng=np.random.default_rng(base_seed + i),
             )
         )
@@ -218,8 +229,7 @@ def _update(
     }
 
 
-def train(cfg: AlphaTrainConfig | None = None) -> Path:
-    cfg = cfg or AlphaTrainConfig()
+def train(cfg: AlphaTrainConfig) -> Path:
     device = auto_device(cfg.device)
     logger.info("AlphaZero device: %s", device)
 
@@ -229,6 +239,7 @@ def train(cfg: AlphaTrainConfig | None = None) -> Path:
     net_cfg = AlphaNetConfig(n_champions=n_champions, hidden=cfg.hidden)
     net = AlphaZeroNet(net_cfg).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    inline_sampler = make_pool_sampler(load_pool(cfg.pool_path), cfg.top_k_build_configs)
 
     run_name = cfg.run_name or time.strftime("alpha_%Y%m%d_%H%M%S")
     ckpt_dir = RL_DATA_DIR / "policies"
@@ -264,6 +275,7 @@ def train(cfg: AlphaTrainConfig | None = None) -> Path:
                     cfg,
                     device,
                     base_seed,
+                    inline_sampler,
                 )
             t_play = time.time() - t0
 
@@ -318,4 +330,4 @@ def train(cfg: AlphaTrainConfig | None = None) -> Path:
 
 
 if __name__ == "__main__":
-    train()
+    train(AlphaTrainConfig(top_k_build_configs=8))

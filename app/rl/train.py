@@ -25,6 +25,8 @@ from app.core.logging.logger import setup_logging_config
 from app.ml.predictor import load_predictor
 from app.rl.env import DraftEnv, DraftEnvConfig
 from app.rl.policy import MaskedPolicy, PolicyConfig, encode_obs
+from app.rl.pool import DEFAULT_POOL_PATH, load_pool
+from app.rl.reward import make_pool_sampler
 from app.rl.rollout import EpisodeBatch, RolloutPool
 
 setup_logging_config()
@@ -33,8 +35,9 @@ logger = logging.getLogger(__name__)
 RL_DATA_DIR = PROJECT_ROOT / "app" / "rl" / "data"
 
 
-@dataclass
+@dataclass(kw_only=True)
 class TrainConfig:
+    top_k_build_configs: int
     epochs: int = 200
     episodes_per_worker: int = 8
     n_workers: int | None = None
@@ -47,6 +50,7 @@ class TrainConfig:
     hidden: int = 256
     train_mode: Literal["vs_random", "self_play"] = "vs_random"
     run_name: str | None = None
+    pool_path: Path = DEFAULT_POOL_PATH
 
 
 def _flatten(batches: list[EpisodeBatch]) -> EpisodeBatch:
@@ -142,12 +146,12 @@ def _write_jsonl(path: Path, record: dict[str, Any]) -> None:
         fh.write(json.dumps(record) + "\n")
 
 
-def train(cfg: TrainConfig | None = None) -> Path:
-    cfg = cfg or TrainConfig()
+def train(cfg: TrainConfig) -> Path:
     predictor = load_predictor()
     n_champions = len(predictor.champion_ids)
     policy_cfg = PolicyConfig(n_champions=n_champions, hidden=cfg.hidden)
     env_cfg = DraftEnvConfig(
+        top_k_build_configs=cfg.top_k_build_configs,
         champion_ids=predictor.champion_ids,
         agent_side="self_play" if cfg.train_mode == "self_play" else "blue",
         random_start_steps=cfg.random_start_steps,
@@ -168,18 +172,27 @@ def train(cfg: TrainConfig | None = None) -> Path:
         cfg.episodes_per_worker,
     )
 
+    champion_pool = load_pool(cfg.pool_path)
+    eval_sampler = make_pool_sampler(champion_pool, cfg.top_k_build_configs)
     eval_env = DraftEnv(
         predictor,
         DraftEnvConfig(
+            top_k_build_configs=cfg.top_k_build_configs,
             champion_ids=predictor.champion_ids,
             agent_side="blue",
             random_start_steps=0,
         ),
+        sampler=eval_sampler,
     )
 
     global_step = 0
     base_seed = 0
-    with RolloutPool(env_cfg, policy_cfg, n_workers=cfg.n_workers) as pool:
+    with RolloutPool(
+        env_cfg,
+        policy_cfg,
+        n_workers=cfg.n_workers,
+        pool_path=cfg.pool_path,
+    ) as pool:
         for epoch in range(cfg.epochs):
             t0 = time.time()
             batches = pool.rollout(
@@ -266,4 +279,4 @@ def train(cfg: TrainConfig | None = None) -> Path:
 
 
 if __name__ == "__main__":
-    train()
+    train(TrainConfig(top_k_build_configs=8))

@@ -10,6 +10,14 @@ from app.rl.draft import (
 from app.rl.env import DraftEnv, DraftEnvConfig
 from app.rl.mcts import MCTS, DraftState, MCTSConfig, visit_policy
 from app.rl.policy import MaskedPolicy, PolicyConfig, encode_obs, obs_dim
+from app.rl.pool import (
+    DEFAULT_POOL_PATH,
+    ChampionPool,
+    PoolEntry,
+    build_pool_from_priors,
+    load_pool,
+    save_pool,
+)
 from app.rl.reward import (
     OptimizationResult,
     Predictor,
@@ -17,7 +25,7 @@ from app.rl.reward import (
     RoleBuildConfig,
     RoleBuildOptimizer,
     RoleBuildSampler,
-    default_role_build_sampler,
+    make_pool_sampler,
     resolve_rewards,
 )
 from app.rl.selfplay import EpisodeSamples, play_episode
@@ -26,6 +34,8 @@ __all__ = [
     "ActionType",
     "AlphaNetConfig",
     "AlphaZeroNet",
+    "ChampionPool",
+    "DEFAULT_POOL_PATH",
     "DRAFT_SEQUENCE",
     "DraftEnv",
     "DraftEnvConfig",
@@ -37,6 +47,7 @@ __all__ = [
     "MaskedPolicy",
     "OptimizationResult",
     "PolicyConfig",
+    "PoolEntry",
     "Predictor",
     "RewardMode",
     "RoleBuildConfig",
@@ -44,10 +55,13 @@ __all__ = [
     "RoleBuildSampler",
     "Side",
     "auto_device",
-    "default_role_build_sampler",
+    "build_pool_from_priors",
     "encode_obs",
+    "load_pool",
+    "make_pool_sampler",
     "obs_dim",
     "play_episode",
     "resolve_rewards",
+    "save_pool",
     "visit_policy",
 ]

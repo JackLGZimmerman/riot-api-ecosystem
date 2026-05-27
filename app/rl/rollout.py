@@ -12,6 +12,7 @@ import io
 import os
 from dataclasses import dataclass
 from multiprocessing import get_context
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,8 @@ import torch
 from app.ml.predictor import load_predictor
 from app.rl.env import DraftEnv, DraftEnvConfig
 from app.rl.policy import MaskedPolicy, PolicyConfig, encode_obs
+from app.rl.pool import load_pool
+from app.rl.reward import make_pool_sampler
 
 # Worker-local globals (process-scoped — picklable boundary is the pool init).
 _PREDICTOR = None
@@ -41,12 +44,18 @@ class EpisodeBatch:
     p_blue_win: np.ndarray  # [n_episodes] float32  (blue-perspective)
 
 
-def _worker_init(env_cfg_dict: dict[str, Any], policy_cfg_dict: dict[str, Any]) -> None:
+def _worker_init(
+    env_cfg_dict: dict[str, Any],
+    policy_cfg_dict: dict[str, Any],
+    pool_path: str | None,
+) -> None:
     global _PREDICTOR, _ENV, _POLICY, _N_CHAMPIONS
     torch.set_num_threads(1)  # prevent intra-op thread contention across workers
     _PREDICTOR = load_predictor()
     env_cfg = DraftEnvConfig(**env_cfg_dict)
-    _ENV = DraftEnv(_PREDICTOR, env_cfg)
+    pool = load_pool(Path(pool_path)) if pool_path else load_pool()
+    sampler = make_pool_sampler(pool, env_cfg.top_k_build_configs)
+    _ENV = DraftEnv(_PREDICTOR, env_cfg, sampler=sampler)
     _POLICY = MaskedPolicy(PolicyConfig(**policy_cfg_dict)).eval()
     _N_CHAMPIONS = env_cfg.n_champions
 
@@ -158,6 +167,8 @@ class RolloutPool:
         env_cfg: DraftEnvConfig,
         policy_cfg: PolicyConfig,
         n_workers: int | None = None,
+        *,
+        pool_path: Path | None = None,
     ) -> None:
         self.env_cfg = env_cfg
         self.policy_cfg = policy_cfg
@@ -166,7 +177,11 @@ class RolloutPool:
         self.pool = ctx.Pool(
             self.n_workers,
             initializer=_worker_init,
-            initargs=(env_cfg.__dict__, policy_cfg.__dict__),
+            initargs=(
+                env_cfg.__dict__,
+                policy_cfg.__dict__,
+                str(pool_path) if pool_path else None,
+            ),
         )
 
     def rollout(

@@ -30,7 +30,6 @@ from app.rl.reward import (
     RewardMode,
     RoleBuildOptimizer,
     RoleBuildSampler,
-    default_role_build_sampler,
     resolve_rewards,
 )
 
@@ -175,7 +174,12 @@ class MCTS:
         self.device = device
         self.reward_mode = reward_mode
         self.risk_lambda = risk_lambda
-        self.sampler = sampler or default_role_build_sampler
+        if sampler is None and optimizer is None:
+            raise ValueError(
+                "MCTS requires either a sampler or an optimizer; "
+                "the previous pick-order default was unsafe and has been removed."
+            )
+        self.sampler = sampler
         self.optimizer = optimizer
         self.champion_ids = champion_ids
         self.rng = rng or np.random.default_rng()
@@ -338,6 +342,7 @@ class MCTS:
                 blue_team, red_team, self.predictor, self.reward_mode
             )
         else:
+            assert self.sampler is not None  # checked in __init__
             result = resolve_rewards(
                 blue_team,
                 red_team,

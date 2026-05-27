@@ -13,10 +13,22 @@ role/build assignments and queries a `Predictor` to compute the reward.
 DraftEnv(predictor, DraftEnvConfig(...), sampler=..., optimizer=...)
 ```
 
+One of `sampler` or `optimizer` is **required** — there is no default.
+The previous pick-order role assignment was unsound and has been
+removed: roles and builds are unknown until the end of the draft, and
+picks must be made against the full set of plausible role/build
+assignments available to each champion (see "Champion Pool" below).
+
 Internal action space is `Discrete(len(champion_ids))` — positional
 indices into the `champion_ids` tuple, not raw champion IDs. Real
 champion IDs (sparse, 1..950) are only resolved at the predictor
 boundary.
+
+Internal state is a single `int8` ownership vector of shape
+`(n_champions,)` with codes `{0: AVAILABLE, 1: BLUE_BAN, 2: RED_BAN, 3:
+BLUE_PICK, 4: RED_PICK}`. The four pick/ban index arrays and the
+available mask in the observation are derived from it on each `_obs`
+call, so all four are always consistent with each other.
 
 ## Draft Sequence
 
@@ -68,6 +80,49 @@ If an illegal action is passed to `step()`:
 - Reward = `illegal_action_penalty` (default `-1.0`).
 - Episode terminates if `terminate_on_illegal=True` (default).
 
+## Champion Pool
+
+Each champion has a per-role, per-build eligibility set — most
+champions only see play in 1-2 roles, and each role has a small set of
+realistic builds. The pool is a JSON file checked into the repo:
+
+```text
+app/rl/data/champion_pool.json
+```
+
+Format: `{ "champion_id": [["ROLE", build_id, weight], ...] }`. Weights
+are relative likelihoods within a champion; `make_pool_sampler` uses
+them to rank (role-assignment, build-assignment) combinations.
+
+Generate from the priors:
+
+```bash
+python -m app.rl.pool generate --min-matchups 50
+```
+
+This scans `priors.p1` (the `(champion, role, build) -> (win_rate,
+matchups)` table) and keeps every entry with at least `min_matchups`
+observations. `weight = matchups`, so combinations with the most
+evidence dominate the top-K sample.
+
+## Sampler
+
+`make_pool_sampler(pool, top_k_build_configs)` returns the
+`RoleBuildSampler` the env (or MCTS) calls at the terminal step:
+
+1. Enumerate every permutation of the team's 5 champions across the 5
+   roles. Skip any permutation where a `(champion, role)` is missing
+   from the pool.
+2. For each valid role-assignment, enumerate the Cartesian product of
+   per-champion build candidates.
+3. Score each `(role-assignment, build-assignment)` by the product of
+   per-champion weights. Keep the top `top_k_build_configs` overall and
+   normalise their `probability` to sum to 1.
+
+`top_k_build_configs` directly caps predictor calls per terminal:
+`top_k_build_configs²` per team-pair, since `resolve_rewards` evaluates
+the full `n_b × n_r` matrix.
+
 ## Reward
 
 Zero at every intermediate step. At the terminal step,
@@ -94,15 +149,16 @@ The scalar returned by `step()` is selected by `agent_side` (`blue`,
 
 ```python
 DraftEnvConfig(
+    top_k_build_configs=8,                       # required, no default
     champion_ids=tuple(predictor.champion_ids),  # required
     agent_side="self_play",
     reward_mode="expected_value",
     risk_lambda=0.5,
-    illegal_action_penalty=-1.0,
-    terminate_on_illegal=True,
     random_start_steps=0,            # K random legal actions before agent acts
 )
 ```
+
+All fields are keyword-only (`@dataclass(kw_only=True)`).
 
 `random_start_steps` pre-plays `K` uniform-random legal actions during
 `reset()`, so the agent starts every episode in a different mid-draft
@@ -113,9 +169,20 @@ state. Diversifies training data without changing the action space.
 ```python
 from app.ml.predictor import load_predictor
 from app.rl.env import DraftEnv, DraftEnvConfig
+from app.rl.pool import load_pool
+from app.rl.reward import make_pool_sampler
 
 predictor = load_predictor()         # one ClickHouse query, then pure numpy
-env = DraftEnv(predictor, DraftEnvConfig(champion_ids=predictor.champion_ids))
+pool = load_pool()                   # reads app/rl/data/champion_pool.json
+sampler = make_pool_sampler(pool, top_k_build_configs=8)
+env = DraftEnv(
+    predictor,
+    DraftEnvConfig(
+        top_k_build_configs=8,
+        champion_ids=predictor.champion_ids,
+    ),
+    sampler=sampler,
+)
 ```
 
 `WinRatePredictor` (in `app/ml/predictor.py`) loads `(champ_id, position,
@@ -157,6 +224,7 @@ Observed (7 workers, 8-core box): ~1500-1800 episodes/sec.
 
 ```python
 TrainConfig(
+    top_k_build_configs=8,      # required
     epochs=200,
     episodes_per_worker=8,
     n_workers=None,             # default: cpu_count - 1
@@ -169,8 +237,11 @@ TrainConfig(
     hidden=256,
     train_mode="vs_random",
     run_name=None,              # default: draft_YYYYMMDD_HHMMSS
+    pool_path=DEFAULT_POOL_PATH,
 )
 ```
+
+All fields are keyword-only.
 
 ## Live Performance Graph
 
@@ -243,12 +314,14 @@ in `app/rl/data/logs/{run_name}.jsonl`.
 
 ```python
 AlphaTrainConfig(
+    top_k_build_configs=8,        # required
     iterations=50,
     episodes_per_iter=16,
     n_workers=1,                  # >1 spawns a multiprocessing pool
     device="auto",                # "auto" | "cuda" | "mps" | "cpu"
     reward_mode="expected_value", # | "risk_adjusted" | "worst_case"
     risk_lambda=0.5,
+    pool_path=DEFAULT_POOL_PATH,
     # MCTS
     simulations=64,
     c_puct=1.5,
@@ -316,8 +389,9 @@ that does not increase total loss.
 | File | Contents |
 | --- | --- |
 | `draft.py` | `Side`, `ActionType`, `DraftStep`, `DRAFT_SEQUENCE` |
-| `reward.py` | `Predictor`, `RoleBuildConfig`, sampler, `resolve_rewards` |
-| `env.py` | `DraftEnv`, `DraftEnvConfig` |
+| `pool.py` | `ChampionPool`, `PoolEntry`, `load_pool`, `build_pool_from_priors` |
+| `reward.py` | `Predictor`, `RoleBuildConfig`, `make_pool_sampler`, `resolve_rewards` |
+| `env.py` | `DraftEnv`, `DraftEnvConfig` (int8 ownership vector internally) |
 | `policy.py` | `MaskedPolicy`, `encode_obs` (REINFORCE policy) |
 | `rollout.py` | `RolloutPool`, persistent multiprocessing workers (REINFORCE) |
 | `train.py` | REINFORCE training loop with TensorBoard + JSONL |

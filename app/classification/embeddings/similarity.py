@@ -36,35 +36,6 @@ def _sort_groups(groups: list[list[int]]) -> list[list[int]]:
     return sorted((sorted(g) for g in groups), key=lambda g: (-len(g), g[0]))
 
 
-def _agglomerative_groups(
-    sim: np.ndarray, threshold: float, eligible: np.ndarray
-) -> list[list[int]]:
-    eligible_idx = np.flatnonzero(eligible)
-    if eligible_idx.size < 2 or threshold > 1.0:
-        groups = [[int(i)] for i in eligible_idx]
-        groups.extend([int(i)] for i in np.flatnonzero(~eligible))
-        return _sort_groups(groups)
-
-    distance_threshold = 1.0 - threshold
-    distance = 1.0 - sim[np.ix_(eligible_idx, eligible_idx)]
-    distance = np.clip(distance, 0.0, 2.0)
-    np.fill_diagonal(distance, 0.0)
-
-    condensed_distance = squareform(distance, checks=False)
-    clusters = fcluster(
-        linkage(condensed_distance, method="average"),
-        t=distance_threshold,
-        criterion="distance",
-    )
-
-    groups: list[list[int]] = []
-    for cluster in np.unique(clusters):
-        groups.append(eligible_idx[clusters == cluster].astype(int).tolist())
-
-    groups.extend([int(i)] for i in np.flatnonzero(~eligible))
-    return _sort_groups(groups)
-
-
 def group_by_threshold(
     embeddings: np.ndarray,
     threshold: float,
@@ -79,29 +50,23 @@ def group_by_threshold(
     """
     sim = cosine_similarity_matrix(embeddings)
     eligible = _sample_mask(sim.shape[0], sample_weight, min_sample_weight)
-    return _agglomerative_groups(sim, threshold, eligible)
+    eligible_idx = np.flatnonzero(eligible)
+    if eligible_idx.size < 2 or threshold > 1.0:
+        groups = [[int(i)] for i in eligible_idx]
+        groups.extend([int(i)] for i in np.flatnonzero(~eligible))
+        return _sort_groups(groups)
 
-
-def source_groups_by_threshold(
-    embeddings: np.ndarray,
-    threshold: float,
-    *,
-    sample_weight: np.ndarray | None = None,
-    min_sample_weight: float = 0.0,
-) -> list[list[int]]:
-    """Return one threshold neighborhood per source row.
-
-    Unlike agglomerative clustering, these groups can overlap: row `i` is the
-    source identity and the members are all eligible identities similar enough
-    to `i`, including `i` itself.
-    """
-    sim = cosine_similarity_matrix(embeddings)
-    eligible = _sample_mask(sim.shape[0], sample_weight, min_sample_weight)
-    groups: list[list[int]] = []
-    for idx in range(sim.shape[0]):
-        if not eligible[idx]:
-            groups.append([idx])
-            continue
-        members = np.flatnonzero((sim[idx] >= threshold) & eligible)
-        groups.append(members.astype(int).tolist())
-    return groups
+    distance = 1.0 - sim[np.ix_(eligible_idx, eligible_idx)]
+    distance = np.clip(distance, 0.0, 2.0)
+    np.fill_diagonal(distance, 0.0)
+    clusters = fcluster(
+        linkage(squareform(distance, checks=False), method="average"),
+        t=1.0 - threshold,
+        criterion="distance",
+    )
+    groups: list[list[int]] = [
+        eligible_idx[clusters == cluster].astype(int).tolist()
+        for cluster in np.unique(clusters)
+    ]
+    groups.extend([int(i)] for i in np.flatnonzero(~eligible))
+    return _sort_groups(groups)

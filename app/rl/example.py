@@ -1,4 +1,4 @@
-"""Random episode with a dummy predictor + sampler, demonstrating action masking.
+"""Random episode with a dummy predictor + pool-based sampler.
 
 Run:
     python -m app.rl.example
@@ -10,7 +10,8 @@ import numpy as np
 
 from app.ml.config import POSITIONS
 from app.rl.env import DraftEnv, DraftEnvConfig
-from app.rl.reward import RoleBuildConfig
+from app.rl.pool import ChampionPool, PoolEntry
+from app.rl.reward import make_pool_sampler
 
 
 def dummy_predictor(
@@ -26,29 +27,45 @@ def dummy_predictor(
     return float(1.0 / (1.0 + np.exp(-0.1 * (blue_score - red_score))))
 
 
-def dummy_sampler(team_champions: list[int], side: str) -> list[RoleBuildConfig]:
-    canonical = RoleBuildConfig(
-        roles=dict(zip(team_champions, POSITIONS)),
-        builds={c: 0 for c in team_champions},
-        probability=0.7,
-    )
-    rotated = RoleBuildConfig(
-        roles=dict(zip(team_champions, POSITIONS[1:] + POSITIONS[:1])),
-        builds={c: 1 for c in team_champions},
-        probability=0.3,
-    )
-    return [canonical, rotated]
+def dummy_pool(n_champions: int, *, champion_ids: tuple[int, ...] | None = None) -> ChampionPool:
+    """Pool where every champion can play every role with two build options.
+
+    Realistic pools (built from priors) restrict each champion to ~1-2 roles.
+    `champion_ids` lets callers key the pool by real champion ids (passed to
+    the predictor) instead of the env's positional indices.
+    """
+    ids = champion_ids if champion_ids is not None else tuple(range(n_champions))
+    entries: dict[int, tuple[PoolEntry, ...]] = {}
+    for cid in ids:
+        rows: list[PoolEntry] = []
+        for role in POSITIONS:
+            rows.append(PoolEntry(role=role, build_id=0, weight=0.7))
+            rows.append(PoolEntry(role=role, build_id=1, weight=0.3))
+        entries[cid] = tuple(rows)
+    return ChampionPool(entries=entries)
+
+
+# Kept for tests/smoke imports — builds a permissive pool sampler over
+# champion ids 100..130 (the range used by alpha_smoke).
+dummy_sampler = make_pool_sampler(
+    dummy_pool(30, champion_ids=tuple(range(100, 130))),
+    top_k_build_configs=4,
+)
 
 
 def run_random_episode(seed: int = 0) -> None:
+    n_champions = 170
+    pool = dummy_pool(n_champions)
+    sampler = make_pool_sampler(pool, top_k_build_configs=4)
     env = DraftEnv(
         predictor=dummy_predictor,
         config=DraftEnvConfig(
-            champion_ids=tuple(range(170)),
+            top_k_build_configs=4,
+            champion_ids=tuple(range(n_champions)),
             agent_side="self_play",
             reward_mode="expected_value",
         ),
-        sampler=dummy_sampler,
+        sampler=sampler,
     )
     rng = np.random.default_rng(seed)
 

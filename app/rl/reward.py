@@ -1,13 +1,22 @@
-"""Predictor protocol, role/build sampling, and terminal-state reward resolution."""
+"""Predictor protocol, pool-based role/build sampling, and terminal reward resolution.
+
+The sampler is the bridge between the env (which only knows champion
+indices) and the predictor (which needs full (champion, role, build)
+tuples). Roles and builds are unknown until the end of the draft, so
+the sampler enumerates plausible joint assignments — never assuming
+pick order == role.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import permutations, product
 from typing import Callable, Literal, Protocol
 
 import numpy as np
 
 from app.ml.config import POSITIONS
+from app.rl.pool import ChampionPool
 
 RewardMode = Literal["expected_value", "risk_adjusted", "worst_case"]
 
@@ -18,7 +27,7 @@ class RoleBuildConfig:
 
     roles: dict[int, str]  # champion_id -> role
     builds: dict[int, int]  # champion_id -> build_id
-    probability: float = 1.0  # optional prior weight
+    probability: float = 1.0  # normalised weight within the returned set
 
 
 class Predictor(Protocol):
@@ -61,18 +70,72 @@ class RoleBuildOptimizer(Protocol):
     ) -> OptimizationResult: ...
 
 
-def default_role_build_sampler(
-    team_champions: list[int],
-    side: str,
-) -> list[RoleBuildConfig]:
-    """Single canonical role assignment, build_id=0 for every champion."""
-    return [
-        RoleBuildConfig(
-            roles=dict(zip(team_champions, POSITIONS)),
-            builds={c: 0 for c in team_champions},
-            probability=1.0,
-        )
-    ]
+def make_pool_sampler(
+    pool: ChampionPool,
+    top_k_build_configs: int,
+) -> RoleBuildSampler:
+    """Build a sampler that enumerates valid (role, build) configs from `pool`.
+
+    For each team of 5 champions:
+      1. Enumerate every permutation of the 5 champions across the 5 roles
+         where every (champion, role) appears in the pool.
+      2. For each valid role-assignment, enumerate the Cartesian product
+         of per-champion (build, weight) candidates.
+      3. Score each (role-assignment, build-assignment) by the product of
+         per-champion weights, keep the top K overall, and normalise
+         their `probability` to sum to 1.
+
+    If fewer than K configs exist, all of them are returned. If no valid
+    role-assignment exists for the team (the pool is missing entries for
+    one of the champions in any role), raises ValueError — that signals
+    the pool is stale relative to the predictor's champion set.
+    """
+    if top_k_build_configs <= 0:
+        raise ValueError("top_k_build_configs must be >= 1")
+
+    def sampler(team_champions: list[int], side: str) -> list[RoleBuildConfig]:
+        del side  # symmetric for now; kept for protocol parity
+        if len(team_champions) != len(POSITIONS):
+            raise ValueError(
+                f"Expected {len(POSITIONS)} champions, got {len(team_champions)}"
+            )
+
+        scored: list[tuple[float, dict[int, str], dict[int, int]]] = []
+        for role_perm in permutations(POSITIONS):
+            assignment = dict(zip(team_champions, role_perm))
+            per_champ_builds: list[tuple[tuple[int, float], ...]] = []
+            ok = True
+            for champ, role in assignment.items():
+                builds = pool.builds_for(champ, role)
+                if not builds:
+                    ok = False
+                    break
+                per_champ_builds.append(builds)
+            if not ok:
+                continue
+            for combo in product(*per_champ_builds):
+                w = 1.0
+                build_assignment: dict[int, int] = {}
+                for champ, (build_id, weight) in zip(team_champions, combo):
+                    w *= weight
+                    build_assignment[champ] = build_id
+                scored.append((w, assignment, build_assignment))
+
+        if not scored:
+            raise ValueError(
+                f"No valid role/build assignment for team {team_champions}; "
+                f"champion pool is missing entries."
+            )
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:top_k_build_configs]
+        total = sum(w for w, _, _ in top)
+        return [
+            RoleBuildConfig(roles=roles, builds=builds, probability=w / total)
+            for w, roles, builds in top
+        ]
+
+    return sampler
 
 
 def resolve_rewards(

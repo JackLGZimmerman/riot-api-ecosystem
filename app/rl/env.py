@@ -3,6 +3,11 @@
 Internal action space is `Discrete(len(champion_ids))` — i.e. positional
 indices into the `champion_ids` tuple. Real champion IDs (which are sparse
 in the DB) are only resolved at the predictor boundary.
+
+Internal state is a single `int8` ownership vector of shape (n_champions,)
+with codes {AVAILABLE, BLUE_BAN, RED_BAN, BLUE_PICK, RED_PICK}. The dict
+observation shape is unchanged — the four pick/ban index arrays and the
+available mask are derived from the ownership vector on each `_obs` call.
 """
 
 from __future__ import annotations
@@ -21,22 +26,25 @@ from app.rl.reward import (
     RewardMode,
     RoleBuildOptimizer,
     RoleBuildSampler,
-    default_role_build_sampler,
     resolve_rewards,
 )
 
+# Ownership codes packed into a single int8 vector.
+_AVAILABLE: int = 0
+_BLUE_BAN: int = 1
+_RED_BAN: int = 2
+_BLUE_PICK: int = 3
+_RED_PICK: int = 4
 
-@dataclass
+
+@dataclass(kw_only=True)
 class DraftEnvConfig:
+    top_k_build_configs: int  # required; cap on configs per team per terminal
     champion_ids: tuple[int, ...] = field(default_factory=tuple)
     agent_side: Literal["blue", "red", "self_play"] = "self_play"
     reward_mode: RewardMode = "expected_value"
     risk_lambda: float = 0.5
-    illegal_action_penalty: float = -1.0
-    terminate_on_illegal: bool = True
-    random_start_steps: int = (
-        0  # pre-fill first K draft steps with uniform-random legal actions
-    )
+    random_start_steps: int = 0
 
     @property
     def n_champions(self) -> int:
@@ -52,6 +60,7 @@ class DraftEnv(gym.Env):
         self,
         predictor: Predictor,
         config: DraftEnvConfig,
+        *,
         sampler: RoleBuildSampler | None = None,
         optimizer: RoleBuildOptimizer | None = None,
     ) -> None:
@@ -63,10 +72,15 @@ class DraftEnv(gym.Env):
             )
         if not (0 <= config.random_start_steps < len(DRAFT_SEQUENCE)):
             raise ValueError("random_start_steps must be in [0, len(DRAFT_SEQUENCE)).")
+        if sampler is None and optimizer is None:
+            raise ValueError(
+                "DraftEnv requires either a sampler or an optimizer; "
+                "the previous pick-order default was unsafe and has been removed."
+            )
         self.cfg = config
         self._champ_ids = np.asarray(config.champion_ids, dtype=np.int64)
         self._predictor = predictor
-        self._sampler = sampler or default_role_build_sampler
+        self._sampler = sampler
         self._optimizer = optimizer
 
         self.action_space = spaces.Discrete(n)
@@ -85,15 +99,9 @@ class DraftEnv(gym.Env):
             }
         )
 
-        self._blue_picks = np.full(5, -1, dtype=np.int32)
-        self._red_picks = np.full(5, -1, dtype=np.int32)
-        self._blue_bans = np.full(5, -1, dtype=np.int32)
-        self._red_bans = np.full(5, -1, dtype=np.int32)
-        self._blue_pick_count = 0
-        self._red_pick_count = 0
-        self._blue_ban_count = 0
-        self._red_ban_count = 0
-        self._available = np.ones(n, dtype=np.int8)
+        self._ownership = np.zeros(n, dtype=np.int8)
+        self._blue_team: list[int] = []
+        self._red_team: list[int] = []
         self._step_idx = 0
 
     def current_step(self) -> DraftStep | None:
@@ -102,18 +110,24 @@ class DraftEnv(gym.Env):
         return DRAFT_SEQUENCE[self._step_idx]
 
     def get_action_mask(self) -> np.ndarray:
-        return self._available.astype(bool)
+        return self._ownership == _AVAILABLE
+
+    def _pad_indices(self, code: int) -> np.ndarray:
+        out = np.full(5, -1, dtype=np.int32)
+        idx = np.flatnonzero(self._ownership == code)
+        out[: idx.size] = idx
+        return out
 
     def _obs(self) -> dict[str, Any]:
         step = self.current_step()
         acting_side = 0 if step is None else int(step.side)
         action_type = 0 if step is None else int(step.action_type)
         return {
-            "blue_picks": self._blue_picks.copy(),
-            "red_picks": self._red_picks.copy(),
-            "blue_bans": self._blue_bans.copy(),
-            "red_bans": self._red_bans.copy(),
-            "available_mask": self._available.copy(),
+            "blue_picks": self._pad_indices(_BLUE_PICK),
+            "red_picks": self._pad_indices(_RED_PICK),
+            "blue_bans": self._pad_indices(_BLUE_BAN),
+            "red_bans": self._pad_indices(_RED_BAN),
+            "available_mask": self.get_action_mask(),
             "step": int(self._step_idx),
             "acting_side": acting_side,
             "action_type": action_type,
@@ -132,21 +146,15 @@ class DraftEnv(gym.Env):
         options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         super().reset(seed=seed)
-        self._blue_picks.fill(-1)
-        self._red_picks.fill(-1)
-        self._blue_bans.fill(-1)
-        self._red_bans.fill(-1)
-        self._blue_pick_count = 0
-        self._red_pick_count = 0
-        self._blue_ban_count = 0
-        self._red_ban_count = 0
-        self._available[:] = 1
+        self._ownership.fill(_AVAILABLE)
+        self._blue_team.clear()
+        self._red_team.clear()
         self._step_idx = 0
 
         # Pre-fill K steps with random legal actions so episodes start
         # from diverse mid-draft states. Uses the env's own np_random.
         for _ in range(self.cfg.random_start_steps):
-            legal = np.flatnonzero(self._available)
+            legal = np.flatnonzero(self._ownership == _AVAILABLE)
             action = int(self.np_random.choice(legal))
             self._apply(action)
         return self._obs(), self._info()
@@ -155,20 +163,12 @@ class DraftEnv(gym.Env):
         """Commit an already-validated action; return the side that acted."""
         step = DRAFT_SEQUENCE[self._step_idx]
         if step.action_type == ActionType.BAN:
-            if step.side == Side.BLUE:
-                self._blue_bans[self._blue_ban_count] = action
-                self._blue_ban_count += 1
-            else:
-                self._red_bans[self._red_ban_count] = action
-                self._red_ban_count += 1
+            code = _BLUE_BAN if step.side == Side.BLUE else _RED_BAN
         else:
-            if step.side == Side.BLUE:
-                self._blue_picks[self._blue_pick_count] = action
-                self._blue_pick_count += 1
-            else:
-                self._red_picks[self._red_pick_count] = action
-                self._red_pick_count += 1
-        self._available[action] = 0
+            code = _BLUE_PICK if step.side == Side.BLUE else _RED_PICK
+            team = self._blue_team if step.side == Side.BLUE else self._red_team
+            team.append(int(self._champ_ids[action]))
+        self._ownership[action] = code
         self._step_idx += 1
         return step.side
 
@@ -180,17 +180,9 @@ class DraftEnv(gym.Env):
             raise RuntimeError(
                 "Episode already terminated; call reset() before stepping."
             )
-
-        if action < 0 or action >= self.cfg.n_champions or self._available[action] == 0:
-            info = self._info()
-            info["illegal_action"] = action
-            return (
-                self._obs(),
-                float(self.cfg.illegal_action_penalty),
-                bool(self.cfg.terminate_on_illegal),
-                False,
-                info,
-            )
+        assert self._ownership[action] == _AVAILABLE, (
+            f"Illegal action {action}; policy must mask via get_action_mask()."
+        )
 
         just_acted_side = self._apply(action)
         terminated = self._step_idx >= len(DRAFT_SEQUENCE)
@@ -198,16 +190,18 @@ class DraftEnv(gym.Env):
         info = self._info()
 
         if terminated:
-            blue_team = [int(self._champ_ids[i]) for i in self._blue_picks]
-            red_team = [int(self._champ_ids[i]) for i in self._red_picks]
             if self._optimizer is not None:
                 result: OptimizationResult = self._optimizer(
-                    blue_team, red_team, self._predictor, self.cfg.reward_mode
+                    self._blue_team,
+                    self._red_team,
+                    self._predictor,
+                    self.cfg.reward_mode,
                 )
             else:
+                assert self._sampler is not None  # checked in __init__
                 result = resolve_rewards(
-                    blue_team,
-                    red_team,
+                    self._blue_team,
+                    self._red_team,
                     self._predictor,
                     self._sampler,
                     self.cfg.reward_mode,

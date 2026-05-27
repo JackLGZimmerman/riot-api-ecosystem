@@ -57,29 +57,21 @@ def _resolve_feature_values(
 ) -> list[np.ndarray]:
     """Return one (n_rows,) float32 array per requested feature.
 
-    Raw entries map to `smoothed_<name>`. Derived entries are computed via
-    `DERIVED_METRIC_FUNCS` against the smoothed columns of the same rows.
+    Raw entries pull from the `smoothed_<name>` columns of `rows`. Derived
+    entries are computed via `DERIVED_METRIC_FUNCS` against the same values.
     """
-    smoothed_cache: dict[str, np.ndarray] = {}
-
-    def smoothed(metric: str) -> np.ndarray:
-        key = f"smoothed_{metric}"
-        if key not in smoothed_cache:
-            smoothed_cache[key] = rows.columns[key][sorted_row_idx].astype(np.float32)
-        return smoothed_cache[key]
-
-    # Materialise raw smoothed columns for any metric mentioned by raw or
-    # derived entries — derived funcs reach into the cache by `smoothed_<name>`.
-    for metric in ALL_METRICS:
-        smoothed(metric)
+    metric_values: dict[str, np.ndarray] = {
+        metric: rows.columns[f"smoothed_{metric}"][sorted_row_idx].astype(np.float32)
+        for metric in ALL_METRICS
+    }
 
     out: list[np.ndarray] = []
     for name in feature_set:
         if name in ALL_METRICS:
-            out.append(smoothed(name))
+            out.append(metric_values[name])
         elif name in DERIVED_METRIC_FUNCS:
             out.append(
-                DERIVED_METRIC_FUNCS[name](smoothed_cache).astype(np.float32)
+                DERIVED_METRIC_FUNCS[name](metric_values).astype(np.float32)
             )
         else:
             raise KeyError(
