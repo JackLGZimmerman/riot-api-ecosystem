@@ -12,7 +12,18 @@ from scipy.spatial.distance import squareform
 
 def cosine_similarity_matrix(embeddings: np.ndarray) -> np.ndarray:
     """(n, d) -> (n, n). Assumes rows are L2-normalised."""
+    if embeddings.ndim != 2:
+        raise ValueError(f"embeddings must be 2-D, got shape {embeddings.shape}")
     return embeddings @ embeddings.T
+
+
+def median_pair_similarity(sim: np.ndarray, members: list[int]) -> float:
+    """Median pairwise similarity for a group within a square similarity matrix."""
+    if len(members) < 2:
+        return 1.0
+    arr = np.asarray(members, dtype=np.int64)
+    iu, ju = np.triu_indices(arr.size, k=1)
+    return float(np.median(sim[arr[iu], arr[ju]]))
 
 
 def _sample_mask(

@@ -4,8 +4,8 @@
 -- (championid, teamposition, phase).
 --
 -- Re-aggregation formulas:
---   rates / largest_avg : sum(value_c * matchups_c) / sum(matchups_c)
---   per-minute          : sum(value_c * sum_w_timeplayed_c) / sum(sum_w_timeplayed_c)
+--   rates / largest_avg / final_snapshot : sum(value_c * matchups_c) / sum(matchups_c)
+--   per-minute                         : sum(value_c * sum_w_timeplayed_c) / sum(sum_w_timeplayed_c)
 
 TRUNCATE TABLE game_data_filtered.synergy_1vx_temporal_prior_champion_role;
 
@@ -60,6 +60,18 @@ SELECT
     toFloat32(sum(t.totalheal * t.sum_w_timeplayed) / sum(t.sum_w_timeplayed)) AS totalheal,
     toFloat32(sum(t.totalhealsonteammates * t.sum_w_timeplayed) / sum(t.sum_w_timeplayed)) AS totalhealsonteammates,
     toFloat32(sum(t.totaldamageshieldedonteammates * t.sum_w_timeplayed) / sum(t.sum_w_timeplayed)) AS totaldamageshieldedonteammates,
+    -- final timeline snapshots: sum(value * matchups) / sum(matchups)
+    toFloat32(sum(t.healthmax * t.matchups) / sum(t.matchups)) AS healthmax,
+    toFloat32(sum(t.lifesteal * t.matchups) / sum(t.matchups)) AS lifesteal,
+    toFloat32(sum(t.movementspeed * t.matchups) / sum(t.matchups)) AS movementspeed,
+    toFloat32(sum(t.omnivamp * t.matchups) / sum(t.matchups)) AS omnivamp,
+    toFloat32(sum(t.physicalvamp * t.matchups) / sum(t.matchups)) AS physicalvamp,
+    toFloat32(sum(t.spellvamp * t.matchups) / sum(t.matchups)) AS spellvamp,
+    toFloat32(sum(t.armor * t.matchups) / sum(t.matchups)) AS armor,
+    toFloat32(sum(t.magicresist * t.matchups) / sum(t.matchups)) AS magicresist,
+    toFloat32(sum(t.abilitypower * t.matchups) / sum(t.matchups)) AS abilitypower,
+    toFloat32(sum(t.attackdamage * t.matchups) / sum(t.matchups)) AS attackdamage,
+    toFloat32(sum(t.attackspeed * t.matchups) / sum(t.matchups)) AS attackspeed,
     toFloat32(sum(t.timeccingothers * t.sum_w_timeplayed) / sum(t.sum_w_timeplayed)) AS timeccingothers,
     toFloat32(sum(t.totaltimeccdealt * t.sum_w_timeplayed) / sum(t.sum_w_timeplayed)) AS totaltimeccdealt,
     toFloat32(sum(t.totalminionskilled * t.sum_w_timeplayed) / sum(t.sum_w_timeplayed)) AS totalminionskilled,

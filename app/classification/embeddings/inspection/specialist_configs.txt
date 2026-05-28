@@ -1,0 +1,14 @@
+# Specialist inspection configs
+#
+# Copy a line after `uv run python -m app.classification.embeddings.inspection.base`.
+# These mirror the current SpecialistSpec values and preserve the tuned inspection
+# parameters without keeping one Python wrapper per specialist.
+
+--name durability --kv 0.85 --t 0.70 --min-median 0.85 --champion-limit 10 --features durability_total_to_deaths_ratio durability_total_to_goldearned_ratio healthmax_to_goldearned_ratio self_heal_to_durability_total_ratio damageselfmitigated_to_durability_total_ratio magicdamagetaken_to_durability_total_ratio physicaldamagetaken_to_durability_total_ratio vamp_sustain durability_total_to_healthmax_ratio
+--name sustained_damage --kv 0.85 --t 0.70 --min-median 0.85 --champion-limit 8 --features physicaldamagedealttochampions_share champion_damage_share_to_deaths_ratio totaldamagedealttochampions_to_goldearned_ratio
+--name burst_skirmish --kv 0.95 --t 0.72 --min-median 0.85 --champion-limit 12 --features kills_to_assists_ratio damageselfmitigated_to_goldearned_ratio attackspeed
+--name vision --kv 0.85 --t 0.68 --min-median 0.85 --champion-limit 10 --features visionscore_to_goldearned_ratio visionscore_to_ward_actions_ratio wardskilled_to_wardsplaced_ratio
+--name farming --kv 0.95 --t 0.88 --min-median 0.85 --champion-limit 10 --features totalminionskilled neutralminionskilled total_farm_to_goldearned_ratio total_farm_to_deaths_ratio
+--name epic_objectives --kv 0.97 --t 0.72 --min-median 0.85 --champion-limit 10 --features epic_kills objective_neutral_minions objective_damage_to_goldearned_ratio damagedealttoobjectives_per_epic_kill_per_gold
+--name structure --kv 0.85 --t 0.70 --min-median 0.85 --champion-limit 10 --features structure_takedowns structure_losses structure_damage structure_takedowns_to_structure_damage_ratio structure_net_control structure_damage_to_goldearned_ratio structure_damage_to_deaths_ratio
+--name movement_speed --kv 1.00 --t 0.70 --min-median 0.85 --champion-limit 10 --features movementspeed

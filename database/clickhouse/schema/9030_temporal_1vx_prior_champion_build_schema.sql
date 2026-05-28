@@ -72,6 +72,19 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.synergy_1vx_temporal_prior_champio
     totalhealsonteammates Float32,
     totaldamageshieldedonteammates Float32,
 
+    -- final timeline snapshots (per-game averages)
+    healthmax Float32,
+    lifesteal Float32,
+    movementspeed Float32,
+    omnivamp Float32,
+    physicalvamp Float32,
+    spellvamp Float32,
+    armor Float32,
+    magicresist Float32,
+    abilitypower Float32,
+    attackdamage Float32,
+    attackspeed Float32,
+
     -- crowd control (per-minute)
     timeccingothers Float32,
     totaltimeccdealt Float32,

@@ -1,0 +1,2 @@
+"""Specialist embedding inspection CLIs."""
+

@@ -1,11 +1,12 @@
 """Lean sweep harness for the specialists.
 
-One row per candidate. Filters out candidates outside the target group-count
-band. Caches raw 6010 + 9000-9040 levels on disk so repeat runs are fast.
+One row per candidate. Filters out candidates outside the per-phase target
+group-count band. Caches raw 6010 + 9000-9040 levels on disk so repeat runs are
+fast.
 
 Run:
     uv run python -m app.classification.embeddings.tune
-    uv run python -m app.classification.embeddings.tune --name self_sustain
+    uv run python -m app.classification.embeddings.tune --name durability
 """
 
 from __future__ import annotations
@@ -28,13 +29,9 @@ from app.classification.embeddings.config import (
 from app.classification.embeddings.load import LevelRows, load_all
 from app.classification.embeddings.matrices import build_all_matrices
 from app.classification.embeddings.posteriors import apply_hierarchical_shrinkage
-from app.classification.embeddings.similarity import (
-    cosine_similarity_matrix,
-    group_by_threshold,
-)
+from app.classification.embeddings.similarity import median_pair_similarity
+from app.classification.embeddings.specialists import group_specialist_by_phase
 from app.core.logging.logger import setup_logging_config
-
-logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path("/tmp/embed_exp")
 RAW_CACHE_PATH = OUTPUT_DIR / "raw_levels.pkl"
@@ -57,36 +54,18 @@ class SpecRow:
     kv: float
     t: float
     kept: int
+    phase_group_counts: tuple[int, ...]
     coverage: float
     largest_share: float
     median_within: float
 
     def fmt(self) -> str:
+        phase_counts = ",".join(str(count) for count in self.phase_group_counts)
         return (
             f"{self.spec:<14} kv={self.kv:.3f} t={self.t:.2f} | "
-            f"g={self.kept:>3d} cov={self.coverage:>4.2f} "
+            f"g={self.kept:>3d} phase_g=[{phase_counts}] cov={self.coverage:>4.2f} "
             f"lg%={self.largest_share:>4.2f} med={self.median_within:>4.2f}"
         )
-
-
-def _drop_incoherent(
-    sim: np.ndarray,
-    groups: list[list[int]],
-    min_median_sim: float,
-    min_size: int,
-) -> tuple[list[list[int]], list[float]]:
-    kept: list[list[int]] = []
-    medians: list[float] = []
-    for g in groups:
-        if len(g) < min_size:
-            continue
-        arr = np.asarray(g, dtype=np.int64)
-        iu, ju = np.triu_indices(arr.size, k=1)
-        med = float(np.median(sim[arr[iu], arr[ju]])) if iu.size else 1.0
-        if med >= min_median_sim:
-            kept.append(g)
-            medians.append(med)
-    return kept, medians
 
 
 def sweep_specialist(
@@ -109,20 +88,33 @@ def sweep_specialist(
             baseline_matrix,
             EmbeddingConfig(feature_set=spec.feature_set, projection_keep_variance=kv),
         )
-        sim = cosine_similarity_matrix(baseline.embeddings)
         for t in ts:
-            groups = group_by_threshold(baseline.embeddings, t)
-            kept, medians = _drop_incoherent(sim, groups, floor, spec.min_group_size)
-            sizes = [len(g) for g in kept]
+            candidate = SpecialistSpec(
+                name=spec.name,
+                feature_set=spec.feature_set,
+                similarity_threshold=t,
+                projection_keep_variance=kv,
+                min_median_sim=floor,
+            )
+            groupings = group_specialist_by_phase(baseline, candidate)
+            phase_counts = tuple(len(grouping.kept) for grouping in groupings)
+            sizes = [len(g) for grouping in groupings for g in grouping.kept]
+            medians = [
+                median_pair_similarity(grouping.sim, group)
+                for grouping in groupings
+                for group in grouping.kept
+            ]
             n = baseline.embeddings.shape[0]
+            total_slots = n * len(groupings)
             largest = max(sizes, default=0)
             rows.append(
                 SpecRow(
                     spec=spec.name,
                     kv=kv,
                     t=t,
-                    kept=len(kept),
-                    coverage=sum(sizes) / n if n else 0.0,
+                    kept=sum(phase_counts),
+                    phase_group_counts=phase_counts,
+                    coverage=sum(sizes) / total_slots if total_slots else 0.0,
                     largest_share=largest / max(n, 1),
                     median_within=(
                         float(np.median(medians)) if medians else float("nan")
@@ -133,9 +125,11 @@ def sweep_specialist(
     lo, hi = target
 
     def key(r: SpecRow) -> tuple:
-        in_band = lo <= r.kept <= hi
+        in_band = all(lo <= count <= hi for count in r.phase_group_counts)
         ok = r.coverage >= 0.85 and r.largest_share <= 0.30
-        return (in_band, ok, r.median_within, -abs(((lo + hi) / 2) - r.kept))
+        midpoint = (lo + hi) / 2
+        spread = max((abs(midpoint - count) for count in r.phase_group_counts), default=0)
+        return (in_band, ok, r.median_within, -spread)
 
     rows.sort(key=key, reverse=True)
     return rows
@@ -162,10 +156,18 @@ def run_specialists(args: argparse.Namespace) -> None:
     out_lines: list[str] = []
     for spec in target_specs:
         rows = sweep_specialist(
-            spec, smoothed, tuple(args.kvs), tuple(args.ts), target,
+            spec,
+            smoothed,
+            tuple(args.kvs),
+            tuple(args.ts),
+            target,
             min_median_override=args.min_median,
         )
-        in_band = [r for r in rows if target[0] <= r.kept <= target[1]]
+        in_band = [
+            r
+            for r in rows
+            if all(target[0] <= count <= target[1] for count in r.phase_group_counts)
+        ]
         keep = in_band[:5] if in_band else rows[:5]
         out_lines.append(
             f"# {spec.name} (curr kv={spec.projection_keep_variance:.3f} "
@@ -177,6 +179,7 @@ def run_specialists(args: argparse.Namespace) -> None:
             best = in_band[0]
             summary.append(
                 f"PICK {spec.name}: kv={best.kv:.3f} t={best.t:.2f} g={best.kept} "
+                f"phase_g={list(best.phase_group_counts)} "
                 f"cov={best.coverage:.2f} lg%={best.largest_share:.2f} "
                 f"med={best.median_within:.2f}"
             )

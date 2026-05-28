@@ -116,3 +116,5 @@ app/ml/**/events.out.tfevents*
 app/ml/**/metrics*.jsonl
 app/ml/**/metrics_latest.json
 app/ml/**/session_summary*.json
+
+app/classification/data/embeddings/

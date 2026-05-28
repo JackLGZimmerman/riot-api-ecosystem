@@ -7,8 +7,6 @@ Run with:
 
 from __future__ import annotations
 
-import logging
-
 from app.classification.embeddings.config import EmbeddingConfig
 from app.classification.embeddings.load import load_all
 from app.classification.embeddings.posteriors import apply_hierarchical_shrinkage
@@ -20,7 +18,6 @@ from app.classification.embeddings.specialists import (
 from app.core.logging.logger import setup_logging_config
 
 setup_logging_config()
-logger = logging.getLogger(__name__)
 
 
 def run(cfg: EmbeddingConfig | None = None) -> None:

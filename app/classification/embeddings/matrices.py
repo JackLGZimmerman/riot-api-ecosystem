@@ -1,12 +1,14 @@
-"""Assemble per-identity snapshot feature matrices from smoothed LevelRows.
+"""Assemble per-identity temporal feature matrices from smoothed LevelRows.
 
 Identities with fewer than `len(PHASES)` phase rows are dropped. Each feature
-column is signed-log1p compressed then standardised with median/MAD.
+column is signed-log1p compressed then standardised with median/MAD across all
+identity-phase rows. The phase axis is preserved for downstream grouping.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -29,8 +31,8 @@ class LevelMatrix:
     level: IdentityType
     keys: list[tuple]  # length n; one tuple per identity
     key_columns: tuple[str, ...]
-    matrix: np.ndarray  # (n, D) float32, standardised
-    feature_names: tuple[str, ...]
+    matrix: np.ndarray  # (n, phases, features) float32, standardised
+    feature_names: tuple[str, ...]  # names along the feature axis
     matchups: np.ndarray  # (n, N) float32
 
 
@@ -50,6 +52,28 @@ def _standardise_columns(values: np.ndarray) -> np.ndarray:
     return ((flat - med) / mad).astype(np.float32)
 
 
+class _MetricValues(Mapping[str, np.ndarray]):
+    def __init__(self, rows: LevelRows, row_idx: np.ndarray) -> None:
+        self._rows = rows
+        self._row_idx = row_idx
+        self._cache: dict[str, np.ndarray] = {}
+
+    def __getitem__(self, metric: str) -> np.ndarray:
+        if metric not in ALL_METRICS:
+            raise KeyError(metric)
+        if metric not in self._cache:
+            self._cache[metric] = self._rows.columns[f"smoothed_{metric}"][
+                self._row_idx
+            ].astype(np.float32)
+        return self._cache[metric]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(ALL_METRICS)
+
+    def __len__(self) -> int:
+        return len(ALL_METRICS)
+
+
 def _resolve_feature_values(
     rows: LevelRows,
     feature_set: tuple[str, ...],
@@ -60,10 +84,7 @@ def _resolve_feature_values(
     Raw entries pull from the `smoothed_<name>` columns of `rows`. Derived
     entries are computed via `DERIVED_METRIC_FUNCS` against the same values.
     """
-    metric_values: dict[str, np.ndarray] = {
-        metric: rows.columns[f"smoothed_{metric}"][sorted_row_idx].astype(np.float32)
-        for metric in ALL_METRICS
-    }
+    metric_values = _MetricValues(rows, sorted_row_idx)
 
     out: list[np.ndarray] = []
     for name in feature_set:
@@ -120,10 +141,8 @@ def build_level_matrix(
 
     raw = base_matrix.reshape(-1, base_matrix.shape[-1])
     standardised = _standardise_columns(raw).reshape(base_matrix.shape)
-    matrix = standardised.reshape(n_identities, -1).astype(np.float32)
-    feature_names = tuple(
-        f"{phase}_{name}" for phase in PHASES for name in cfg.feature_set
-    )
+    matrix = standardised.astype(np.float32)
+    feature_names = tuple(cfg.feature_set)
 
     first_rows = sorted_row_idx[::n_phases]
     keys = [tuple(rows.columns[c][i] for c in key_cols) for i in first_rows.tolist()]
@@ -151,10 +170,9 @@ def build_all_matrices(
             )
             continue
         logger.info(
-            "Matrix %s: n=%d, D=%d",
+            "Matrix %s: n=%d, phases=%d, features=%d",
             level.value,
-            lm.matrix.shape[0],
-            lm.matrix.shape[1],
+            *lm.matrix.shape,
         )
         out[level] = lm
     return out

@@ -1,145 +1,170 @@
 # Classification Tuning
 
-Goal: tune relevant specialists for ~6-14 kept groups. (The key is semantic
-meaning in the groups)
+**Goal**: tune specialists for semantic coherence and recoverable metric reads.
+As a rough scale check, expect kept groups near `1.5 * active_metrics`; do not
+promote a config only because the sweep score looks better. Inspect the groups
+and prefer stable, named behavior over threshold fragments.
+
+**CRITICAL**: Do not add experiment outcomes here, only processes during experimentation that supported generating more performant and effective groupings.
 
 ## Run Loop
 
 ```bash
-# Production: rebuild specialists end-to-end
+# Production: rebuild specialists end-to-end and write the HTML report.
 uv run python -m app.classification.embeddings.pipeline
 
-# Lean specialist sweep (writes /tmp/embed_exp/tune_specialists.txt):
-uv run python -m app.classification.embeddings.tune --lo 6 --hi 14
-# Scope to one spec:
+# Sweep one specialist.
 uv run python -m app.classification.embeddings.tune \
-    --name sustained_damage --kvs 0.80 0.85 0.90 --ts 0.65 0.70 0.75
+    --name epic_objectives --kvs 0.95 0.97 --ts 0.66 0.70 0.72 0.76
 
-# Inspect the picked sustained-damage candidate:
-uv run python -m app.classification.embeddings.inspect_sustained_damage --kv 0.85 --t 0.70
+# Inspect the picked candidate.
+uv run python -m app.classification.embeddings.inspection.base \
+    --name epic_objectives --kv 0.97 --t 0.72
 
-# Inspect the picked burst-damage candidate:
-uv run python -m app.classification.embeddings.inspect_burst_damage --kv 0.85 --t 0.60
-
-# Inspect the picked vision candidate:
-uv run python -m app.classification.embeddings.inspect_vision --kv 0.85 --t 0.68
-
-# Inspect the picked farming candidate:
-uv run python -m app.classification.embeddings.inspect_farming --kv 0.95 --t 0.88
+# Inspect a feature/threshold variant without editing config.
+uv run python -m app.classification.embeddings.inspection.base \
+    --name structure --kv 0.85 --t 0.70 \
+    --features structure_takedowns structure_losses structure_damage \
+        structure_takedowns_to_structure_damage_ratio structure_net_control \
+        structure_damage_to_goldearned_ratio structure_damage_to_deaths_ratio
 ```
 
-The HTML report under `app/classification/data/embeddings/` is a
-single-threshold inspection lens for the picked config.
+The HTML report under `app/classification/data/embeddings/` is the production
+view for the picked config. The CLI inspector is the faster debugging view:
+retained PCA axes, feature z-scores, and build/role/champion composition.
+The inspector lives at `app/classification/embeddings/inspection/base.py`.
+Use `inspection/specialist_configs.txt` to preserve or copy the tuned
+per-specialist CLI arguments.
 
-## Tuning Process
+`tune.py` reuses `/tmp/embed_exp/raw_levels.pkl`. Move or delete that cache
+after rebuilding `6010` or `9000-9040`; a stale cache can fail with missing
+columns, as happened when `truedamagetaken` was added after the cache was
+written. Adding a column to `ALL_METRICS` in `config.py` requires the source
+column to exist in `6010` (and the `9000-9040` priors) first, or load fails
+with `UNKNOWN_IDENTIFIER`; rebuild those tables from their `*_schema.sql` +
+`*_build.sql` before deleting the cache.
 
-`tune.py` reuses a pickled raw cache at `/tmp/embed_exp/raw_levels.pkl`. Delete
-it after rebuilding the `6010` or `9000-9040` tables to force a refresh.
+## Separating Overlapping Archetypes
 
-Specialist sweep output per candidate: `spec kv t | g cov lg% med`.
-`--min-median` overrides the spec's coherence floor without editing config.
+When two archetypes share one signature but should be different specialist
+reads (e.g. two groups that share `kills_to_assists` but differ on
+survivability), find the axis that actually separates them before editing a
+feature set. `inspection/discriminate.py` ranks candidate features by the
+standardized mean gap between two named champion sets:
 
-## Specialist Feature Refinement
+```bash
+uv run python -m app.classification.embeddings.inspection.discriminate \
+    --phase mid --set-a <squishy champs> --set-b <durable champs> \
+    --features <candidate1> <candidate2> ...
+```
 
-Feature candidates live in `DERIVED_METRIC_FUNCS` in `config.py`. Iterate:
+Process:
 
-1. Sweep → pick in-band config.
-2. Inspect group semantics: build/role/champion composition + feature z-scores vs global mean.
-3. Prune features that co-load across unrelated groups or dominate a PCA axis without adding a distinct specialist read.
-4. Re-sweep — removing a feature concentrates the embedding, so the threshold typically needs to increase to maintain group count.
+1. Name a clean exemplar set for each archetype (champions you are confident
+   belong to A vs B). The gap is only as good as these sets.
+2. Rank candidate features; gold-normalised ratios usually beat raw volumes
+   because they control for game stage/farm.
+3. Take the top-gap feature into `inspection.base --features ...` and confirm
+   the clustering actually splits A and B into separate coherent groups, not
+   just that the means differ. A large gap that does not survive clustering is
+   not a usable axis.
+4. If both archetypes share the same separating subspace, one specialist whose
+   clustering emits both groups is usually cleaner than two specialists that
+   re-embed the same axes.
 
-For sustained-damage inspection, use
-`uv run python -m app.classification.embeddings.inspect_sustained_damage --kv <kv> --t <threshold>`.
-It prints retained PCA axes, then each group's top build/role/champion counts
-alongside the highest-|z| features vs global mean. Success = each group's top
-z-score aligns with its champion composition.
+## Semantic Review Loop
 
-Replicate this inspection file pattern for future specialist tests: keep the
-script narrow to the specialist's default feature set, but allow feature
-overrides while experimenting with candidate axes.
+The latest `epic_objectives` / `structure` pass used a stricter review loop
+than "sweep, pick, promote":
 
-**Axis redundancy**: a raw volume feature can be useful when it contributes a
-unique direction for the specialist. If it shares a numerator with ratio
-features already in the set and only adds collinear variance, drop one side of
-the pair so PCA does not overweight duplicate information.
+1. Start with the current config and inspect every retained group with
+   `inspection.base`, including PCA axes, feature z-scores, role/build mix, and
+   top champions.
+2. Small groups are okay when their champion mix and
+   z-scores are clear; size floors are only a reporting/stability tool, not a
+   semantic filter.
+3. Compare materially different feature vocabularies:
+   - remove duplicated derived features,
+   - remove suspicious ratios,
+   - try atomic raw metrics when a ratio may be hiding multiple behaviours.
+4. For each group, ask whether the label can be recovered from the original
+   metrics. A group with weak top z-scores, overlapping champion composition,
+   or only role/build separation is a threshold slice, not a specialist
+   archetype.
+5. Prefer the simplest candidate whose groups can be explained. A sweep pick
+   with more groups or higher median cosine can be rejected if the extra groups
+   are mostly fragments.
 
-**Low-magnitude cosine trap**: features where most identities sit near zero
-(e.g. vision metrics outside support/jungle) produce a large *tightly-coherent*
-generic cluster after L2 normalisation, because near-zero vectors all point in
-similar directions. `min_median_sim` cannot distinguish "tight because semantic"
-from "tight because all-near-zero" — both look coherent. Symptoms:
-
-- PC1 explains >70% of variance (features collinear on the intensity axis).
-- The largest kept group has high median cosine *and* uniformly negative z on
-  every feature (no positive read on anything).
-- Coverage stays at 1.0 even at high `min_median_sim`, because the all-near-zero
-  cluster is structurally cohesive.
-
-Mitigations tried, in order of cost:
-
-1. Drop the most collinear feature (e.g. raw volume that duplicates a ratio's
-   numerator). Boosts PC2's share, splits the low-magnitude pool into shallower
-   sub-strata.
-2. Raise the similarity threshold (`t`) further. Splits the diffuse pool into
-   smaller fragments, but does not eliminate the dominant low-magnitude cluster.
-3. Treat the spec as a continuum (per [Promotion Rules](#promotion-rules)) and
-   accept that the largest kept group is the "no distinctive read" archetype.
-
-For `vision`, mitigation 1 was applied (drop `total_wards_placed` — PC1 share
-77.9%, PC2 17.3%) and `t` was tuned for cluster cardinality rather than
-maximally splitting the low-magnitude pool. At `t=0.68` the result is 5 groups:
-supports, junglers + roamers, off-role enchanters in MID/TOP, the Fiddlesticks
-Scarecrow-Effigy passive anomaly (per-action z=+4.5), and a 54% continuum group
-for the "no distinctive read" lane carries. Raising `t` further (e.g. `t=0.93`)
-splits the continuum into 12 groups but mostly fragments the same low-magnitude
-pool — fewer interpretable named archetypes for more cardinality.
-
-**Picking `t` for low-magnitude-trapped specs**: at low `t` (~0.68) the
-continuum collapses into one labelled group and the small high-signal
-archetypes stand alone — preferable when downstream consumers want named
-buckets. Higher `t` over-splits the continuum without surfacing new semantic
-reads.
-
-**Bimodal-ratio role traps**: ratios that approach 0 for some roles and ~1
-for others (e.g. `jungle_to_lane_minions_ratio` — ~0 for non-junglers, ~0.9
-for junglers) act as a 1-bit role indicator after standardisation. They
-dominate PC1 (95%+) and re-encode information the role/build identity already
-provides, so the spec collapses to "role X vs not-X". Mitigation: replace the
-ratio with the two atomic volumes it was hiding (e.g. `totalminionskilled`,
-`neutralminionskilled`). Each role then lives at its own (lane, jungle)
-coordinate and PCA spreads variance across two orthogonal axes
-(`farming`: PC1=53%, PC2=45%) instead of collapsing to one. Trade: more raw
-features, but the embedding finds within-role splits (AP lane farmers vs
-crit/AD lane carries) that the ratio version could not.
-
-**Shared-numerator collapse**: when multiple ratios share a numerator (e.g.
-`total_farm`, `total_farm_to_gold_ratio`, `total_farm_to_deaths_ratio` all
-have `totalminionskilled + neutralminionskilled` on top), they reduce to a
-single "intensity" axis (PC1≈97%) regardless of how distinct the denominators
-seem semantically. Drop the raw volume if a ratio captures it; keep at most
-two of the ratios when the denominators truly span different signals
-(gold vs deaths).
-
-**Don't split on an axis the identity key already encodes**: `farming` at high
-`t` (0.94+) splits the lane mega-cluster into "AP lane farmers" vs "crit/AD
-lane carries" — a clean visible split, but build is already part of the
-identity key, so this contributes nothing the consumer doesn't already get
-from `(championid, teamposition, build)`. The promoted config uses `t=0.88`
-(8 groups, largest 47%); the lane mega-cluster has its own positive read
-("farms hard, build-agnostic") and the remaining 7 groups surface
-*off-axis* archetypes the identity key can't infer: off-role lane hybrids,
-carry junglers playing lane, jungle champs picked as support, and aggressive
-solo-lane carries. Rule of thumb: before raising `t` to split a mega-
-cluster, check what dimension the split is on. If it's role or build, the
-identity key already has it and you're just fragmenting.
+During the review, a small scratch scorer counted groups with a meaningful
+top feature z-score, but it was only a triage aid. Manual champion validation
+remains the promotion gate.
 
 ## Promotion Rules
 
-Specialist promotion requires:
+- Kept groups should land near `1.5 * active_metrics` unless the specialist is
+  intentionally sparse or has a clear continuum/no-read pool.
+- Median within-group cosine should clear the specialist floor, usually
+  `>= 0.85`; higher medians are not meaningful by themselves.
+- Top z-scores should explain the group composition in domain terms.
+- Prefer fewer, larger interpretable groups over many tiny threshold splits.
+- If a largest group has uniformly negative z-scores, treat it as a continuum
+  or "no distinctive read" pool instead of a positive archetype.
+- There is no size floor; small coherent groups are valid specialist reads.
+  Tune group count with features and `t`, not by dropping small groups.
+- Do not accept `tune.py`'s first-ranked row automatically. It sorts by generic
+  shape metrics; the final choice can use a lower threshold if the higher
+  threshold mostly creates extra fragments.
 
-- Kept groups in 6-14.
-- Cluster-shape specs: coverage `>= 0.85`, median within-group cosine
-  `>= 0.97`, largest non-absence group `<= ~25%`.
-- Continuum specs: median within-group cosine `>= 0.85`; coverage may drop,
-  `-1` is a meaningful "no distinctive read" signal.
-- Top groups read coherently against domain knowledge.
+## General Heuristics
+
+**Axis redundancy**: features that share a numerator often overweight one
+intensity axis. A duplicate can still be useful if it improves separation, but
+verify that PCA retains another interpretable direction.
+
+**Low-magnitude cosine trap**: near-zero identities can form a tight, coherent
+cluster after L2 normalisation. Symptoms are PC1 dominance, full coverage, and
+a largest group with negative z-scores on every feature. Raising `t` can split
+the pool, but only promote the split if it exposes a new semantic read.
+
+**Bimodal role traps**: ratios that are near 0 for most roles and near 1 for
+one role often re-encode `teamposition`. Prefer atomic volumes when the ratio
+collapses the specialist into "role X vs not-X".
+
+**Identity-key leakage**: do not split a group only by role or build when those
+fields are already in `(championid, teamposition, build)`. A specialist should
+add behavior not already recoverable from the key.
+
+**PCA plateaus**: `kv` lives on plateaus defined by the cumulative-variance
+curve. Values inside one step give identical clustering; only crossing into the
+next axis changes anything, and crossing usually over-fragments. If a step is
+tight (e.g. 0.876 → 0.913 at a 3→4 axis boundary), there is no useful middle
+ground to sweep.
+
+**`min_median_sim` is not a weak-archetype filter**: median within-group cosine
+and top-feature z-score strength are not correlated. A tight low-magnitude
+continuum can sit at `med=0.93` while a coherent but weakly-differentiated
+archetype sits at `med=0.86`. To drop a weak-z group, change features or `t`,
+not `min_median_sim`.
+
+**Algebraic features can still be axes**: a feature that is a linear
+combination of others (e.g. `net_control = takedowns - losses`) can still
+become an independent embedding direction after L2 normalisation. Before
+removing one as "redundant", check whether removal merges previously-distinct
+champion archetypes — not just whether PCA still retains the same number of
+axes.
+
+**Sparse zero-inflated metrics need scale control before they can join a
+specialist**: raw `lifesteal`/`omnivamp`/`spellvamp`/`physicalvamp` are mostly
+zero. After signed-log1p + median/MAD standardisation, a column whose median is
+0 gets `MAD -> 1.0` (the fallback), so its variance is set by the non-zero tail
+rather than normalised to unit scale. Always print per-column standardised
+variance before adding such a feature: in the vamp case `spellvamp` came out at
+`var=6e8` (a smoothing/MAD artifact) and `physicalvamp` at `var=0` (always
+zero), while `lifesteal`/`omnivamp` were a usable `~2.5`. The fix is to combine
+the related sparse metrics into **one** feature and standardise the combined
+column once — summing all four vamp sources on *raw* values yields `vamp_sustain`
+at `var≈1.15` (unit scale), because the tiny spellvamp/physicalvamp contributions
+ride on the larger lifesteal/omnivamp mass instead of each blowing up alone. Rule:
+combine before standardising; never standardise a sparse zero-inflated column on
+its own, and do not assume a "broken" raw column must be dropped — inside a sum it
+is harmless.

@@ -6,11 +6,14 @@
 -- raw participant count for the phase selected by
 -- participant_scaling_weights.max_value_bin.
 --
--- Two aggregate formulas used:
+-- Three aggregate formulas used:
 --   * sum(x) / count()                         — rates ([0,1] booleans)
 --                                                and per-game maxima
 --                                                (largest*)
 --   * 60 * sum(x) / sum(timeplayed)            — per-minute volume metrics
+--   * avg(argMax(timeline_x, frame_timestamp)) — final timeline snapshots
+--                                                reduced to one row per
+--                                                participant first
 --
 -- Columns removed for >95% zero rate in source data:
 --   quadrakills (98.81%), pentakills (99.82%), unrealkills (99.9999%),
@@ -84,6 +87,19 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.synergy_1vx_temporal
     totalheal Float32,
     totalhealsonteammates Float32,
     totaldamageshieldedonteammates Float32,
+
+    -- final timeline snapshots (per-game averages)
+    healthmax Float32,
+    lifesteal Float32,
+    movementspeed Float32,
+    omnivamp Float32,
+    physicalvamp Float32,
+    spellvamp Float32,
+    armor Float32,
+    magicresist Float32,
+    abilitypower Float32,
+    attackdamage Float32,
+    attackspeed Float32,
 
     -- crowd control (per-minute)
     timeccingothers Float32,
