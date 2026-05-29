@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import squareform
 
 from app.classification.embeddings import embed
 from app.classification.embeddings.config import (
@@ -30,7 +32,6 @@ from app.classification.embeddings.load import LevelRows, load_all
 from app.classification.embeddings.matrices import build_all_matrices
 from app.classification.embeddings.posteriors import apply_hierarchical_shrinkage
 from app.classification.embeddings.similarity import median_pair_similarity
-from app.classification.embeddings.specialists import group_specialist_by_phase
 from app.core.logging.logger import setup_logging_config
 
 OUTPUT_DIR = Path("/tmp/embed_exp")
@@ -68,6 +69,69 @@ class SpecRow:
         )
 
 
+@dataclass(frozen=True)
+class _PhaseSweepContext:
+    sim: np.ndarray
+    linkage_matrix: np.ndarray | None
+    n: int
+
+
+def _sort_groups(groups: list[list[int]]) -> list[list[int]]:
+    return sorted(
+        (sorted(group) for group in groups),
+        key=lambda group: (-len(group), group[0]),
+    )
+
+
+def _phase_sweep_context(phase_embeddings: np.ndarray) -> _PhaseSweepContext:
+    sim = phase_embeddings @ phase_embeddings.T
+    if phase_embeddings.shape[0] < 2:
+        return _PhaseSweepContext(
+            sim=sim,
+            linkage_matrix=None,
+            n=phase_embeddings.shape[0],
+        )
+    distance = 1.0 - sim
+    distance = np.clip(distance, 0.0, 2.0)
+    np.fill_diagonal(distance, 0.0)
+    return _PhaseSweepContext(
+        sim=sim,
+        linkage_matrix=linkage(squareform(distance, checks=False), method="average"),
+        n=phase_embeddings.shape[0],
+    )
+
+
+def _groups_for_threshold(
+    context: _PhaseSweepContext,
+    threshold: float,
+) -> list[list[int]]:
+    if context.linkage_matrix is None or threshold > 1.0:
+        return [[i] for i in range(context.n)]
+    clusters = fcluster(
+        context.linkage_matrix,
+        t=1.0 - threshold,
+        criterion="distance",
+    )
+    groups = [
+        np.flatnonzero(clusters == cluster).astype(int).tolist()
+        for cluster in np.unique(clusters)
+    ]
+    return _sort_groups(groups)
+
+
+def _split_by_coherence(
+    sim: np.ndarray,
+    groups: list[list[int]],
+    min_median_sim: float,
+) -> tuple[list[list[int]], list[list[int]]]:
+    kept: list[list[int]] = []
+    dropped: list[list[int]] = []
+    for group in groups:
+        median = median_pair_similarity(sim, group)
+        (kept if median >= min_median_sim else dropped).append(group)
+    return kept, dropped
+
+
 def sweep_specialist(
     spec: SpecialistSpec,
     smoothed_default: dict[IdentityType, LevelRows],
@@ -88,24 +152,28 @@ def sweep_specialist(
             baseline_matrix,
             EmbeddingConfig(feature_set=spec.feature_set, projection_keep_variance=kv),
         )
+        contexts = tuple(
+            _phase_sweep_context(baseline.embeddings[:, phase_index, :])
+            for phase_index in range(baseline.embeddings.shape[1])
+        )
         for t in ts:
-            candidate = SpecialistSpec(
-                name=spec.name,
-                feature_set=spec.feature_set,
-                similarity_threshold=t,
-                projection_keep_variance=kv,
-                min_median_sim=floor,
+            kept_by_phase = tuple(
+                _split_by_coherence(
+                    context.sim,
+                    _groups_for_threshold(context, t),
+                    floor,
+                )[0]
+                for context in contexts
             )
-            groupings = group_specialist_by_phase(baseline, candidate)
-            phase_counts = tuple(len(grouping.kept) for grouping in groupings)
-            sizes = [len(g) for grouping in groupings for g in grouping.kept]
+            phase_counts = tuple(len(kept) for kept in kept_by_phase)
+            sizes = [len(group) for kept in kept_by_phase for group in kept]
             medians = [
-                median_pair_similarity(grouping.sim, group)
-                for grouping in groupings
-                for group in grouping.kept
+                median_pair_similarity(context.sim, group)
+                for context, kept in zip(contexts, kept_by_phase, strict=True)
+                for group in kept
             ]
             n = baseline.embeddings.shape[0]
-            total_slots = n * len(groupings)
+            total_slots = n * len(contexts)
             largest = max(sizes, default=0)
             rows.append(
                 SpecRow(

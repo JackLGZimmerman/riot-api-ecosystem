@@ -215,10 +215,20 @@ def _safe_divide(num: np.ndarray, denom: np.ndarray) -> np.ndarray:
     return out.astype(np.float32)
 
 
-# Full derived-metric catalogue. Each callable takes a metric-name ->
-# ndarray dict and returns one ndarray. The catalogue is preserved as a research
-# menu — future specialists pick from here without recomputing source columns.
 DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]] = {
+    # Early pressure
+    "first_blood_participation": lambda d: (
+        d["firstbloodkill"] + d["firstbloodassist"]
+    ).astype(np.float32),
+    "first_tower_participation": lambda d: (
+        d["firsttowerkill"] + d["firsttowerassist"]
+    ).astype(np.float32),
+    "early_snowball_participation": lambda d: (
+        d["firstbloodkill"]
+        + d["firstbloodassist"]
+        + d["firsttowerkill"]
+        + d["firsttowerassist"]
+    ).astype(np.float32),
     # Durability
     "durability_total": lambda d: (
         d["damageselfmitigated"]
@@ -240,10 +250,7 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         + (d["totalheal"] - d["totalhealsonteammates"])
         + d["totaldamagetaken"],
     ),
-    # Combat sustain stat investment across all vamp sources. Summed on raw
-    # values then standardised as one column, so the per-column variance
-    # artifacts of the sparse individual stats (spellvamp tiny-MAD blow-up,
-    # physicalvamp all-zero) do not dominate.
+    # Durability
     "vamp_sustain": lambda d: (
         d["lifesteal"] + d["omnivamp"] + d["spellvamp"] + d["physicalvamp"]
     ).astype(np.float32),
@@ -285,10 +292,51 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         + d["totaldamagetaken"],
         d["goldearned"],
     ),
+    "damage_taken_to_goldearned_ratio": lambda d: _safe_divide(
+        d["totaldamagetaken"],
+        d["goldearned"],
+    ),
+    "totaldamagetaken_to_deaths_ratio": lambda d: _safe_divide(
+        d["totaldamagetaken"],
+        d["deaths"],
+    ),
+    "self_heal_to_goldearned_ratio": lambda d: _safe_divide(
+        np.maximum(d["totalheal"] - d["totalhealsonteammates"], 0.0),
+        d["goldearned"],
+    ),
+    "self_heal_to_deaths_ratio": lambda d: _safe_divide(
+        np.maximum(d["totalheal"] - d["totalhealsonteammates"], 0.0),
+        d["deaths"],
+    ),
+    "totalheal_to_goldearned_ratio": lambda d: _safe_divide(
+        d["totalheal"],
+        d["goldearned"],
+    ),
+    # Resistances
+    "armor_to_goldearned_ratio": lambda d: _safe_divide(
+        d["armor"],
+        d["goldearned"],
+    ),
+    "magicresist_to_goldearned_ratio": lambda d: _safe_divide(
+        d["magicresist"],
+        d["goldearned"],
+    ),
     # Sustained Damage
     "physicaldamagedealttochampions_share": lambda d: _safe_divide(
         d["physicaldamagedealttochampions"],
         d["totaldamagedealttochampions"],
+    ),
+    "magicdamagedealttochampions_share": lambda d: _safe_divide(
+        d["magicdamagedealttochampions"],
+        d["totaldamagedealttochampions"],
+    ),
+    "truedamagedealttochampions_share": lambda d: _safe_divide(
+        d["truedamagedealttochampions"],
+        d["totaldamagedealttochampions"],
+    ),
+    "champion_damage_to_total_damage_ratio": lambda d: _safe_divide(
+        d["totaldamagedealttochampions"],
+        d["totaldamagedealt"],
     ),
     "champion_damage_share_to_deaths_ratio": lambda d: _safe_divide(
         _safe_divide(
@@ -301,7 +349,46 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         d["totaldamagedealttochampions"],
         d["goldearned"],
     ),
+    "totaldamagedealttochampions_to_deaths_ratio": lambda d: _safe_divide(
+        d["totaldamagedealttochampions"],
+        d["deaths"],
+    ),
+    "physicaldamagedealt_share": lambda d: _safe_divide(
+        d["physicaldamagedealt"],
+        d["totaldamagedealt"],
+    ),
+    "magicdamagedealt_share": lambda d: _safe_divide(
+        d["magicdamagedealt"],
+        d["totaldamagedealt"],
+    ),
+    "truedamagedealt_share": lambda d: _safe_divide(
+        d["truedamagedealt"],
+        d["totaldamagedealt"],
+    ),
+    # Ability Power
+    "abilitypower_to_goldearned_ratio": lambda d: _safe_divide(
+        d["abilitypower"],
+        d["goldearned"],
+    ),
+    # Attack Damage
+    "attackdamage_to_goldearned_ratio": lambda d: _safe_divide(
+        d["attackdamage"],
+        d["goldearned"],
+    ),
     # Burst Damage
+    "takedowns": lambda d: (d["kills"] + d["assists"]).astype(np.float32),
+    "kills_to_deaths_ratio": lambda d: _safe_divide(
+        d["kills"],
+        d["deaths"],
+    ),
+    "assists_to_deaths_ratio": lambda d: _safe_divide(
+        d["assists"],
+        d["deaths"],
+    ),
+    "takedowns_to_deaths_ratio": lambda d: _safe_divide(
+        d["kills"] + d["assists"],
+        d["deaths"],
+    ),
     "kills_to_assists_ratio": lambda d: _safe_divide(
         d["kills"],
         d["assists"],
@@ -327,6 +414,15 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         d["detectorwardsplaced"] + d["wardsplaced"],
     ),
     # Farming
+    "jungle_minions": lambda d: (
+        d["totalallyjungleminionskilled"] + d["totalenemyjungleminionskilled"]
+    ).astype(np.float32),
+    "jungle_minion_share": lambda d: _safe_divide(
+        d["totalallyjungleminionskilled"] + d["totalenemyjungleminionskilled"],
+        d["totalallyjungleminionskilled"]
+        + d["totalenemyjungleminionskilled"]
+        + d["totalminionskilled"],
+    ),
     "jungle_minions_to_lane_minions_ratio": lambda d: _safe_divide(
         d["totalallyjungleminionskilled"] + d["totalenemyjungleminionskilled"],
         d["totalminionskilled"],
@@ -340,6 +436,10 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         d["totalenemyjungleminionskilled"],
         d["totalallyjungleminionskilled"],
     ),
+    "enemy_jungle_minion_share": lambda d: _safe_divide(
+        d["totalenemyjungleminionskilled"],
+        d["totalallyjungleminionskilled"] + d["totalenemyjungleminionskilled"],
+    ),
     "total_farm_to_goldearned_ratio": lambda d: _safe_divide(
         d["totalallyjungleminionskilled"]
         + d["totalenemyjungleminionskilled"]
@@ -351,6 +451,10 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         + d["totalenemyjungleminionskilled"]
         + d["totalminionskilled"],
         d["deaths"],
+    ),
+    "champexperience_to_goldearned_ratio": lambda d: _safe_divide(
+        d["champexperience"],
+        d["goldearned"],
     ),
     # Structures
     "structure_takedowns": lambda d: (
@@ -392,6 +496,13 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         + d["inhibitortakedowns"],
         d["deaths"],
     ),
+    "structure_takedowns_to_losses_ratio": lambda d: _safe_divide(
+        d["turretkills"]
+        + d["turrettakedowns"]
+        + d["inhibitorkills"]
+        + d["inhibitortakedowns"],
+        np.maximum(d["turretslost"] + d["inhibitorslost"], 1.0),
+    ),
     "structure_net_control": lambda d: (
         d["turretkills"]
         + d["turrettakedowns"]
@@ -399,6 +510,15 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         + d["inhibitortakedowns"]
         - d["turretslost"]
         - d["inhibitorslost"]
+    ),
+    # Crowd Control
+    "cc_effectiveness_ratio": lambda d: _safe_divide(
+        d["timeccingothers"],
+        np.maximum(d["totaltimeccdealt"], 1.0),
+    ),
+    "cc_to_assists_ratio": lambda d: _safe_divide(
+        d["timeccingothers"],
+        d["assists"],
     ),
     # Epic Objectives
     "epic_kills": lambda d: d["baronkills"] + d["dragonkills"],
@@ -412,6 +532,14 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         d["damagedealttoobjectives"],
         d["goldearned"],
     ),
+    "objective_damage_to_total_damage_ratio": lambda d: _safe_divide(
+        d["damagedealttoobjectives"],
+        d["totaldamagedealt"],
+    ),
+    "epic_monster_damage_to_objective_damage_ratio": lambda d: _safe_divide(
+        d["damagedealttoepicmonsters"],
+        d["damagedealttoobjectives"],
+    ),
     "epic_kills_to_goldearned_ratio": lambda d: _safe_divide(
         d["baronkills"] + d["dragonkills"],
         d["goldearned"],
@@ -422,6 +550,38 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
             d["baronkills"] + d["dragonkills"],
         ),
         d["goldearned"],
+    ),
+    # Enchanter
+    "ally_support": lambda d: (
+        d["totalhealsonteammates"] + d["totaldamageshieldedonteammates"]
+    ).astype(np.float32),
+    "totalhealsonteammates_to_goldearned_ratio": lambda d: _safe_divide(
+        d["totalhealsonteammates"],
+        d["goldearned"],
+    ),
+    "totaldamageshieldedonteammates_to_goldearned_ratio": lambda d: _safe_divide(
+        d["totaldamageshieldedonteammates"],
+        d["goldearned"],
+    ),
+    "ally_support_to_goldearned_ratio": lambda d: _safe_divide(
+        d["totalhealsonteammates"] + d["totaldamageshieldedonteammates"],
+        d["goldearned"],
+    ),
+    "ally_support_to_assists_ratio": lambda d: _safe_divide(
+        d["totalhealsonteammates"] + d["totaldamageshieldedonteammates"],
+        d["assists"],
+    ),
+    "totalhealsonteammates_to_deaths_ratio": lambda d: _safe_divide(
+        d["totalhealsonteammates"],
+        d["deaths"],
+    ),
+    "totaldamageshieldedonteammates_to_deaths_ratio": lambda d: _safe_divide(
+        d["totaldamageshieldedonteammates"],
+        d["deaths"],
+    ),
+    "ally_support_to_deaths_ratio": lambda d: _safe_divide(
+        d["totalhealsonteammates"] + d["totaldamageshieldedonteammates"],
+        d["deaths"],
     ),
 }
 
@@ -445,6 +605,7 @@ class EmbeddingConfig:
 
 
 SPECIALIST_CACHE_DIR = EMBEDDINGS_CACHE_DIR / "specialists"
+SINGULAR_METRIC_CACHE_DIR = EMBEDDINGS_CACHE_DIR / "singular_metrics"
 
 
 @dataclass(frozen=True)
@@ -463,17 +624,35 @@ class SpecialistSpec:
     min_median_sim: float = 0.95
 
 
-# Active specialist registry. Previously registered names
-# (kept for reference): temporal team_utility, engage, vampires, burst_damage,
-# skirmishers. `burst_damage` + the empty `skirmishers` slot were merged into
-# `burst_skirmish`: the two archetypes share the kills-to-assists signature and
-# separate only on a survivability axis, so one embedding emits both groups.
-# `vampires` was folded into `durability` as the `vamp_sustain` feature
-# (lifesteal+omnivamp+spellvamp+physicalvamp). The individual stats are too
-# sparse to cluster alone (spellvamp standardises to a degenerate variance,
-# physicalvamp is always zero), but summing on raw values first standardises
-# cleanly into one unit-scale self-sustain axis.
+@dataclass(frozen=True)
+class SingularMetricSpec:
+    """One-dimensional phase-relative ordering.
+
+    These are intentionally not clustered. They produce continuous rank-like
+    features for metrics whose meaning is mainly "higher/lower than peers"
+    rather than "member of this semantic group".
+    """
+
+    name: str
+    feature: str
+    higher_is_more: bool = True
+    description: str = ""
+
+
 SPECIALISTS: tuple[SpecialistSpec, ...] = (
+    SpecialistSpec(
+        name="early_agency",
+        feature_set=(
+            "first_blood_participation",
+            "first_tower_participation",
+            "early_snowball_participation",
+            "kills_to_deaths_ratio",
+            "assists_to_deaths_ratio",
+        ),
+        similarity_threshold=0.78,
+        projection_keep_variance=0.70,
+        min_median_sim=0.85,
+    ),
     SpecialistSpec(
         name="durability",
         feature_set=(
@@ -487,42 +666,90 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "vamp_sustain",
             "durability_total_to_healthmax_ratio",
         ),
-        similarity_threshold=0.70,
-        projection_keep_variance=0.85,
+        similarity_threshold=0.80,
+        projection_keep_variance=0.60,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="self_sustain",
+        feature_set=(
+            "self_heal_to_durability_total_ratio",
+            "self_heal_to_goldearned_ratio",
+            "self_heal_to_deaths_ratio",
+            "totalheal_to_goldearned_ratio",
+            "vamp_sustain",
+        ),
+        similarity_threshold=0.72,
+        projection_keep_variance=0.90,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="damage_profile",
+        feature_set=(
+            "physicaldamagedealttochampions_share",
+            "magicdamagedealttochampions_share",
+            "truedamagedealttochampions_share",
+            "physicaldamagedealt_share",
+            "magicdamagedealt_share",
+            "truedamagedealt_share",
+        ),
+        similarity_threshold=0.78,
+        projection_keep_variance=0.70,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
         name="sustained_damage",
         feature_set=(
             "physicaldamagedealttochampions_share",
+            "magicdamagedealttochampions_share",
+            "champion_damage_to_total_damage_ratio",
             "champion_damage_share_to_deaths_ratio",
             "totaldamagedealttochampions_to_goldearned_ratio",
         ),
-        similarity_threshold=0.70,
-        projection_keep_variance=0.85,
+        similarity_threshold=0.30,
+        projection_keep_variance=0.75,
         min_median_sim=0.85,
     ),
-    # Solo-kill carries resolved on three independent axes, one per feature:
-    #   * kills_to_assists          -> solo-kill reliance (vs team/assist play)
-    #   * damageselfmitigated/gold  -> survivability (squishy vs durable)
-    #   * attackspeed               -> sustained autos vs ability burst
-    # Clustering emits the three target archetypes as distinct groups:
-    #   assassin   = high kills, low mitigation, LOW attackspeed (ability burst)
-    #   marksman   = high kills, low mitigation, HIGH attackspeed (auto DPS)
-    #   skirmisher = high kills, POSITIVE mitigation, high attackspeed (durable)
-    # attackspeed (not largestcriticalstrike) is the assassin/marksman split:
-    # crit conflates AP assassins and crit fighters, while attackspeed cleanly
-    # marks auto-attackers. The third axis raises the group count, which is the
-    # intended cost of resolving assassin vs marksman vs skirmisher.
+    SpecialistSpec(
+        name="damage_efficiency",
+        feature_set=(
+            "champion_damage_to_total_damage_ratio",
+            "totaldamagedealttochampions_to_goldearned_ratio",
+            "totaldamagedealttochampions_to_deaths_ratio",
+            "kills_to_deaths_ratio",
+            "takedowns_to_deaths_ratio",
+        ),
+        similarity_threshold=0.78,
+        projection_keep_variance=0.70,
+        min_median_sim=0.85,
+    ),
     SpecialistSpec(
         name="burst_skirmish",
         feature_set=(
             "kills_to_assists_ratio",
+            "kills_to_deaths_ratio",
+            "takedowns_to_deaths_ratio",
+            "largestkillingspree",
+            "largestmultikill",
             "damageselfmitigated_to_goldearned_ratio",
             "attackspeed",
         ),
-        similarity_threshold=0.72,
-        projection_keep_variance=0.95,
+        similarity_threshold=0.78,
+        projection_keep_variance=0.70,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="takedown_shape",
+        feature_set=(
+            "takedowns",
+            "kills_to_assists_ratio",
+            "kills_to_deaths_ratio",
+            "assists_to_deaths_ratio",
+            "takedowns_to_deaths_ratio",
+            "killingsprees",
+        ),
+        similarity_threshold=0.74,
+        projection_keep_variance=0.92,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
@@ -532,8 +759,21 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "visionscore_to_ward_actions_ratio",
             "wardskilled_to_wardsplaced_ratio",
         ),
-        similarity_threshold=0.68,
+        similarity_threshold=0.45,
         projection_keep_variance=0.85,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="utility_pickmaking",
+        feature_set=(
+            "assists_to_deaths_ratio",
+            "cc_to_assists_ratio",
+            "timeccingothers",
+            "visionscore_to_goldearned_ratio",
+            "ally_support_to_assists_ratio",
+        ),
+        similarity_threshold=0.72,
+        projection_keep_variance=0.90,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
@@ -545,8 +785,36 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "total_farm_to_deaths_ratio",
             # Would like invade specific markers
         ),
-        similarity_threshold=0.88,
+        similarity_threshold=0.68,
         projection_keep_variance=0.95,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="economy_scaling",
+        feature_set=(
+            "goldearned",
+            "champexperience",
+            "champexperience_to_goldearned_ratio",
+            "total_farm_to_goldearned_ratio",
+            "totaldamagedealttochampions_to_goldearned_ratio",
+            "durability_total_to_goldearned_ratio",
+        ),
+        similarity_threshold=0.78,
+        projection_keep_variance=0.70,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="jungle_control",
+        feature_set=(
+            "neutralminionskilled",
+            "jungle_minions",
+            "jungle_minion_share",
+            "enemy_jungle_minion_share",
+            "enemy_to_ally_jungle_minions_ratio",
+            "total_farm_to_goldearned_ratio",
+        ),
+        similarity_threshold=0.76,
+        projection_keep_variance=0.92,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
@@ -555,10 +823,12 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "epic_kills",
             "objective_neutral_minions",
             "objective_damage_to_goldearned_ratio",
+            "objective_damage_to_total_damage_ratio",
+            "epic_monster_damage_to_objective_damage_ratio",
             "damagedealttoobjectives_per_epic_kill_per_gold",
         ),
-        similarity_threshold=0.72,
-        projection_keep_variance=0.97,
+        similarity_threshold=0.20,
+        projection_keep_variance=0.95,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
@@ -571,9 +841,38 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "structure_net_control",
             "structure_damage_to_goldearned_ratio",
             "structure_damage_to_deaths_ratio",
+            "structure_takedowns_to_losses_ratio",
         ),
-        similarity_threshold=0.70,
-        projection_keep_variance=0.85,
+        similarity_threshold=0.74,
+        projection_keep_variance=0.82,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="siege_pressure",
+        feature_set=(
+            "first_tower_participation",
+            "structure_damage",
+            "structure_takedowns",
+            "structure_takedowns_to_structure_damage_ratio",
+            "structure_damage_to_goldearned_ratio",
+            "structure_takedowns_to_goldearned_ratio",
+        ),
+        similarity_threshold=0.72,
+        projection_keep_variance=0.90,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="map_control",
+        feature_set=(
+            "visionscore_to_goldearned_ratio",
+            "structure_net_control",
+            "structure_takedowns_to_goldearned_ratio",
+            "objective_damage_to_goldearned_ratio",
+            "epic_kills_to_goldearned_ratio",
+            "enemy_jungle_minion_share",
+        ),
+        similarity_threshold=0.72,
+        projection_keep_variance=0.90,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
@@ -581,26 +880,120 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
         feature_set=(
             "timeccingothers",
             "totaltimeccdealt",
+            "cc_effectiveness_ratio",
+            "cc_to_assists_ratio",
         ),
-        similarity_threshold=0.70,
+        similarity_threshold=0.68,
         projection_keep_variance=0.85,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
         name="enchanters",
         feature_set=(
-            "totalhealsonteammates",
-            "totaldamageshieldedonteammates",
+            "totalhealsonteammates_to_goldearned_ratio",
+            "totaldamageshieldedonteammates_to_goldearned_ratio",
+            "ally_support_to_goldearned_ratio",
         ),
         similarity_threshold=0.70,
-        projection_keep_variance=0.85,
+        projection_keep_variance=0.82,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
-        name="movement_speed",
-        feature_set=("movementspeed",),
-        similarity_threshold=0.70,
-        projection_keep_variance=1.00,
+        name="resistances",
+        feature_set=(
+            "armor",
+            "magicresist",
+            "armor_to_goldearned_ratio",
+            "magicresist_to_goldearned_ratio",
+        ),
+        similarity_threshold=0.60,
+        projection_keep_variance=0.90,
         min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="defensive_statline",
+        feature_set=(
+            "healthmax",
+            "armor",
+            "magicresist",
+            "damage_taken_to_goldearned_ratio",
+            "totaldamagetaken_to_deaths_ratio",
+            "durability_total_to_healthmax_ratio",
+        ),
+        similarity_threshold=0.74,
+        projection_keep_variance=0.75,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="ability_power",
+        feature_set=(
+            "abilitypower",
+            "abilitypower_to_goldearned_ratio",
+            "magicdamagedealttochampions_share",
+            "totaldamagedealttochampions_to_goldearned_ratio",
+        ),
+        similarity_threshold=0.78,
+        projection_keep_variance=0.95,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="attack_damage",
+        feature_set=(
+            "attackdamage",
+            "attackdamage_to_goldearned_ratio",
+            "physicaldamagedealttochampions_share",
+            "largestcriticalstrike",
+        ),
+        similarity_threshold=0.45,
+        projection_keep_variance=0.89,
+        min_median_sim=0.85,
+    ),
+    SpecialistSpec(
+        name="on_hit_carry",
+        feature_set=(
+            "attackdamage",
+            "attackspeed",
+            "largestcriticalstrike",
+            "physicaldamagedealttochampions_share",
+            "totaldamagedealttochampions_to_goldearned_ratio",
+        ),
+        similarity_threshold=0.78,
+        projection_keep_variance=0.70,
+        min_median_sim=0.85,
+    ),
+)
+
+
+SINGULAR_METRICS: tuple[SingularMetricSpec, ...] = (
+    SingularMetricSpec(
+        name="movement_speed",
+        feature="movementspeed",
+        description="Phase-relative mobility ordering.",
+    ),
+    SingularMetricSpec(
+        name="attack_speed",
+        feature="attackspeed",
+        description="Phase-relative basic-attack cadence ordering.",
+    ),
+    SingularMetricSpec(
+        name="critical_strike_ceiling",
+        feature="largestcriticalstrike",
+        description="Highest observed critical strike magnitude.",
+    ),
+    SingularMetricSpec(
+        name="spree_ceiling",
+        feature="largestkillingspree",
+        description="Phase-relative snowball ceiling from killing sprees.",
+    ),
+    SingularMetricSpec(
+        name="multikill_ceiling",
+        feature="largestmultikill",
+        description="Phase-relative multi-kill ceiling.",
+    ),
+    SingularMetricSpec(
+        name="low_death_rate",
+        feature="deaths",
+        higher_is_more=False,
+        description="Lower death rate ordered as the stronger signal.",
     ),
 )

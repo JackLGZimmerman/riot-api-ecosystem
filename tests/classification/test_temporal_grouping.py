@@ -8,11 +8,18 @@ from app.classification.embeddings.config import (
     PHASES,
     EmbeddingConfig,
     IdentityType,
+    SingularMetricSpec,
     SpecialistSpec,
 )
 from app.classification.embeddings.embed import LevelEmbeddings
+from app.classification.embeddings.inspection.base import (
+    _correlation,
+    _jaccard,
+    _top_bottom_indices,
+)
 from app.classification.embeddings.load import LevelRows
 from app.classification.embeddings.matrices import LevelMatrix, build_level_matrix
+from app.classification.embeddings.singular_metrics import run_singular_metric
 from app.classification.embeddings.specialists import group_specialist_by_phase
 
 
@@ -117,3 +124,63 @@ def test_group_specialist_by_phase_clusters_each_phase_independently() -> None:
         frozenset({0, 2}),
         frozenset({1, 3}),
     }
+
+
+def test_replacement_metric_jaccard_uses_top_and_bottom_sets() -> None:
+    values = np.array([1.0, 5.0, 3.0, 2.0, 4.0], dtype=np.float32)
+
+    top, bottom = _top_bottom_indices(values, 2)
+
+    assert top == {1, 4}
+    assert bottom == {0, 3}
+    assert _jaccard({1, 4}, {1, 2}) == 1 / 3
+
+
+def test_replacement_metric_correlation_supports_spearman() -> None:
+    left = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    right = np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32)
+    reversed_right = right[::-1]
+
+    assert np.isclose(_correlation(left, right, spearman=False), 1.0)
+    assert np.isclose(_correlation(left, right, spearman=True), 1.0)
+    assert np.isclose(_correlation(left, reversed_right, spearman=True), -1.0)
+
+
+def test_singular_metric_outputs_phase_relative_orderings(tmp_path) -> None:
+    values = np.array(
+        [
+            [[1.0], [5.0], [10.0], [2.0]],
+            [[2.0], [5.0], [10.0], [1.0]],
+            [[3.0], [5.0], [8.0], [0.0]],
+        ],
+        dtype=np.float32,
+    )
+    matrix = LevelMatrix(
+        level=IdentityType.BASELINE,
+        keys=[(i, "TOP", "attack_damage") for i in range(3)],
+        key_columns=("championid", "teamposition", "build"),
+        matrix=values,
+        feature_names=("speed",),
+        matchups=np.ones((3, len(PHASES)), dtype=np.float32),
+    )
+
+    run_singular_metric(
+        SingularMetricSpec(name="toy_speed", feature="speed"),
+        matrix,
+        {"speed": 0},
+        output_dir=tmp_path,
+    )
+    run_singular_metric(
+        SingularMetricSpec(name="toy_low", feature="speed", higher_is_more=False),
+        matrix,
+        {"speed": 0},
+        output_dir=tmp_path,
+    )
+
+    with np.load(tmp_path / "toy_speed.npz", allow_pickle=True) as data:
+        assert np.allclose(data["scores"][:, 0], [-1.0, 0.0, 1.0])
+        assert np.allclose(data["scores"][:, 1], [0.0, 0.0, 0.0])
+        assert np.allclose(data["ranks"][:, 2], [1.5, 1.5, 3.0])
+
+    with np.load(tmp_path / "toy_low.npz", allow_pickle=True) as data:
+        assert np.allclose(data["scores"][:, 0], [1.0, 0.0, -1.0])
