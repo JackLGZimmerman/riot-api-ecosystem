@@ -195,6 +195,13 @@ def _smoothed_features(
         "synergy_2vx": smooth("s2vx_raw", "s2vx_cnt", prior_2vx).astype(
             DISK_DTYPES["synergy_2vx"], copy=False
         ),
+        "p1_cnt": raw["p1_cnt"].astype(DISK_DTYPES["p1_cnt"], copy=False),
+        "m1v1_cnt": raw["m1v1_cnt"].astype(
+            DISK_DTYPES["m1v1_cnt"], copy=False
+        ),
+        "s2vx_cnt": raw["s2vx_cnt"].astype(
+            DISK_DTYPES["s2vx_cnt"], copy=False
+        ),
     }
 
 

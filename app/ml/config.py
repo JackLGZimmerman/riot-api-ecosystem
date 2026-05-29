@@ -29,9 +29,15 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    model_path: Path = ML_DATA_DIR / "linear_winrate_model.npz"
+    model_path: Path = ML_DATA_DIR / "structured_winrate_model.pt"
     metrics_path: Path = ML_DATA_DIR / "metrics_latest.json"
-    # L2 penalty on feature weights (not the intercept). The 45 interaction
-    # features overfit badly unregularised (train ~0.70 / val ~0.53); l2~0.01
-    # recovers val/test to ~0.57. Validated on the full 1.95M-game cache.
-    l2: float = 0.01
+    # Large batches act as implicit regularization: they slow the first-epoch
+    # fit of the residual in-sample interaction leakage, so the model holds the
+    # honest base ceiling instead of collapsing. See documentation/README.md.
+    batch_size: int = 32768
+    max_epochs: int = 40
+    patience: int = 6
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-3
+    delta_baseline_mode: str = "logit"
+    device: str = "auto"
