@@ -598,6 +598,20 @@ class EmbeddingConfig:
         default_factory=DEFAULT_PRIOR_PER_MINUTE_STRENGTHS.copy
     )
     extreme_low_sample_threshold: float = 50.0
+    # Smoothing strategy:
+    #   "additive" — pool every prior level into one weighted mixture (legacy).
+    #   "cascade"  — shrink toward only the highest-priority prior level whose
+    #                own sample size clears `prior_confidence_matchups`; broader
+    #                levels are used only as fallback when no specific level is
+    #                confident enough. Prevents broad priors from contaminating
+    #                well-sampled specific priors.
+    smoothing_mode: str = "cascade"
+    prior_confidence_matchups: float = 50.0
+    # When cascade selects a single level, give it the same *total* prior weight
+    # the additive mixture would have applied across all levels. This isolates
+    # the effect of the prior *value* (single vs pooled) from the effect of the
+    # shrinkage *magnitude*, which otherwise drops sharply in cascade mode.
+    cascade_match_weight: bool = True
     similarity_threshold: float = 0.82
     specialist_report_path: Path = SPECIALIST_REPORT_PATH
     projection_keep_variance: float = 0.91
@@ -700,14 +714,13 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
     SpecialistSpec(
         name="sustained_damage",
         feature_set=(
-            "physicaldamagedealttochampions_share",
-            "magicdamagedealttochampions_share",
-            "champion_damage_to_total_damage_ratio",
-            "champion_damage_share_to_deaths_ratio",
+            "totaldamagedealttochampions",
             "totaldamagedealttochampions_to_goldearned_ratio",
+            "totaldamagedealttochampions_to_deaths_ratio",
+            "champion_damage_to_total_damage_ratio",
         ),
-        similarity_threshold=0.30,
-        projection_keep_variance=0.75,
+        similarity_threshold=0.55,
+        projection_keep_variance=0.80,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
@@ -759,7 +772,7 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "visionscore_to_ward_actions_ratio",
             "wardskilled_to_wardsplaced_ratio",
         ),
-        similarity_threshold=0.45,
+        similarity_threshold=0.35,
         projection_keep_variance=0.85,
         min_median_sim=0.85,
     ),
@@ -785,7 +798,7 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "total_farm_to_deaths_ratio",
             # Would like invade specific markers
         ),
-        similarity_threshold=0.68,
+        similarity_threshold=0.60,
         projection_keep_variance=0.95,
         min_median_sim=0.85,
     ),
@@ -827,7 +840,7 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "epic_monster_damage_to_objective_damage_ratio",
             "damagedealttoobjectives_per_epic_kill_per_gold",
         ),
-        similarity_threshold=0.20,
+        similarity_threshold=0.15,
         projection_keep_variance=0.95,
         min_median_sim=0.85,
     ),
@@ -903,8 +916,6 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
         feature_set=(
             "armor",
             "magicresist",
-            "armor_to_goldearned_ratio",
-            "magicresist_to_goldearned_ratio",
         ),
         similarity_threshold=0.60,
         projection_keep_variance=0.90,
@@ -930,10 +941,10 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "abilitypower",
             "abilitypower_to_goldearned_ratio",
             "magicdamagedealttochampions_share",
-            "totaldamagedealttochampions_to_goldearned_ratio",
+            "magicdamagedealt_share",
         ),
-        similarity_threshold=0.78,
-        projection_keep_variance=0.95,
+        similarity_threshold=0.70,
+        projection_keep_variance=0.90,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
@@ -942,10 +953,10 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "attackdamage",
             "attackdamage_to_goldearned_ratio",
             "physicaldamagedealttochampions_share",
-            "largestcriticalstrike",
+            "physicaldamagedealt_share",
         ),
-        similarity_threshold=0.45,
-        projection_keep_variance=0.89,
+        similarity_threshold=0.65,
+        projection_keep_variance=0.85,
         min_median_sim=0.85,
     ),
     SpecialistSpec(
@@ -955,10 +966,10 @@ SPECIALISTS: tuple[SpecialistSpec, ...] = (
             "attackspeed",
             "largestcriticalstrike",
             "physicaldamagedealttochampions_share",
-            "totaldamagedealttochampions_to_goldearned_ratio",
+            "physicaldamagedealt_share",
         ),
-        similarity_threshold=0.78,
-        projection_keep_variance=0.70,
+        similarity_threshold=0.70,
+        projection_keep_variance=0.85,
         min_median_sim=0.85,
     ),
 )

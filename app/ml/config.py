@@ -21,9 +21,17 @@ class DatasetConfig:
     test_fraction: float = 0.1
     smoothing_prior_mean: float = 0.5
     smoothing_prior_strength: float = 20.0
+    # Shrink under-sampled 1v1/2vx pairs toward a composite of their two sides'
+    # solo priors instead of a flat 0.5 (see app/ml docs). Improves interaction
+    # ranking (AUC) once the model is regularised.
+    interaction_per_side_fallback: bool = True
 
 
 @dataclass(frozen=True)
 class TrainConfig:
     model_path: Path = ML_DATA_DIR / "linear_winrate_model.npz"
     metrics_path: Path = ML_DATA_DIR / "metrics_latest.json"
+    # L2 penalty on feature weights (not the intercept). The 45 interaction
+    # features overfit badly unregularised (train ~0.70 / val ~0.53); l2~0.01
+    # recovers val/test to ~0.57. Validated on the full 1.95M-game cache.
+    l2: float = 0.01

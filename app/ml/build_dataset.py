@@ -15,6 +15,7 @@ from app.ml.cache_layout import (
     CACHE_FORMAT,
     CACHE_META_FILE,
     DISK_DTYPES,
+    N_MATCHUPS_1V1,
     array_paths,
 )
 from app.ml.config import PLAYER_PIVOT_TABLE, DatasetConfig
@@ -30,104 +31,94 @@ logger = logging.getLogger(__name__)
 _TEAM_PAIRS_SQL = (
     "[(1,2),(1,3),(1,4),(1,5),(2,3),(2,4),(2,5),(3,4),(3,5),(4,5)]"
 )
+# Same pairs, 0-based, for building the per-side 2vx composite priors in Python.
+# Order matches the synergy_2vx feature layout (blue pairs, then red pairs).
+_TEAM_PAIRS: tuple[tuple[int, int], ...] = (
+    (0, 1), (0, 2), (0, 3), (0, 4),
+    (1, 2), (1, 3), (1, 4),
+    (2, 3), (2, 4),
+    (3, 4),
+)
 
-# arrayMap lookup for a team's 10 synergy_2vx_dict probes, canonicalising the
-# pair so the smaller (championid, teamposition, build) tuple is in slot 1.
-def _team_2vx_sql(team_col: str, attr: str, default: str) -> str:
-    t = team_col
-    return f"""
-        arrayMap(ix ->
-            dictGetOrDefault(
-                'game_data_filtered.synergy_2vx_dict', '{attr}',
-                if({t}[ix.1] <= {t}[ix.2],
-                    (
-                        tupleElement({t}[ix.1], 1),
-                        tupleElement({t}[ix.1], 2),
-                        tupleElement({t}[ix.1], 3),
-                        tupleElement({t}[ix.2], 1),
-                        tupleElement({t}[ix.2], 2),
-                        tupleElement({t}[ix.2], 3)
-                    ),
-                    (
-                        tupleElement({t}[ix.2], 1),
-                        tupleElement({t}[ix.2], 2),
-                        tupleElement({t}[ix.2], 3),
-                        tupleElement({t}[ix.1], 1),
-                        tupleElement({t}[ix.1], 2),
-                        tupleElement({t}[ix.1], 3)
-                    )
-                ),
-                {default}
-            ),
-            {_TEAM_PAIRS_SQL}
-        )
+
+def _composite_interaction_priors(
+    win_rate: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-side fallback priors for interaction features.
+
+    Given the smoothed solo win rates (`win_rate`, shape ``(n, 10)``: blue 0-4,
+    red 5-9), build the prior each interaction is shrunk toward when its own
+    pair is under-sampled:
+
+      * 1v1 (25 = 5 blue x 5 red, blue perspective): a blue identity is expected
+        to win ``0.5 + (wr_blue - wr_red) / 2`` against a red identity, i.e. half
+        the gap in their solo win rates. Symmetric and bounded in ``[0, 1]``.
+      * 2vx (20 = 10 blue pairs + 10 red pairs): the team-win prior for a same
+        team pair is the average of the two solo win rates.
+
+    Feature order matches `_CHUNK_QUERY_TEMPLATE` (1v1 blue-outer/red-inner;
+    2vx blue pairs then red pairs in `_TEAM_PAIRS` order).
     """
+    blue, red = win_rate[:, 0:5], win_rate[:, 5:10]
+    comp_1v1 = (0.5 + (blue[:, :, None] - red[:, None, :]) / 2.0).reshape(
+        win_rate.shape[0], N_MATCHUPS_1V1
+    )
+    blue_pairs = [(blue[:, i] + blue[:, j]) / 2.0 for i, j in _TEAM_PAIRS]
+    red_pairs = [(red[:, i] + red[:, j]) / 2.0 for i, j in _TEAM_PAIRS]
+    comp_2vx = np.column_stack(blue_pairs + red_pairs)
+    return comp_1v1, comp_2vx
 
 
+_DICT = "game_data_filtered"
+
+
+def _solo(attr: str, default: str) -> str:
+    # The solo prior key is the player tuple (championid, teamposition, build) itself.
+    return f"arrayMap(k -> dictGetOrDefault('{_DICT}.synergy_1vx_dict', '{attr}', k, {default}), solo_keys)"
+
+
+def _pair_keys(team_col: str) -> str:
+    # C(5,2) same-team keys, canonicalised smaller-tuple-first to match the dictionary.
+    t = team_col
+    return (
+        f"arrayMap(ix -> if({t}[ix.1] <= {t}[ix.2], "
+        f"tupleConcat({t}[ix.1], {t}[ix.2]), tupleConcat({t}[ix.2], {t}[ix.1])), "
+        f"{_TEAM_PAIRS_SQL})"
+    )
+
+
+# Two-stage query: the subquery canonicalises every dictionary key once per game,
+# then the outer SELECT resolves each key to its (win_rate, matchups) prior pair.
+# 1v1 matchups are stored blue-perspective only when the key is unswapped, so the
+# rate is inverted (1 - left_win_rate) when the canonical key swapped the sides.
 _CHUNK_QUERY_TEMPLATE = f"""
 SELECT
     blue_win,
-    arrayMap(p -> dictGetOrDefault(
-        'game_data_filtered.synergy_1vx_dict', 'win_rate',
-        (tupleElement(p, 1), tupleElement(p, 2), tupleElement(p, 3)),
-        toFloat32(0.5)
-    ), arrayConcat(blue_players, red_players)) AS p1_raw,
-    arrayMap(p -> dictGetOrDefault(
-        'game_data_filtered.synergy_1vx_dict', 'matchups',
-        (tupleElement(p, 1), tupleElement(p, 2), tupleElement(p, 3)),
-        toUInt32(0)
-    ), arrayConcat(blue_players, red_players)) AS p1_cnt,
-    arrayFlatten(arrayMap(b -> arrayMap(r ->
-        if(b <= r,
-            dictGetOrDefault(
-                'game_data_filtered.matchup_1v1_dict', 'left_win_rate',
-                (
-                    tupleElement(b, 1), tupleElement(b, 2), tupleElement(b, 3),
-                    tupleElement(r, 1), tupleElement(r, 2), tupleElement(r, 3)
-                ),
-                toFloat32(0.5)
-            ),
-            toFloat32(1.0) - dictGetOrDefault(
-                'game_data_filtered.matchup_1v1_dict', 'left_win_rate',
-                (
-                    tupleElement(r, 1), tupleElement(r, 2), tupleElement(r, 3),
-                    tupleElement(b, 1), tupleElement(b, 2), tupleElement(b, 3)
-                ),
-                toFloat32(0.5)
-            )
-        ),
-        red_players
-    ), blue_players)) AS m1v1_raw,
-    arrayFlatten(arrayMap(b -> arrayMap(r ->
-        dictGetOrDefault(
-            'game_data_filtered.matchup_1v1_dict', 'matchups',
-            if(b <= r,
-                (
-                    tupleElement(b, 1), tupleElement(b, 2), tupleElement(b, 3),
-                    tupleElement(r, 1), tupleElement(r, 2), tupleElement(r, 3)
-                ),
-                (
-                    tupleElement(r, 1), tupleElement(r, 2), tupleElement(r, 3),
-                    tupleElement(b, 1), tupleElement(b, 2), tupleElement(b, 3)
-                )
-            ),
-            toUInt64(0)
-        ),
-        red_players
-    ), blue_players)) AS m1v1_cnt,
-    arrayConcat(
-        {_team_2vx_sql("blue_players", "win_rate", "toFloat32(0.5)")},
-        {_team_2vx_sql("red_players", "win_rate", "toFloat32(0.5)")}
-    ) AS s2vx_raw,
-    arrayConcat(
-        {_team_2vx_sql("blue_players", "matchups", "toUInt64(0)")},
-        {_team_2vx_sql("red_players", "matchups", "toUInt64(0)")}
-    ) AS s2vx_cnt,
+    {_solo("win_rate", "toFloat32(0.5)")} AS p1_raw,
+    {_solo("matchups", "toUInt32(0)")} AS p1_cnt,
+    arrayMap((k, swapped) -> if(swapped,
+        toFloat32(1.0) - dictGetOrDefault('{_DICT}.matchup_1v1_dict', 'left_win_rate', k, toFloat32(0.5)),
+        dictGetOrDefault('{_DICT}.matchup_1v1_dict', 'left_win_rate', k, toFloat32(0.5))
+    ), matchup_keys, matchup_swapped) AS m1v1_raw,
+    arrayMap(k -> dictGetOrDefault('{_DICT}.matchup_1v1_dict', 'matchups', k, toUInt64(0)), matchup_keys) AS m1v1_cnt,
+    arrayMap(k -> dictGetOrDefault('{_DICT}.synergy_2vx_dict', 'win_rate', k, toFloat32(0.5)), synergy_keys) AS s2vx_raw,
+    arrayMap(k -> dictGetOrDefault('{_DICT}.synergy_2vx_dict', 'matchups', k, toUInt64(0)), synergy_keys) AS s2vx_cnt,
     matchid
-FROM {{table}}
-WHERE split = '{{split}}' AND matchid > '{{last_matchid}}'
+FROM (
+    SELECT
+        matchid,
+        blue_win,
+        arrayConcat(blue_players, red_players) AS solo_keys,
+        arrayFlatten(arrayMap(b -> arrayMap(r ->
+            if(b <= r, tupleConcat(b, r), tupleConcat(r, b)), red_players), blue_players)) AS matchup_keys,
+        arrayFlatten(arrayMap(b -> arrayMap(r -> b > r, red_players), blue_players)) AS matchup_swapped,
+        arrayConcat({_pair_keys("blue_players")}, {_pair_keys("red_players")}) AS synergy_keys
+    FROM {{table}}
+    WHERE split = '{{split}}' AND matchid > '{{last_matchid}}'
+    ORDER BY matchid
+    LIMIT {{chunk}}
+)
 ORDER BY matchid
-LIMIT {{chunk}}
 """
 
 
@@ -169,70 +160,64 @@ def _open_arrays(n_games: int, cache_dir: Path) -> dict[str, np.ndarray]:
     return arrays
 
 
-def _features_for_block(
-    blue_win: np.ndarray,
-    p1_raw: np.ndarray,
-    p1_cnt: np.ndarray,
-    m1v1_raw: np.ndarray,
-    m1v1_cnt: np.ndarray,
-    s2vx_raw: np.ndarray,
-    s2vx_cnt: np.ndarray,
-    *,
-    prior_mean: float,
-    prior_strength: float,
-) -> dict[str, np.ndarray]:
-    return {
-        "blue_win": blue_win,
-        "win_rate": bayesian_smoothed_rate(
-            p1_raw, p1_cnt, prior_mean=prior_mean, prior_strength=prior_strength
-        ).astype(DISK_DTYPES["win_rate"], copy=False),
-        "matchup_1v1": bayesian_smoothed_rate(
-            m1v1_raw, m1v1_cnt, prior_mean=prior_mean, prior_strength=prior_strength
-        ).astype(DISK_DTYPES["matchup_1v1"], copy=False),
-        "synergy_2vx": bayesian_smoothed_rate(
-            s2vx_raw, s2vx_cnt, prior_mean=prior_mean, prior_strength=prior_strength
-        ).astype(DISK_DTYPES["synergy_2vx"], copy=False),
-    }
-
-
+# Outer-SELECT columns of _CHUNK_QUERY_TEMPLATE, by position.
+_RAW_COLUMNS = ("blue_win", "p1_raw", "p1_cnt", "m1v1_raw", "m1v1_cnt", "s2vx_raw", "s2vx_cnt")
 _CHUNK_SIZE = 200_000
 
 
-def _stream_split(
-    split: str, limit: int
-) -> Iterable[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    if limit <= 0:
-        return
+def _smoothed_features(
+    raw: dict[str, np.ndarray],
+    *,
+    prior_mean: float,
+    prior_strength: float,
+    per_side_fallback: bool,
+) -> dict[str, np.ndarray]:
+    win_rate = bayesian_smoothed_rate(
+        raw["p1_raw"], raw["p1_cnt"], prior_mean=prior_mean, prior_strength=prior_strength
+    )
+    prior_1v1, prior_2vx = (
+        _composite_interaction_priors(win_rate)
+        if per_side_fallback
+        else (prior_mean, prior_mean)
+    )
+
+    def smooth(raw_key: str, cnt_key: str, prior: float | np.ndarray) -> np.ndarray:
+        return bayesian_smoothed_rate(
+            raw[raw_key], raw[cnt_key], prior_mean=prior, prior_strength=prior_strength
+        )
+
+    return {
+        "blue_win": raw["blue_win"],
+        "win_rate": win_rate.astype(DISK_DTYPES["win_rate"], copy=False),
+        "matchup_1v1": smooth("m1v1_raw", "m1v1_cnt", prior_1v1).astype(
+            DISK_DTYPES["matchup_1v1"], copy=False
+        ),
+        "synergy_2vx": smooth("s2vx_raw", "s2vx_cnt", prior_2vx).astype(
+            DISK_DTYPES["synergy_2vx"], copy=False
+        ),
+    }
+
+
+def _stream_split(split: str, limit: int) -> Iterable[dict[str, np.ndarray]]:
+    """Yield raw prior columns in chunks, keyset-paginated on matchid (no OFFSET cost)."""
     remaining = int(limit)
     last_matchid = ""
     while remaining > 0:
         chunk = min(_CHUNK_SIZE, remaining)
-        # Keyset pagination on matchid avoids OFFSET cost on the order key.
         query = _CHUNK_QUERY_TEMPLATE.format(
-            table=PLAYER_PIVOT_TABLE,
-            split=split,
-            last_matchid=last_matchid,
-            chunk=chunk,
+            table=PLAYER_PIVOT_TABLE, split=split, last_matchid=last_matchid, chunk=chunk
         )
         rows = get_client().query(query).result_rows
         if not rows:
-            break
-        blue_win = np.fromiter(
-            (int(r[0]) for r in rows),
-            dtype=DISK_DTYPES["blue_win"],
-            count=len(rows),
-        )
-        p1_raw = np.asarray([r[1] for r in rows], dtype=np.float64)
-        p1_cnt = np.asarray([r[2] for r in rows], dtype=np.float64)
-        m1v1_raw = np.asarray([r[3] for r in rows], dtype=np.float64)
-        m1v1_cnt = np.asarray([r[4] for r in rows], dtype=np.float64)
-        s2vx_raw = np.asarray([r[5] for r in rows], dtype=np.float64)
-        s2vx_cnt = np.asarray([r[6] for r in rows], dtype=np.float64)
-        last_matchid = str(rows[-1][7])
-        yield blue_win, p1_raw, p1_cnt, m1v1_raw, m1v1_cnt, s2vx_raw, s2vx_cnt
+            return
+        yield {
+            name: np.asarray([r[i] for r in rows], dtype=np.float64)
+            for i, name in enumerate(_RAW_COLUMNS)
+        }
         remaining -= len(rows)
+        last_matchid = str(rows[-1][len(_RAW_COLUMNS)])
         if len(rows) < chunk:
-            break
+            return
 
 
 def _write_split(
@@ -243,27 +228,20 @@ def _write_split(
     offset: int,
     prior_mean: float,
     prior_strength: float,
+    per_side_fallback: bool,
 ) -> int:
     written = 0
-    for chunk in _stream_split(split, limit):
-        blue_win, p1_raw, p1_cnt, m1v1_raw, m1v1_cnt, s2vx_raw, s2vx_cnt = chunk
-        block = _features_for_block(
-            blue_win,
-            p1_raw,
-            p1_cnt,
-            m1v1_raw,
-            m1v1_cnt,
-            s2vx_raw,
-            s2vx_cnt,
+    for raw in _stream_split(split, limit):
+        block = _smoothed_features(
+            raw,
             prior_mean=prior_mean,
             prior_strength=prior_strength,
+            per_side_fallback=per_side_fallback,
         )
-        size = block["blue_win"].shape[0]
         start = offset + written
-        end = start + size
         for name, data in block.items():
-            arrays[name][start:end] = data
-        written += size
+            arrays[name][start : start + len(data)] = data
+        written += len(block["blue_win"])
     return written
 
 
@@ -278,6 +256,7 @@ def _write_meta(cfg: DatasetConfig, n_games: int, splits: dict[str, int]) -> Pat
                 "smoothing": {
                     "prior_mean": cfg.smoothing_prior_mean,
                     "prior_strength": cfg.smoothing_prior_strength,
+                    "interaction_per_side_fallback": cfg.interaction_per_side_fallback,
                 },
             },
             indent=2,
@@ -304,6 +283,7 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             offset=offset,
             prior_mean=cfg.smoothing_prior_mean,
             prior_strength=cfg.smoothing_prior_strength,
+            per_side_fallback=cfg.interaction_per_side_fallback,
         )
         if written != counts[meta_split]:
             raise RuntimeError(

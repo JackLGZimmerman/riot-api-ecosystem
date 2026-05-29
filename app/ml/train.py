@@ -175,11 +175,13 @@ def train(
         splits["train"].matchup_1v1,
         splits["train"].synergy_2vx,
         splits["train"].blue_win,
+        l2=train_cfg.l2,
     )
     model.save(train_cfg.model_path)
 
     metrics = {
         "dataset_config": asdict(dataset_cfg),
+        "l2": train_cfg.l2,
         "model_path": train_cfg.model_path,
         "metrics_path": train_cfg.metrics_path,
         "intercept": model.intercept,

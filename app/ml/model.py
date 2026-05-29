@@ -112,16 +112,27 @@ def fit_logistic_regression(
     matchup_1v1: np.ndarray,
     synergy_2vx: np.ndarray,
     blue_win: np.ndarray,
+    *,
+    l2: float = 0.0,
 ) -> WinRateLinearModel:
+    """Fit blue-win logistic regression with optional L2 on the weights.
+
+    The intercept is never penalised. The 45 interaction features overfit
+    badly without regularisation; a small `l2` is what keeps val/test near the
+    1vx-only baseline rather than collapsing toward chance.
+    """
     features = engineer_features(win_rate, matchup_1v1, synergy_2vx)
     y = blue_win.astype(np.float64, copy=False)
     x = np.column_stack([np.ones(features.shape[0], dtype=np.float64), features])
+    penalty_mask = np.ones(x.shape[1], dtype=np.float64)
+    penalty_mask[0] = 0.0  # do not penalise the intercept
 
     def loss_and_grad(coeffs: np.ndarray) -> tuple[float, np.ndarray]:
         p = expit(x @ coeffs)
         p = np.clip(p, 1e-12, 1 - 1e-12)
         loss = -float(np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
-        grad = x.T @ (p - y) / y.size
+        loss += l2 * float(np.sum((penalty_mask * coeffs) ** 2))
+        grad = x.T @ (p - y) / y.size + 2.0 * l2 * (penalty_mask * coeffs)
         return loss, grad
 
     result = minimize(

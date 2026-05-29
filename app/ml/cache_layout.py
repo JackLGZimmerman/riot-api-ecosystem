@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-CACHE_FORMAT = "npy-memmap-v14"
+CACHE_FORMAT = "npy-memmap-v15"
 CACHE_META_FILE = "cache_meta.json"
 
 WIN_RATE_FILE = "win_rate.npy"

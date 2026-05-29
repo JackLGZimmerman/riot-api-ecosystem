@@ -61,6 +61,205 @@ Every candidate configuration evaluation needs these checks:
 5. **Replacement evidence**: when a derived or normalised feature stands in for
    an absolute metric, run tail correlation and top/bottom-50 Jaccard checks.
 
+## 2026-05-29 Adaptive Prior Cascade Smoothing (before/after)
+
+**Hypothesis (from the ML side):** the legacy `additive` smoothing in
+`posteriors.py` pools every prior level (`sibling`, `champion_role`,
+`role_build`, `champion_build`, `build`) into one weighted mixture. Even a
+well-sampled specific prior is then contaminated by broad ones. The fix is an
+adaptive cascade: shrink toward only the highest-priority prior level whose own
+sample size clears a confidence threshold; broader levels are fallback only.
+This is validated here before any ML change (see
+[../ml/documentation/README.md](../ml/documentation/README.md)).
+
+**Why classification first.** Most 1vx identities are low-sample (baseline
+`matchups` median 9, p25 = 2), so the prior choice dominates the embedding. The
+grouping rubric below scores the effect without retraining the win-rate model.
+
+**Sampling threshold (assumption).** "Sufficient sampling" = the prior level's
+own `matchups >= prior_confidence_matchups` (`tau`). The gate is on the prior's
+matchups, metric-independent, evaluated in `PRIOR_LEVELS` contextual-relevance
+order; the first level clearing `tau` is selected, the broadest valid level is
+the fallback. Selection is mutually exclusive (every row picks exactly one
+level); at `tau=50`, sibling 23%, champion_role 60%, role_build 16%,
+champion_build 0.4%, build 0% (never needed).
+
+**Modes** (`EmbeddingConfig.smoothing_mode`, `cascade_match_weight`):
+
+- `additive` — pooled value, pooled weight (legacy).
+- `cascade` — single selected value, that level's weight only (less total
+  shrinkage).
+- `cascade` + `cascade_match_weight` — single selected value, but the additive
+  mixture's *total* weight. Controls for shrinkage magnitude so the only change
+  is prior *value* (single vs pooled): the clean test of contamination.
+
+**Evaluation.** Each of the 24 specialists scored at its *promoted* (kv, t) via
+`inspection/registry_audit.sweep_specialist` (same scoring used for tuning).
+`mean_score` excludes the coverage/budget sentinel penalties; `n` is specs not
+penalised. Harness: `/tmp/embed_exp/eval_smoothing.py`.
+
+| Smoothing | mean_score | median | cov | med_cos | mean top‑\|z\| | penalised | over‑budget | weak | small |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `additive` (before) | 4.509 (n=23) | 4.677 | 0.993 | 0.9773 | 1.088 | 1 (`vision`) | 0 | 0 | 12 |
+| `cascade` tau=30 | 4.524 (n=23) | 4.622 | 1.000 | 0.9779 | 1.145 | 1 (`takedown_shape`) | 4 | 5 | 37 |
+| `cascade` tau=50 | 4.530 (n=23) | 4.646 | 1.000 | 0.9757 | 1.152 | 1 (`takedown_shape`) | 4 | 3 | 44 |
+| `cascade` tau=100 | 4.553 (n=24) | 4.662 | 1.000 | 0.9806 | 1.149 | 0 | 0 | 4 | 23 |
+| `cascade`+match tau=50 | 4.543 (n=24) | **4.701** | 1.000 | **0.9817** | **1.159** | 0 | 0 | 3 | 27 |
+| `cascade`+match tau=100 | **4.560** (n=24) | 4.680 | 1.000 | 0.9810 | 1.149 | 0 | 0 | 4 | 28 |
+
+**Reads.**
+
+1. Plain `cascade` at low `tau` over-fragments (`takedown_shape` → [18,18,16,16]
+   vs budget 9). This is *under-shrinkage*, not contamination: matching the
+   weight fixes it ([6,7,6,7]). Raising `tau` to 100 also fixes it by routing
+   more rows to broader, higher-sample priors.
+2. The controlled test (`cascade`+match) isolates contamination: at identical
+   shrinkage magnitude, using the single highest-confidence prior value instead
+   of the pooled value sharpens group signatures (mean top‑\|z\| 1.088 → 1.159,
+   +6.5%), tightens within-group cosine (0.9773 → 0.9817), and gives full
+   coverage with 0 over-budget and 0 penalised specs.
+3. `vision` is the clearest win: under `additive` its weak late group is dropped
+   (coverage 0.83, penalised); under every cascade it reaches full coverage as a
+   coherent group.
+4. Per-spec mean Δ(top‑\|z\|) = **+0.072** (`additive` → `cascade`+match tau=50).
+   Largest gains: `farming` +0.31, `jungle_control` +0.26, `utility_pickmaking`
+   +0.21, `epic_objectives` +0.20, `map_control` +0.18, `damage_efficiency`
+   +0.14. Many specialists *consolidate* into fewer, tighter groups (`farming`
+   4→3, `damage_profile` 7→5, `economy_scaling` 8→6). Minor regressions:
+   `sustained_damage` −0.03, `defensive_statline` −0.02, `resistances` −0.01.
+
+**Conclusion.** A consistent but modest improvement. It supports the
+contamination hypothesis: removing broad-prior contamination yields sharper,
+tighter, more consolidated groups and recovers a previously-dropped group, with
+no over-budget or coverage failures. Adopted as the default: `smoothing_mode =
+"cascade"`, `cascade_match_weight = True`, `prior_confidence_matchups = 50`.
+
+**Migration (default flipped to cascade).** `EmbeddingConfig` now defaults to the
+cascade, and `SPECIALISATIONS.md` is regenerated under it. One targeted re-tune
+was needed: `sustained_damage` `t` 0.65 → 0.55 (clears its small-group `Watch`).
+After that, the regenerated audit is **467 Excellent / 3 Watch / 3 Weak** across
+473 retained groups, all 24 specialists OK and at full coverage. The 6 residuals
+are intentional and match the project's own rubric, not tuning failures:
+
+- `enchanters` 3 Weak — the high/low spec's large low pool is a no-read baseline
+  (share ~0.84, max \|z\| 0.31–0.34, a hair under the 0.35 bar). The cascade
+  sharpened the enchanter group, which flattened the majority pool. No (kv, t)
+  changes this (it is single-axis high/low); valid per the "No-Read Pools" rule,
+  like the `vision` late-phase exception.
+- `map_control` 3 Watch — small but coherent macro reads (size 7–30, median
+  cosine 0.96–1.00, max \|z\| 0.55–0.67). Valid per "small coherent groups are
+  valid specialist reads; there is no size floor". Lowering `t` only trades one
+  `Watch` for a lost read, so the config is left at `t=0.72`.
+
+`additive` remains available via config for comparison/rollback.
+
+**ML carry-over (done).** The per-side fallback was carried into `app/ml`: each
+under-sampled `1v1`/`2vx` pair is now shrunk toward a composite of its two
+sides' solo priors (`0.5 + (wr_blue - wr_red)/2` for matchups; the pair-average
+for synergies) instead of a flat `0.5`. Testing there surfaced a second, larger
+issue: the 45 interaction features were overfitting an **unregularised**
+logistic regression (train 0.70 / val,test 0.53, intercept −48). On the full
+1.95M-game cache:
+
+| ML config | val acc | test acc | val auc | val tail-ECE |
+| --- | ---: | ---: | ---: | ---: |
+| `1vx`-only baseline | ~0.57 | ~0.57 | ~0.59 | — |
+| interactions, no L2 (before) | 0.534 | 0.534 | 0.544 | 0.317 |
+| interactions, L2 only | 0.568 | 0.570 | — | — |
+| interactions, L2 + per-side fallback | **0.569** | **0.570** | **0.596** | **0.112** |
+
+L2 is the dominant fix (recovers to the baseline); the per-side fallback adds a
+small consistent AUC/ranking gain on top — the same modest-but-consistent
+pattern the cascade showed here. The overfit gap collapsed (0.167 → 0.065) and
+calibration improved sharply. See
+[../ml/documentation/README.md](../ml/documentation/README.md).
+
+### 1v1 / 2vx extension assessment
+
+The classification grouping pipeline embeds the full ~60-metric *behavioural*
+profile of single identities from `6010`. `matchup_1v1` and `synergy_2vx` carry
+only `matchups`/`wins`/`win_rate` — there is no per-pair behavioural suite to
+embed, so interaction pairs cannot be grouped by the same machinery. Extending
+the *grouping* eval to 1v1/2vx is therefore a category mismatch and was not
+built; the transferable piece is the cascade + per-side fallback applied to
+interaction *win-rate* smoothing, which belongs to the ML pipeline
+(`build_dataset.py`, currently a flat shrink toward 0.5 with `prior_strength=20`).
+
+**Efficient prior generation.** The `9000-9040` tables are all plain `GROUP BY`
+rollups of `6010` (e.g. `9010` aggregates across builds), and `load.py` already
+derives them on the fly when a table is missing. So the five materialised prior
+tables can be replaced by one rollup query (or `GROUPING SETS`) over the base
+aggregation. The same pattern extends to interactions: given one base
+interaction aggregation, every side/level prior is a `GROUP BY` over it — no new
+per-level materialised tables required.
+
+## 2026-05-29 Full Registry Quality Audit
+
+> Historical record. This audit was run under `additive` smoothing. The registry
+> has since migrated to the cascade (see the Adaptive Prior Cascade section
+> above); the regenerated `SPECIALISATIONS.md` now carries 3 intentional `Weak`
+> (`enchanters` no-read baseline) and 3 intentional `Watch` (`map_control` small
+> coherent reads), and `sustained_damage` moved to `t=0.55`. The configs and
+> "no Watch/Weak/Reject/OVER" result below describe the pre-cascade state.
+
+Target specialists: every active `SpecialistSpec` and `SingularMetricSpec`.
+This pass supersedes the 2026-05-28 promotion notes where they conflict with
+the active registry.
+
+Commands used:
+
+```bash
+uv run python -m app.classification.embeddings.inspection.specialisations_markdown
+
+uv run python -m app.classification.embeddings.tune \
+    --name <specialist> --kvs <nearby kv values> --ts <nearby thresholds>
+
+uv run python -m app.classification.embeddings.inspection.base \
+    --name <specialist> --kv <kv> --t <threshold> --phase <phase> \
+    --features <candidate feature set>
+```
+
+Audit rubric changes:
+
+- `SPECIALISATIONS.md` now records coverage and dropped-group counts beside
+  phase-local group counts.
+- Quality text is generated per retained group from metric z-score strength,
+  secondary metric support, within-group median cosine, size, and whether a
+  large cluster is an intentional baseline contrast.
+- Singular metrics are audited by phase-local unique value counts and top/bottom
+  tail composition. All six active singular metrics had dense orderings
+  (`>=3092` unique values in every phase), so no clustering was added.
+
+Promoted specialist changes:
+
+| Specialist | Promoted Config | Evidence | Rejected Alternative |
+| --- | --- | --- | --- |
+| `sustained_damage` | `kv=0.80`, `t=0.65`; features `totaldamagedealttochampions`, champion damage per gold, champion damage per death, champion-damage focus | `phase_g=[6,5,5,6]`, full coverage, no dropped groups. Direct volume/focus axes removed low-coherence damage-type groups while keeping carry, support-focus, low-volume, and high-output reads. | Prior type-share set overlapped `damage_profile` and produced low-coherence mid/mid-late groups. `t=0.70` over-split early-mid into 7 groups against a 6-group budget. |
+| `vision` | `kv=0.85`, `t=0.35` | `phase_g=[3,3,3,2]`. Early/mid phases retain lane-low, support-volume, and jungle ward-action reads. Late phase coverage intentionally falls to `0.30` because the weak background group is dropped instead of labelled. | `t=0.45` kept full coverage but retained a shallow early-mid ward-ratio side group with max `|z|=0.40`. |
+| `farming` | `kv=0.95`, `t=0.60` | `phase_g=[4,4,4,4]`, full coverage. Merges duplicate lane-farm fragments while retaining lane-farm, no-farm support, jungle-farm, and low-lane/high-neutral side reads. | `t=0.68` left duplicate lane-farm signatures in mid-late and late. |
+| `epic_objectives` | `kv=0.95`, `t=0.15` | `phase_g=[2,2,2,2]`, full coverage. Keeps a clear low/no objective baseline and a high objective-control group in every phase. | `t=0.20` split late into a lower-coherence epic-monster-share side group that did not add enough semantic separation. |
+| `resistances` | `kv=0.90`, `t=0.60`; features `armor`, `magicresist` | `phase_g=[2,2,2,2]`, full coverage. Raw resistance investment gives stable high/low groups with clean role/build reads. | Armor/MR-per-gold ratios created shallow side fragments; they are not robust enough to keep as group-forming axes. |
+| `ability_power` | `kv=0.90`, `t=0.70`; replace champion damage per gold with magic total-damage share | `phase_g=[2,2,2,2]`, full coverage. The spec now asks AP/magic investment only, while damage efficiency stays in `damage_efficiency`. | Including champion damage per gold leaked an efficiency axis and split utility/tank magic side groups. |
+| `attack_damage` | `kv=0.85`, `t=0.65`; replace critical strike ceiling with physical total-damage share | `phase_g=[2,2,2,2]`, full coverage. Raw AD, AD per gold, physical champion share, and physical total share form clean high/low investment groups. | Critical strike ceiling produced low-median side groups and is better represented as the existing singular metric. |
+| `on_hit_carry` | `kv=0.85`, `t=0.70`; replace champion damage per gold with physical total-damage share | `phase_g=[6,6,6,5]`, full coverage. Keeps no-hit, AD physical, attack-speed carry, tank physical, attack-speed AP/on-hit, and hybrid side groups without duplicate high damage-per-gold fragments. | The old damage-per-gold axis duplicated `damage_efficiency` and created repeated small high-output fragments. |
+
+Unchanged specialists reviewed as excellent under the stricter group rubric:
+`early_agency`, `durability`, `self_sustain`, `damage_profile`,
+`damage_efficiency`, `burst_skirmish`, `takedown_shape`,
+`utility_pickmaking`, `economy_scaling`, `jungle_control`, `structure`,
+`siege_pressure`, `map_control`, `crowd_control`, `enchanters`, and
+`defensive_statline`.
+
+Final audit result:
+
+- `SPECIALISATIONS.md` contains no `Watch`, `Weak`, `Reject`, or `OVER`
+  retained-group quality outcomes.
+- Every retained specialist group is within the per-phase budget or documented
+  as semantically justified by the stricter quality text.
+- The only dropped retained-label opportunity is intentional: `vision` late
+  phase drops one weak background group rather than treating it as a meaningful
+  category.
+
 ## 2026-05-28 Stat Investment Specialists
 
 Target specialists: `resistances`, `ability_power`, and `attack_damage`.

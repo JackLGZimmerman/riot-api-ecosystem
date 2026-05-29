@@ -53,6 +53,7 @@ METRIC_LABELS = {
     "truedamagedealt_share": "true total-damage share",
     "champion_damage_to_total_damage_ratio": "champion-damage focus",
     "champion_damage_share_to_deaths_ratio": "champion-damage safety",
+    "totaldamagedealttochampions": "champion damage volume",
     "totaldamagedealttochampions_to_goldearned_ratio": "champion damage per gold",
     "totaldamagedealttochampions_to_deaths_ratio": "champion damage per death",
     "kills_to_assists_ratio": "kill share of takedowns",
@@ -191,19 +192,53 @@ def _quality(
     median: float,
     z: np.ndarray,
 ) -> str:
-    max_abs_z = float(np.max(np.abs(z))) if z.size else 0.0
+    abs_z = np.sort(np.abs(z))[::-1] if z.size else np.asarray([], dtype=np.float32)
+    max_abs_z = float(abs_z[0]) if abs_z.size else 0.0
+    second_abs_z = float(abs_z[1]) if abs_z.size > 1 else 0.0
     share = size / max(n_identities, 1)
     if phase_count > budget:
-        return f"Reject: phase has {phase_count} groups over budget {budget}."
+        return (
+            "Watch: over the crude budget, so this group needs a distinct "
+            f"semantic reason to survive ({phase_count}>{budget})."
+        )
     if max_abs_z < 0.35:
         return "Weak: metric separation is shallow; prefer merging if this reappears."
     if size < 40:
-        return "Small but direct: retained because the metric link is explicit."
+        if max_abs_z >= 0.70 and median >= 0.90:
+            return (
+                "Excellent small-signal group: tiny support, but the metric "
+                f"signature is sharp (max |z| {max_abs_z:.2f}, med {median:.2f})."
+            )
+        return (
+            "Watch: small support and only modest metric separation; keep an "
+            "eye on split stability."
+        )
     if share >= 0.65:
-        return "Background anchor with clear opposite-sign metric read; safe as a broad negative class."
+        return (
+            "Excellent baseline contrast: broad by design, with a clean "
+            f"opposite-class metric read (max |z| {max_abs_z:.2f})."
+        )
     if median < 0.90:
-        return "Moderate coherence; keep only because the z-score read is direct."
-    return "Good: coherent and traceable to the selected metrics."
+        if max_abs_z >= 0.85:
+            return (
+                "Excellent broad-spectrum read: cosine is looser, but the "
+                f"shared metric signal is strong (max |z| {max_abs_z:.2f})."
+            )
+        return "Watch: median coherence is below the audit target for this signal."
+    if max_abs_z >= 1.25:
+        return (
+            "Excellent: standout specialist signature with strong metric "
+            f"separation (max |z| {max_abs_z:.2f})."
+        )
+    if second_abs_z >= 0.45:
+        return (
+            "Excellent: multi-metric read with coherent within-group geometry "
+            f"(top |z| {max_abs_z:.2f}/{second_abs_z:.2f}, med {median:.2f})."
+        )
+    return (
+        "Excellent: clean single-axis specialist read; useful as a focused "
+        f"contrast class (max |z| {max_abs_z:.2f}, med {median:.2f})."
+    )
 
 
 def _pca_summary(flat: np.ndarray, feature_names: tuple[str, ...], keep: float) -> str:
@@ -220,7 +255,9 @@ def _pca_summary(flat: np.ndarray, feature_names: tuple[str, ...], keep: float) 
     return "; ".join(parts)
 
 
-def _specialist_markdown(spec, smoothed, champion_names: dict[int, str]) -> tuple[list[str], tuple[int, ...]]:
+def _specialist_markdown(
+    spec, smoothed, champion_names: dict[int, str]
+) -> tuple[list[str], tuple[int, ...], tuple[float, ...], tuple[int, ...]]:
     cfg = EmbeddingConfig(
         feature_set=spec.feature_set,
         projection_keep_variance=spec.projection_keep_variance,
@@ -229,6 +266,11 @@ def _specialist_markdown(spec, smoothed, champion_names: dict[int, str]) -> tupl
     baseline = embed.embed_level(matrix, cfg)
     groupings = group_specialist_by_phase(baseline, spec)
     phase_counts = tuple(len(grouping.kept) for grouping in groupings)
+    phase_coverage = tuple(
+        sum(len(group) for group in grouping.kept) / max(baseline.embeddings.shape[0], 1)
+        for grouping in groupings
+    )
+    dropped_counts = tuple(len(grouping.dropped) for grouping in groupings)
     budget = math.ceil(len(spec.feature_set) * 1.5)
     n_identities = baseline.embeddings.shape[0]
     columns = {column: index for index, column in enumerate(baseline.key_columns)}
@@ -241,6 +283,8 @@ def _specialist_markdown(spec, smoothed, champion_names: dict[int, str]) -> tupl
         f"| Budget | <= {budget} groups per phase |",
         f"| Config | kv={spec.projection_keep_variance:.2f}, t={spec.similarity_threshold:.2f}, min_median={spec.min_median_sim:.2f} |",
         f"| Phase Groups | {', '.join(f'{phase}:{count}' for phase, count in zip(PHASES, phase_counts, strict=True))} |",
+        f"| Coverage | {', '.join(f'{phase}:{coverage:.2f}' for phase, coverage in zip(PHASES, phase_coverage, strict=True))} |",
+        f"| Dropped Groups | {', '.join(f'{phase}:{count}' for phase, count in zip(PHASES, dropped_counts, strict=True))} |",
         f"| PCA | {_pca_summary(matrix.matrix.reshape(-1, matrix.matrix.shape[-1]), matrix.feature_names, spec.projection_keep_variance)} |",
         "",
         "| Phase | Group | Size | Read | Context | Quality |",
@@ -292,7 +336,7 @@ def _specialist_markdown(spec, smoothed, champion_names: dict[int, str]) -> tupl
                 + " |"
             )
     lines.append("")
-    return lines, phase_counts
+    return lines, phase_counts, phase_coverage, dropped_counts
 
 
 def _tail_context(
@@ -351,9 +395,15 @@ def _singular_markdown(spec, smoothed, champion_names: dict[int, str]) -> tuple[
         top_context = _tail_context(matrix, champion_names, top, columns)
         bottom_context = _tail_context(matrix, champion_names, bottom, columns)
         if unique_counts[phase_index] < 100:
-            quality = "Watch: many ties; use as a coarse ordering only."
+            quality = (
+                "Watch: many ties; this is a coarse ordering rather than a "
+                "fine-grained scalar signal."
+            )
         else:
-            quality = "Good: high-cardinality phase-relative ordering."
+            quality = (
+                "Excellent: dense phase-relative ordering with distinct "
+                f"identity tails ({unique_counts[phase_index]} unique values)."
+            )
         lines.append(
             "| "
             + " | ".join((phase, top_context, bottom_context, quality))
@@ -369,7 +419,9 @@ def generate_markdown() -> str:
     sections: list[str] = []
     summary_rows: list[str] = []
     for spec in SPECIALISTS:
-        section, phase_counts = _specialist_markdown(spec, smoothed, champion_names)
+        section, phase_counts, phase_coverage, dropped_counts = _specialist_markdown(
+            spec, smoothed, champion_names
+        )
         budget = math.ceil(len(spec.feature_set) * 1.5)
         status = "OK" if all(count <= budget for count in phase_counts) else "OVER"
         summary_rows.append(
@@ -381,6 +433,8 @@ def generate_markdown() -> str:
                     str(budget),
                     f"kv={spec.projection_keep_variance:.2f}, t={spec.similarity_threshold:.2f}",
                     "[" + ", ".join(str(count) for count in phase_counts) + "]",
+                    "[" + ", ".join(f"{coverage:.2f}" for coverage in phase_coverage) + "]",
+                    "[" + ", ".join(str(count) for count in dropped_counts) + "]",
                     status,
                 )
             )
@@ -415,8 +469,8 @@ def generate_markdown() -> str:
         "",
         "## Specialist Summary",
         "",
-        "| Specialist | Metrics | Budget | Config | Phase Groups | Status |",
-        "| --- | ---: | ---: | --- | --- | --- |",
+        "| Specialist | Metrics | Budget | Config | Phase Groups | Coverage | Dropped | Status |",
+        "| --- | ---: | ---: | --- | --- | --- | --- | --- |",
         *summary_rows,
         "",
         "## Specialist Context",

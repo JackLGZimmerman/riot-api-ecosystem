@@ -86,6 +86,48 @@ def _prior_weight(
     return np.where(valid, cap * reliability, 0.0)
 
 
+def _cascade_selection(
+    prior_lookups: dict[IdentityType, dict[str, np.ndarray]],
+    threshold: float,
+) -> dict[IdentityType, np.ndarray]:
+    """Pick one prior level per row: the highest-priority level whose own
+    sample size clears `threshold`.
+
+    Walks `PRIOR_LEVELS` from most to least contextually specific. The first
+    level that exists for the row and has `matchups >= threshold` is selected;
+    all other levels are masked out so they cannot contaminate it. Rows with no
+    confident level fall back to the broadest available level (most sample).
+    Returns a 0/1 float mask per level, co-indexed with the target rows.
+    """
+    present = [level for level in PRIOR_LEVELS if level in prior_lookups]
+    if not present:
+        return {}
+    n = prior_lookups[present[0]]["matchups"].shape[0]
+    valid = {
+        level: prior_lookups[level]["valid"]
+        & np.isfinite(prior_lookups[level]["matchups"])
+        for level in present
+    }
+    masks = {level: np.zeros(n, dtype=np.float64) for level in present}
+
+    remaining = np.ones(n, dtype=bool)
+    for level in present:  # most -> least specific
+        take = remaining & valid[level] & (
+            prior_lookups[level]["matchups"] >= threshold
+        )
+        masks[level][take] = 1.0
+        remaining &= ~take
+
+    # Fallback: rows with no confident level shrink toward the broadest valid
+    # level available (largest support), still never mixing levels.
+    for level in reversed(present):  # least -> most specific
+        take = remaining & valid[level]
+        masks[level][take] = 1.0
+        remaining &= ~take
+
+    return masks
+
+
 def _smooth_metric(
     target: LevelRows,
     metric: str,
@@ -147,6 +189,30 @@ def _smooth_baseline(
         level: _prior_weight(level, lookup, cfg, per_minute=True) * amplification
         for level, lookup in prior_lookups.items()
     }
+
+    if cfg.smoothing_mode == "cascade":
+        selection = _cascade_selection(
+            prior_lookups, float(cfg.prior_confidence_matchups)
+        )
+        if cfg.cascade_match_weight:
+            total_rate = np.sum(list(rate_weights.values()), axis=0)
+            total_per_minute = np.sum(list(per_minute_weights.values()), axis=0)
+            rate_weights = {
+                level: total_rate * selection[level] for level in rate_weights
+            }
+            per_minute_weights = {
+                level: total_per_minute * selection[level]
+                for level in per_minute_weights
+            }
+        else:
+            rate_weights = {
+                level: weight * selection[level]
+                for level, weight in rate_weights.items()
+            }
+            per_minute_weights = {
+                level: weight * selection[level]
+                for level, weight in per_minute_weights.items()
+            }
 
     for level in PRIOR_LEVELS:
         if level not in prior_lookups:

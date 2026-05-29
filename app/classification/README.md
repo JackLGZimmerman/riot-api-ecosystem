@@ -1,9 +1,45 @@
 # Classification Embeddings
 
 This directory builds phase-aware identity descriptors for draft prediction.
-The working identity is `(championid, teamposition, build)`, and each output is
-preserved by temporal phase so a downstream model can compare what an identity
-usually contributes in early/mid/late game contexts.
+
+> An identity is the tuple `(championid, teamposition, build)`.
+
+Each output is preserved by temporal phase so a downstream model can compare
+what an identity usually contributes in early/mid/late game contexts.
+
+## Why This Project Validates the Prior Strategy First
+
+The `app/ml` win-rate model regressed below its own `1vx`-only baseline (~53%
+val/test vs ~57%) after interaction features were added — see
+[../ml/documentation/README.md](../ml/documentation/README.md). The suspected
+cause is the smoothing/prior strategy, not the features. This project smooths
+the **same** `1vx` identity metrics with the **same** `9000-9040` prior
+hierarchy, but it can be evaluated cheaply with the grouping-quality rubric in
+[EXPERIMENTS.md](EXPERIMENTS.md) / [SPECIALISATIONS.md](SPECIALISATIONS.md)
+without retraining the win-rate model. So the adaptive prior-fallback change is
+prototyped and judged here first; only a measured improvement in grouping
+outcomes justifies carrying it into the ML pipeline.
+
+### Adaptive prior fallback (cascade)
+
+`posteriors.py` supports two smoothing modes (`EmbeddingConfig.smoothing_mode`):
+
+- `additive` (legacy): pool every prior level into one weighted mixture.
+- `cascade` (**default**): shrink each identity toward only the highest-priority
+  prior level whose own sample size clears `prior_confidence_matchups` (`tau`,
+  default 50); broader levels are used only as fallback when no specific level is
+  confident enough. This stops a generic `build`/`role_build` prior from
+  contaminating a well-sampled `sibling`/`champion_role` prior. The priority
+  order is the contextual-relevance order in `PRIOR_LEVELS` (sibling →
+  champion_role → role_build → champion_build → build). `cascade_match_weight`
+  (default on) gives the selected level the same total prior weight the additive
+  mixture would have applied, so the change is purely *which* prior, not *how
+  much* shrinkage.
+
+Adopting the cascade sharpened group signatures (mean top-\|z\| +6.5%), tightened
+within-group cosine, and recovered `vision`'s previously-dropped late group, with
+no over-budget or coverage failures. The before/after evidence and the sampling
+threshold justification are in [EXPERIMENTS.md](EXPERIMENTS.md).
 
 The goal is not to replace the draft model. It is to provide extra structured
 signals that help separate games that otherwise sit in the low-confidence
@@ -35,24 +71,28 @@ or averaged into a single identity embedding before grouping.
 
 ## Latest Audit
 
-The full 2026-05-28 registry audit is in
+The full 2026-05-29 registry audit is in
 [SPECIALISATIONS.md](SPECIALISATIONS.md). It evaluates every active
 `SpecialistSpec` and `SingularMetricSpec`, including gold/death normalisation
-checks, phase-local group tables, top/bottom identities, and a one-line quality
-read per group.
+checks, phase-local group tables, top/bottom identities, coverage/dropped-group
+counts, and a per-group quality read.
 
 Main takeaways:
 
-- Most normalised variants changed the identity tail, so they should usually be
-  treated as new semantic axes rather than replacements for raw metrics.
-- `enchanters`, `durability`, `self_sustain`, `takedown_shape`,
-  `utility_pickmaking`, `jungle_control`, `siege_pressure`, `map_control`,
-  `resistances`, and `ability_power` currently have the cleanest group shapes.
-- The follow-up tuning pass promoted `burst_skirmish`, `economy_scaling`,
-  `early_agency`, `damage_profile`, `damage_efficiency`,
-  `defensive_statline`, `attack_damage`, and `on_hit_carry` by lowering PCA
-  retention enough to remove low-variance threshold fragments while preserving
-  clear semantic group reads.
+- The registry now smooths with the adaptive cascade (above). Under it, 467 of
+  473 retained groups read Excellent, all 24 specialists are within budget at
+  full coverage, and `vision` recovers its previously-dropped late group. The 6
+  residuals are intentional: `enchanters` (3) keeps a no-read baseline pool whose
+  separation sits just under the rubric bar, and `map_control` (3) keeps small
+  but coherent macro reads. See [EXPERIMENTS.md](EXPERIMENTS.md).
+- `sustained_damage` now owns direct champion-damage volume/focus semantics
+  (`t=0.55` under the cascade); damage-type shares stay in `damage_profile`.
+- `ability_power`, `attack_damage`, and `resistances` were narrowed away from
+  weak ratio/critical-strike fragments. Critical-strike magnitude remains a
+  singular metric, and raw AP/AD/resistance specialists now expose cleaner
+  high/low investment labels.
+- `farming`, `epic_objectives`, and `on_hit_carry` were retuned to merge
+  duplicate threshold fragments while preserving distinct semantic groups.
 
 Future performance work should validate specialist labels with target encoding
 or regularised one-hot features in the downstream draft model. If another broad
