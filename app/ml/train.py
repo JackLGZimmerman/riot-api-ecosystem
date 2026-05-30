@@ -38,7 +38,6 @@ from app.ml.structured_model import (
     save_structured_model,
     validate_delta_mode,
 )
-from app.ml.utils.calibration import expected_calibration_error
 
 setup_logging_config()
 logger = logging.getLogger(__name__)
@@ -82,42 +81,6 @@ def _binary_auc(scores: np.ndarray, targets: np.ndarray) -> float:
     return float((sum_pos_ranks - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
-def _adaptive_ece(scores: np.ndarray, targets: np.ndarray, n_bins: int = 15) -> float:
-    n = scores.size
-    if n == 0:
-        return float("nan")
-    order = np.argsort(scores)
-    s = scores[order]
-    t = targets[order]
-    bins = np.array_split(np.arange(n), n_bins)
-    total = 0.0
-    for idx in bins:
-        if idx.size == 0:
-            continue
-        total += idx.size * abs(s[idx].mean() - t[idx].mean())
-    return float(total / n)
-
-
-def _tail_ece(
-    scores: np.ndarray,
-    targets: np.ndarray,
-    *,
-    tail_quantile: float = 0.1,
-    n_bins: int = 5,
-) -> float:
-    n = scores.size
-    if n == 0:
-        return float("nan")
-    k = max(int(round(n * tail_quantile)), 1)
-    order = np.argsort(scores)
-    s_sorted = scores[order]
-    t_sorted = targets[order]
-    return 0.5 * (
-        _adaptive_ece(s_sorted[:k], t_sorted[:k], n_bins=n_bins)
-        + _adaptive_ece(s_sorted[-k:], t_sorted[-k:], n_bins=n_bins)
-    )
-
-
 def _nll(scores: np.ndarray, targets: np.ndarray) -> float:
     if scores.size == 0:
         return float("nan")
@@ -125,18 +88,18 @@ def _nll(scores: np.ndarray, targets: np.ndarray) -> float:
     return float(-np.mean(targets * np.log(p) + (1.0 - targets) * np.log(1.0 - p)))
 
 
-def _brier(scores: np.ndarray, targets: np.ndarray) -> float:
+def _ece(scores: np.ndarray, targets: np.ndarray, n_bins: int = 15) -> float:
+    """Equal-width expected calibration error for binary probabilities."""
     if scores.size == 0:
         return float("nan")
-    return float(np.mean(np.square(scores - targets)))
-
-
-def _entropy(scores: np.ndarray) -> float:
-    if scores.size == 0:
-        return float("nan")
-    p = np.clip(scores, EPS, 1.0 - EPS)
-    h = -(p * np.log(p) + (1.0 - p) * np.log(1.0 - p))
-    return float(np.mean(h))
+    p = np.clip(scores.astype(np.float64), 0.0, 1.0)
+    y = (targets > 0.5).astype(np.float64)
+    bin_idx = np.minimum((p * n_bins).astype(np.int64), n_bins - 1)
+    counts = np.bincount(bin_idx, minlength=n_bins)
+    populated = counts > 0
+    conf = np.bincount(bin_idx, weights=p, minlength=n_bins)[populated] / counts[populated]
+    acc = np.bincount(bin_idx, weights=y, minlength=n_bins)[populated] / counts[populated]
+    return float(np.sum(counts[populated] / p.size * np.abs(conf - acc)))
 
 
 def _seed_torch(seed: int, *, device: str) -> None:
@@ -247,7 +210,7 @@ def _confidence_from_counts_tensor(
 def _structured_tensors_from_raw(
     raw: RawTensorSplit,
     *,
-    prior_strength: float,
+    confidence_strength: float,
     delta_baseline_mode: DeltaBaselineMode,
 ) -> dict[str, torch.Tensor]:
     win_rate = raw.win_rate
@@ -271,7 +234,7 @@ def _structured_tensors_from_raw(
             expected_logit = _logit_prob_tensor((a_rate + b_rate) / 2.0)
         confidence = _confidence_from_counts_tensor(
             raw.s2vx_cnt[:, pair_offset + raw.pair_slot_idx],
-            prior_strength=prior_strength,
+            prior_strength=confidence_strength,
         )
         synergy_sides.append(
             torch.stack(
@@ -299,7 +262,7 @@ def _structured_tensors_from_raw(
         expected_matchup_logit = _logit_prob_tensor(0.5 + (blue_rates - red_rates) / 2.0)
     matchup_confidence = _confidence_from_counts_tensor(
         raw.m1v1_cnt,
-        prior_strength=prior_strength,
+        prior_strength=confidence_strength,
     )
     matchup_objects = torch.stack(
         [
@@ -313,9 +276,9 @@ def _structured_tensors_from_raw(
         dim=-1,
     )
 
-    p1_conf = _confidence_from_counts_tensor(raw.p1_cnt, prior_strength=prior_strength)
+    p1_conf = _confidence_from_counts_tensor(raw.p1_cnt, prior_strength=confidence_strength)
     m1_conf = matchup_confidence
-    s2_conf = _confidence_from_counts_tensor(raw.s2vx_cnt, prior_strength=prior_strength)
+    s2_conf = _confidence_from_counts_tensor(raw.s2vx_cnt, prior_strength=confidence_strength)
     confidence_summaries = torch.stack(
         [
             p1_conf.mean(dim=1),
@@ -366,7 +329,7 @@ def _predict_raw_tensor_split(
     split: RawTensorSplit,
     *,
     batch_size: int,
-    prior_strength: float,
+    confidence_strength: float,
     delta_baseline_mode: DeltaBaselineMode,
 ) -> np.ndarray:
     model.eval()
@@ -378,7 +341,7 @@ def _predict_raw_tensor_split(
             logits = model(
                 **_structured_tensors_from_raw(
                     raw_batch,
-                    prior_strength=prior_strength,
+                    confidence_strength=confidence_strength,
                     delta_baseline_mode=delta_baseline_mode,
                 )
             )["final_logit"]
@@ -389,28 +352,14 @@ def _predict_raw_tensor_split(
 def _evaluate_predictions(scores: np.ndarray, split: SplitData) -> dict[str, float | int]:
     targets = split.blue_win.astype(np.float64, copy=False)
     if targets.size == 0:
-        keys = (
-            "n",
-            "accuracy",
-            "auc",
-            "nll",
-            "brier",
-            "entropy",
-            "ece",
-            "adaptive_ece",
-            "tail_ece",
-        )
-        return {k: 0 if k == "n" else float("nan") for k in keys}
+        return {"n": 0, "accuracy": float("nan"), "auc": float("nan"),
+                "nll": float("nan"), "ece": float("nan")}
     return {
         "n": int(targets.size),
         "accuracy": float(np.mean((scores >= 0.5) == (targets > 0.5))),
         "auc": _binary_auc(scores, targets),
         "nll": _nll(scores, targets),
-        "brier": _brier(scores, targets),
-        "entropy": _entropy(scores),
-        "ece": expected_calibration_error(scores, targets),
-        "adaptive_ece": _adaptive_ece(scores, targets),
-        "tail_ece": _tail_ece(scores, targets),
+        "ece": _ece(scores, targets),
     }
 
 
@@ -433,18 +382,15 @@ def train(
         for name in ("train", "val")
     }
 
-    # Leakage-robust interaction config. Train interaction priors are in-sample
-    # (a train game's own outcome is in its 1v1/2vx priors), so low-support
-    # deltas leak the label. "raw" objects drop the leakage-isolating
-    # expected/delta columns, confidence_gate zeroes low-support interactions,
-    # and weighted pooling drops the max/min ops that select the leakiest pairs.
-    # See app/ml/documentation/README.md.
+    # "full" objects keep the expected/delta columns that carry the matchup/synergy
+    # signal; DatasetConfig.interaction_loo makes that delta leakage-free.
+    # See documentation/README.md.
     model_config = StructuredModelConfig(
         use_synergy=True,
         use_matchup=True,
         use_cross=True,
         delta_baseline_mode=delta_mode,
-        object_feature_mode="raw",
+        object_feature_mode="full",
         confidence_gate=True,
         pooling_ops=("weighted",),
     )
@@ -488,7 +434,7 @@ def train(
             )
             batch = _structured_tensors_from_raw(
                 raw_batch,
-                prior_strength=dataset_cfg.smoothing_prior_strength,
+                confidence_strength=dataset_cfg.confidence_gate_strength,
                 delta_baseline_mode=delta_mode,
             )
             optimizer.zero_grad(set_to_none=True)
@@ -503,7 +449,7 @@ def train(
             model,
             tensor_splits["val"],
             batch_size=train_cfg.batch_size,
-            prior_strength=dataset_cfg.smoothing_prior_strength,
+            confidence_strength=dataset_cfg.confidence_gate_strength,
             delta_baseline_mode=delta_mode,
         )
         train_nll = train_loss_sum / max(train_seen, 1)
@@ -531,7 +477,7 @@ def train(
     save_structured_model(
         train_cfg.model_path,
         model,
-        prior_strength=dataset_cfg.smoothing_prior_strength,
+        confidence_strength=dataset_cfg.confidence_gate_strength,
     )
 
     tensor_splits["test"] = _cache_raw_tensor_split("test", splits["test"], device=device)
@@ -540,7 +486,7 @@ def train(
             model,
             tensor_split,
             batch_size=train_cfg.batch_size,
-            prior_strength=dataset_cfg.smoothing_prior_strength,
+            confidence_strength=dataset_cfg.confidence_gate_strength,
             delta_baseline_mode=delta_mode,
         )
         for split_name, tensor_split in tensor_splits.items()
@@ -569,17 +515,13 @@ def train(
         m = metrics[split_name]
         if isinstance(m, dict):
             logger.info(
-                "%s n=%s acc=%.4f auc=%.4f nll=%.4f brier=%.4f "
-                "ece=%.4f adaptive_ece=%.4f tail_ece=%.4f",
+                "%s n=%s acc=%.4f auc=%.4f nll=%.4f ece=%.4f",
                 split_name,
                 m["n"],
                 m["accuracy"],
                 m["auc"],
                 m["nll"],
-                m["brier"],
                 m["ece"],
-                m["adaptive_ece"],
-                m["tail_ece"],
             )
 
     return train_cfg.model_path

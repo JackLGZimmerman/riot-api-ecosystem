@@ -86,8 +86,8 @@ LEVEL_KEY: dict[IdentityType, tuple[str, ...]] = {
 PRIOR_LEVELS: tuple[IdentityType, ...] = (
     IdentityType.SIBLING,
     IdentityType.CHAMPION_ROLE,
-    IdentityType.ROLE_BUILD,
     IdentityType.CHAMPION_BUILD,
+    IdentityType.ROLE_BUILD,
     IdentityType.BUILD,
 )
 
@@ -597,7 +597,11 @@ class EmbeddingConfig:
     prior_per_minute_strengths: dict[IdentityType, float] = field(
         default_factory=DEFAULT_PRIOR_PER_MINUTE_STRENGTHS.copy
     )
-    extreme_low_sample_threshold: float = 50.0
+    # Dynamic low-sample weighting (shared with app/ml via
+    # app.core.utils.smoothing): each prior level's weight is multiplied by
+    # sqrt(1 + amplification_threshold/max(n, 1)), so under-sampled levels are
+    # pulled harder toward their prior.
+    amplification_threshold: float = 50.0
     # Smoothing strategy:
     #   "additive" — pool every prior level into one weighted mixture (legacy).
     #   "cascade"  — shrink toward only the highest-priority prior level whose
@@ -612,6 +616,16 @@ class EmbeddingConfig:
     # the effect of the prior *value* (single vs pooled) from the effect of the
     # shrinkage *magnitude*, which otherwise drops sharply in cascade mode.
     cascade_match_weight: bool = True
+    # Roles that must not borrow from cross-role prior levels. CHAMPION_BUILD
+    # aggregates a champion across all roles; BUILD aggregates all roles into one
+    # group. Both contaminate utility/jungle embeddings with lane-champion stats.
+    # Lane roles (TOP/MIDDLE/BOTTOM) are allowed to share because their mechanics
+    # are similar enough that cross-champion borrowing is informative.
+    isolated_roles: frozenset[str] = frozenset({"UTILITY", "JUNGLE"})
+    isolated_role_excluded_levels: tuple[IdentityType, ...] = (
+        IdentityType.CHAMPION_BUILD,
+        IdentityType.BUILD,
+    )
     similarity_threshold: float = 0.82
     specialist_report_path: Path = SPECIALIST_REPORT_PATH
     projection_keep_variance: float = 0.91

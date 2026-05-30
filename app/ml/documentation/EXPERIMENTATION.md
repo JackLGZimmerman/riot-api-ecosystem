@@ -14,7 +14,6 @@ having to rediscover the important files.
 | `app/ml/cache_layout.py` | Cache file names, shapes, and cache format version. |
 | `app/ml/build_dataset.py` | Builds the extended cache from ClickHouse, including support-count arrays. |
 | `app/ml/predictor.py` | Production runtime inference path used by RL callers. |
-| `app/ml/model.py` | Historical logistic baseline implementation only. Useful for comparison, not production loading. |
 | `app/ml/data/metrics_latest.json` | Latest production training metrics and epoch history. |
 | `app/ml/data/structured_model_latest.json` | Historical structured audit output, if present in the workspace. |
 
@@ -100,8 +99,12 @@ experiment notes.
 Leakage-robustness knobs (production defaults in parentheses); see
 `documentation/README.md` for the rationale:
 
-- `object_feature_mode` (`"raw"`): `"raw"` drops the leaky `expected`/`delta`
-  object columns; `"full"` is the old 6-feature objects.
+- `interaction_loo` (`True`, in `DatasetConfig`): leave-one-out encodes train
+  priors so the `expected`/`delta` columns no longer leak the label. Requires a
+  cache rebuild.
+- `object_feature_mode` (`"full"`): keeps the 6-feature objects (incl.
+  `expected`/`delta`), which carry the matchup/synergy signal once
+  `interaction_loo` makes them honest. `"raw"` drops them (the pre-LOO workaround).
 - `confidence_gate` (`True`): scale interaction embeddings by support confidence.
 - `pooling_ops` (`("weighted",)`): which pooling ops feed the heads; the old
   default `("mean","max","min","weighted")` re-introduces the leakage.
@@ -122,17 +125,17 @@ prior and the expected `1vx` baseline. The default `delta_baseline_mode` remains
 
 ## What To Watch
 
-The train/validation divergence is the headline signal. The leakage-robust
-config closed it:
+The train/validation divergence is the headline signal. LOO encoding closed it
+at the source:
 
 ```text
 pre-fix:  train_nll ~= 0.51  val_nll ~= 0.80   (train AUC 0.83, val AUC 0.54)
-current:  train_nll ~= 0.67  val_nll ~= 0.68   (train AUC 0.62, val AUC 0.59)
+current:  train_nll ~= 0.68  val_nll ~= 0.68   (train AUC 0.597, val AUC 0.599)
 ```
 
-If a change re-opens that gap (val_nll >> train_nll, best epoch 1), it is
-re-introducing interaction leakage. Prioritize leakage-robust representation and
-large batches over raw capacity.
+With LOO the train AUC sits at or *below* val. If a change re-opens the gap
+(train AUC >> val, val_nll >> train_nll, best epoch 1), it is re-introducing
+interaction leakage — check that `interaction_loo` is on and the cache is rebuilt.
 
 For long experimentation, keep the scoreboard narrow. The only outputs that
 matter for run-to-run comparison are:
@@ -164,23 +167,12 @@ uv run pytest tests/ml -q
 ## Comparing Runs
 
 For each long run, compare only the six experiment outputs above. Treat test
-metrics, AUC, Brier score, adaptive ECE, tail ECE, and entropy as diagnostic
-details, not selection criteria.
+metrics and AUC as diagnostic details, not selection criteria.
 
-Use the historical logistic model as a reference point, not as the production
-loader:
+Historical logistic benchmark (code removed; numbers kept for comparison only):
 
 ```text
-app/ml/data/linear_winrate_model.npz
-```
-
-The latest historical logistic reference in documentation was roughly:
-
-```text
-validation NLL ~= 0.6860
-test NLL ~= 0.6860
-test accuracy ~= 0.5701
-test AUC ~= 0.5945
+test NLL ~= 0.6860   test accuracy ~= 0.5701   test AUC ~= 0.5945
 ```
 
 ## Notes For Future Refactors

@@ -50,7 +50,7 @@ def test_structured_objects_include_expected_baseline_shapes() -> None:
         p1_cnt=p1_cnt,
         m1v1_cnt=m1v1_cnt,
         s2vx_cnt=s2vx_cnt,
-        prior_strength=20.0,
+        confidence_strength=20.0,
     )
 
     assert arrays.synergy_objects.shape == (2, 2, 10, 6)
@@ -66,7 +66,7 @@ def test_synergy_logit_delta_uses_expected_identity_baseline() -> None:
         win_rate,
         synergy_2vx,
         s2vx_cnt,
-        prior_strength=20.0,
+        confidence_strength=20.0,
     )
 
     identity_logits = logit_prob(win_rate[:, :5])
@@ -91,7 +91,7 @@ def test_matchup_logit_delta_uses_expected_identity_advantage() -> None:
         win_rate,
         matchup_1v1,
         m1v1_cnt,
-        prior_strength=20.0,
+        confidence_strength=20.0,
     )
 
     blue_idx = 2
@@ -154,7 +154,7 @@ def test_raw_tensor_fast_path_matches_numpy_feature_builder() -> None:
         p1_cnt=p1_cnt,
         m1v1_cnt=m1v1_cnt,
         s2vx_cnt=s2vx_cnt,
-        prior_strength=20.0,
+        confidence_strength=20.0,
     )
     raw = _cache_raw_tensor_split(
         "test",
@@ -171,7 +171,7 @@ def test_raw_tensor_fast_path_matches_numpy_feature_builder() -> None:
     )
     fast = _structured_tensors_from_raw(
         raw,
-        prior_strength=20.0,
+        confidence_strength=20.0,
         delta_baseline_mode="logit",
     )
 

@@ -36,25 +36,10 @@ from app.ml.train import (
     _structured_tensors_from_raw,
     _binary_auc,
     _nll,
-    _brier,
-    _entropy,
+    _ece,
 )
-from app.ml.utils.calibration import expected_calibration_error
 
 ShuffleSpec = Literal["none", "synergy", "matchup", "all", "base"]
-
-
-def _ece_adaptive(scores: np.ndarray, targets: np.ndarray, n_bins: int = 15) -> float:
-    n = scores.size
-    if n == 0:
-        return float("nan")
-    order = np.argsort(scores)
-    s, t = scores[order], targets[order]
-    total = 0.0
-    for idx in np.array_split(np.arange(n), n_bins):
-        if idx.size:
-            total += idx.size * abs(s[idx].mean() - t[idx].mean())
-    return float(total / n)
 
 
 def select_threshold(scores: np.ndarray, targets: np.ndarray) -> tuple[float, float]:
@@ -72,10 +57,7 @@ def metric_suite(scores: np.ndarray, targets: np.ndarray) -> dict[str, float]:
         "acc": float(np.mean((scores >= 0.5) == (targets > 0.5))),
         "auc": _binary_auc(scores, targets),
         "nll": _nll(scores, targets),
-        "brier": _brier(scores, targets),
-        "ece": expected_calibration_error(scores, targets),
-        "adaptive_ece": _ece_adaptive(scores, targets),
-        "entropy": _entropy(scores),
+        "ece": _ece(scores, targets),
     }
 
 
@@ -149,7 +131,7 @@ class Harness:
         out: dict[str, FeatureSet] = {}
         for name, raw in self.raw.items():
             t = _structured_tensors_from_raw(
-                raw, prior_strength=self.prior_strength, delta_baseline_mode=delta_mode
+                raw, confidence_strength=self.prior_strength, delta_baseline_mode=delta_mode
             )
             syn = t["synergy_objects"]
             mat = t["matchup_objects"]
@@ -296,8 +278,8 @@ class Harness:
 def fmt(r: dict) -> str:
     def line(split: str) -> str:
         m = r[split]
-        return (f"{split:5s} acc={m['acc']:.4f} auc={m['auc']:.4f} nll={m['nll']:.4f} "
-                f"brier={m['brier']:.4f} ece={m['ece']:.4f}")
+        return (f"{split:5s} acc={m['acc']:.4f} auc={m['auc']:.4f} "
+                f"nll={m['nll']:.4f} ece={m['ece']:.4f}")
     return (
         f"=== {r['name']}  (best_epoch={r['best_epoch']} params={r['params']} {r['seconds']}s)\n"
         f"  {line('train')}\n  {line('val')}\n  {line('test')}\n"

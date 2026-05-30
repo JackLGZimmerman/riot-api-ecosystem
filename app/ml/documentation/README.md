@@ -5,8 +5,7 @@ This documents the production win prediction model in `app/ml`.
 ## Production Model
 
 As of 2026-05-29, production uses the Structured Interaction Model With Cross
-Layer. The earlier L2-regularised logistic regression remains in
-`app/ml/model.py` only as a historical baseline.
+Layer.
 
 Production training:
 
@@ -34,8 +33,8 @@ The cache is built from train-only priors and chronological splits:
 | Array | Shape | Meaning |
 | --- | --- | --- |
 | `win_rate.npy` | `[games, 10]` | Smoothed `1vx` identity priors |
-| `matchup_1v1.npy` | `[games, 25]` | Ordered blue-vs-red `1v1` priors |
-| `synergy_2vx.npy` | `[games, 20]` | Blue and red same-team `2vx` priors |
+| `matchup_1v1.npy` | `[games, 25]` | Smoothed ordered blue-vs-red `1v1` priors |
+| `synergy_2vx.npy` | `[games, 20]` | Smoothed blue and red same-team `2vx` priors |
 | `p1_cnt.npy` | `[games, 10]` | Support counts for `1vx` |
 | `m1v1_cnt.npy` | `[games, 25]` | Support counts for `1v1` |
 | `s2vx_cnt.npy` | `[games, 20]` | Support counts for `2vx` |
@@ -73,23 +72,22 @@ Pair and matchup objects carry observed prior, relevant solo priors, expected
 baseline, support confidence, and observed-minus-expected delta. The final head
 does not see raw champion IDs.
 
-### Leakage-robust interaction config (current production)
+### Interaction config (current production)
 
-Train interaction priors are **in-sample**: a train game's own outcome is folded
-into its `1v1`/`2vx` priors. `1vx` identities have high support so this is
-negligible, but low-support `1v1`/`2vx` pairs leak the label heavily. The
-interaction branches memorise that leakage, which generalises to nothing. Three
-`StructuredModelConfig` knobs make them leakage-robust:
+**Why LOO + full delta:** train `1v1`/`2vx` priors are in-sample — a game's own
+outcome sits in its own priors, leaking the label onto the `joint - expected` delta
+at low support. The old config dropped that delta (`"raw"`), discarding real signal.
+`interaction_loo` subtracts each train game's own outcome first, so `full` (delta-on)
+now uses honest matchup and synergy signal. Test AUC 0.5928 → 0.5972.
 
 | Knob | Production value | Why |
 | --- | --- | --- |
-| `object_feature_mode` | `"raw"` | Drops the `expected` and `delta` columns. The `joint - expected` delta isolates exactly the low-support leakage (linear val AUC 0.55 on deltas vs 0.59 on raw logit priors). |
-| `confidence_gate` | `True` | Scales each interaction embedding by its support confidence, so low-support (leaky) pairs contribute ~0. |
-| `pooling_ops` | `("weighted",)` | Confidence-weighted mean only. `max`/`min` pooling selected the most extreme = lowest-support = leakiest interactions. |
-
-Large `batch_size` (32768) is also load-bearing: it acts as implicit
-regularization, slowing the first-epoch fit of the residual leakage so the model
-holds the honest ceiling instead of collapsing.
+| `interaction_loo` (dataset) | `True` | Leave-one-out encodes train priors (symmetrically across solo/`1v1`/`2vx`) so the delta no longer leaks. Val/test are train-derived and already leak-free, so untouched. |
+| `object_feature_mode` | `"full"` | Keeps the `expected`/`delta` columns; with LOO the delta beats delta-off on val *and* test instead of overfitting. |
+| `confidence_gate` | `True` | Scales each interaction embedding by support confidence, muting the noisiest low-support pairs. |
+| `pooling_ops` | `("weighted",)` | Confidence-weighted mean only; `max`/`min` selected the lowest-support interactions. |
+| `smoothing_mode` | `"cascade"` | Uses the raw contextual rate once support clears `prior_confidence_matchups`, else shrinks toward the broad/composite fallback. Avoids oversmoothing confident identities. |
+| `confidence_gate_strength` | `30` | Confidence column `n/(n+s)` strength. Sweep over 5–150 peaks on a flat 28–35 plateau; below ~20 tail calibration degrades. Requires retrain. |
 
 For tuning guidance and safe non-production output paths, see
 [EXPERIMENTATION.md](EXPERIMENTATION.md).
@@ -100,59 +98,17 @@ For tuning guidance and safe non-production output paths, see
 | --- | ---: | ---: | ---: | ---: |
 | L2 logistic reference (55 flat priors) | 0.5701 | 0.5945 | 0.6860 | — |
 | Structured pre-fix (delta + max/min pool) | 0.5303 | 0.5384 | 0.8031 | 0.1699 |
-| **Structured leakage-robust (current)** | **0.5665** | **0.5918** | **0.6792** | **0.0219** |
+| Structured leakage-robust raw (pre-LOO) | 0.5673 | 0.5928 | 0.6788 | 0.0204 |
+| **Structured LOO + full delta + cascade (current)** | **0.5712** | **0.5972** | **0.6770** | **0.0201** |
 
 The pre-fix structured model overfit the in-sample train leakage (train AUC 0.83,
 val AUC 0.54, best epoch 1) and was strictly worse than the logistic baseline.
-The leakage-robust config matches the logistic baseline on accuracy/AUC, beats it
-on NLL, and is ~8x better calibrated, with a healthy train/val gap (train AUC
-0.624 vs val 0.594, best epoch 2).
+The pre-LOO `raw` config dropped the delta to survive that leakage; it matched the
+logistic baseline but could not use the interaction signal. LOO encoding removes
+the leak at the source, so `full` (delta-on) now beats both the pre-LOO config and
+the logistic reference on AUC and NLL, while staying ~9x better calibrated than the
+pre-fix model. Training is healthy — train AUC 0.5968 sits *below* val 0.5990
+(no leakage gap), running 29 epochs.
 
-The logistic model remains the rollback/reference point:
-
-```text
-app/ml/data/linear_winrate_model.npz
-```
-
-## Findings (puzzle investigation)
-
-Diagnosis from controlled ablations (`app/ml/experiments/`):
-
-1. **Where the signal lives.** The `base` identity branch alone reaches val AUC
-   0.594 / test acc 0.570 with no overfitting. Adding the synergy/matchup
-   branches *collapsed* val AUC to ~0.54.
-2. **Why.** Train interaction priors are in-sample (leaky). Negative controls
-   confirmed it: real interactions (test AUC 0.538) were **worse than noise** —
-   shuffling all interactions recovered base level (0.593), because the model
-   then ignores them. The `delta` representation and `max`/`min` pooling
-   amplified the low-support leakage.
-3. **The interaction signal is real but tiny.** Trained on *honest* priors (the
-   out-of-sample val split), the full model does not overfit and beats base by
-   only +0.003 AUC. A learning curve shows that gap plateauing near +0.003.
-4. **Is ~60% reachable?** No, not from these smoothed priors. The honest signal
-   ceiling is ~0.59–0.60 AUC / ~0.57–0.58 accuracy. 60% accuracy needs ≈0.62
-   AUC. The fix recovers the model to that honest ceiling and removes the
-   collapse, but the priors do not contain enough extractable interaction signal
-   for 60%.
-
-### Remaining bottleneck / next adjustment
-
-The blocker to more interaction signal is **train-side in-sample prior leakage**,
-not the model. To extract the (small) remaining interaction signal:
-
-- Rebuild the train cache with **out-of-sample / leave-one-out** interaction
-  priors so training sees honest `1v1`/`2vx` features (`build_dataset.py` /
-  ClickHouse dictionaries). The honest-training experiments prove the model is
-  then well-behaved.
-- Test **lower smoothing** (`smoothing_prior_strength` < 20) on high-support
-  interactions once training is honest, to stop washing out their signal.
-
-Reproduce the investigation:
-
-```bash
-uv run python -m app.ml.experiments.stage0_diagnose       # ablations + logistic
-uv run python -m app.ml.experiments.stage2_controls       # negative controls + buckets
-uv run python -m app.ml.experiments.stage3_linear_decomp  # raw vs delta signal ceiling
-uv run python -m app.ml.experiments.stage4_honest_training # honest-prior training
-uv run python -m app.ml.experiments.stage6_robust         # leakage-robust config sweep
-```
+The L2 logistic row is a historical benchmark only; its training code has been
+removed from the package.

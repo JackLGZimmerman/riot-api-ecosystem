@@ -19,8 +19,13 @@ from app.ml.cache_layout import (
     array_paths,
 )
 from app.ml.config import PLAYER_PIVOT_TABLE, DatasetConfig
-from app.ml.utils.bayesian_smoothing import bayesian_smoothed_rate
-from database.clickhouse.client import get_client
+from app.core.utils.smoothing import (
+    cascade_dynamic_smoothed_rate,
+    dynamic_smoothed_rate,
+)
+from clickhouse_connect.driver.exceptions import StreamFailureError
+
+from database.clickhouse.client import _local, get_client
 
 SPLITS = (("train", "train"), ("validation", "val"), ("test", "test"))
 
@@ -67,6 +72,35 @@ def _composite_interaction_priors(
     red_pairs = [(red[:, i] + red[:, j]) / 2.0 for i, j in _TEAM_PAIRS]
     comp_2vx = np.column_stack(blue_pairs + red_pairs)
     return comp_1v1, comp_2vx
+
+
+def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
+    """Subtract each train game's own outcome from its in-sample priors, in place.
+
+    Own-outcome per slot is the focal side's win: solo blue 0-4 / red 5-9; 1v1 is
+    blue-perspective for all 25; 2vx blue pairs 0-9 / red pairs 10-19. Count-1 pairs
+    collapse to count 0, so smoothing returns their composite prior.
+    """
+    blue_win = raw["blue_win"]
+    red_win = 1.0 - blue_win
+    own = {
+        "p1_raw": np.concatenate(
+            [np.broadcast_to(blue_win[:, None], (blue_win.size, 5)),
+             np.broadcast_to(red_win[:, None], (blue_win.size, 5))], axis=1
+        ),
+        "m1v1_raw": np.broadcast_to(blue_win[:, None], (blue_win.size, 25)),
+        "s2vx_raw": np.concatenate(
+            [np.broadcast_to(blue_win[:, None], (blue_win.size, 10)),
+             np.broadcast_to(red_win[:, None], (blue_win.size, 10))], axis=1
+        ),
+    }
+    for raw_key, cnt_key in (("p1_raw", "p1_cnt"), ("m1v1_raw", "m1v1_cnt"), ("s2vx_raw", "s2vx_cnt")):
+        count = raw[cnt_key]
+        loo_count = count - 1.0
+        loo_wins = np.rint(raw[raw_key] * count) - own[raw_key]
+        safe = loo_count > 0.0
+        raw[raw_key] = np.where(safe, loo_wins / np.where(safe, loo_count, 1.0), 0.5)
+        raw[cnt_key] = np.maximum(loo_count, 0.0)
 
 
 _DICT = "game_data_filtered"
@@ -170,29 +204,49 @@ def _smoothed_features(
     *,
     prior_mean: float,
     prior_strength: float,
+    amplification_threshold: float,
+    smoothing_mode: str,
+    prior_confidence_matchups: float,
     per_side_fallback: bool,
 ) -> dict[str, np.ndarray]:
-    win_rate = bayesian_smoothed_rate(
-        raw["p1_raw"], raw["p1_cnt"], prior_mean=prior_mean, prior_strength=prior_strength
-    )
+    def smooth_rate(
+        win_rate: np.ndarray,
+        sample_count: np.ndarray,
+        prior: float | np.ndarray,
+    ) -> np.ndarray:
+        if smoothing_mode == "additive":
+            return dynamic_smoothed_rate(
+                win_rate,
+                sample_count,
+                prior_mean=prior,
+                base_strength=prior_strength,
+                amplification_threshold=amplification_threshold,
+            )
+        if smoothing_mode == "cascade":
+            return cascade_dynamic_smoothed_rate(
+                win_rate,
+                sample_count,
+                prior_mean=prior,
+                base_strength=prior_strength,
+                amplification_threshold=amplification_threshold,
+                confidence_threshold=prior_confidence_matchups,
+            )
+        raise ValueError(f"Unsupported smoothing_mode: {smoothing_mode!r}")
+
+    win_rate = smooth_rate(raw["p1_raw"], raw["p1_cnt"], prior_mean)
     prior_1v1, prior_2vx = (
         _composite_interaction_priors(win_rate)
         if per_side_fallback
         else (prior_mean, prior_mean)
     )
 
-    def smooth(raw_key: str, cnt_key: str, prior: float | np.ndarray) -> np.ndarray:
-        return bayesian_smoothed_rate(
-            raw[raw_key], raw[cnt_key], prior_mean=prior, prior_strength=prior_strength
-        )
-
     return {
         "blue_win": raw["blue_win"],
         "win_rate": win_rate.astype(DISK_DTYPES["win_rate"], copy=False),
-        "matchup_1v1": smooth("m1v1_raw", "m1v1_cnt", prior_1v1).astype(
+        "matchup_1v1": smooth_rate(raw["m1v1_raw"], raw["m1v1_cnt"], prior_1v1).astype(
             DISK_DTYPES["matchup_1v1"], copy=False
         ),
-        "synergy_2vx": smooth("s2vx_raw", "s2vx_cnt", prior_2vx).astype(
+        "synergy_2vx": smooth_rate(raw["s2vx_raw"], raw["s2vx_cnt"], prior_2vx).astype(
             DISK_DTYPES["synergy_2vx"], copy=False
         ),
         "p1_cnt": raw["p1_cnt"].astype(DISK_DTYPES["p1_cnt"], copy=False),
@@ -205,6 +259,26 @@ def _smoothed_features(
     }
 
 
+def _fetch_chunk_rows(query: str, attempts: int = 4) -> list:
+    """Run a chunk query, retrying on the intermittent ClickHouse StreamFailureError.
+    A stream failure can leave the thread-local connection unusable, so drop it and
+    reconnect before each retry."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return list(get_client().query(query).result_rows)
+        except StreamFailureError:
+            if attempt == attempts:
+                raise
+            logger.warning("StreamFailureError on chunk fetch (attempt %d), reconnecting", attempt)
+            client = getattr(_local, "client", None)
+            if client is not None:
+                try:
+                    client.close()
+                finally:
+                    _local.client = None
+    return []
+
+
 def _stream_split(split: str, limit: int) -> Iterable[dict[str, np.ndarray]]:
     """Yield raw prior columns in chunks, keyset-paginated on matchid (no OFFSET cost)."""
     remaining = int(limit)
@@ -214,7 +288,7 @@ def _stream_split(split: str, limit: int) -> Iterable[dict[str, np.ndarray]]:
         query = _CHUNK_QUERY_TEMPLATE.format(
             table=PLAYER_PIVOT_TABLE, split=split, last_matchid=last_matchid, chunk=chunk
         )
-        rows = get_client().query(query).result_rows
+        rows = _fetch_chunk_rows(query)
         if not rows:
             return
         yield {
@@ -235,14 +309,23 @@ def _write_split(
     offset: int,
     prior_mean: float,
     prior_strength: float,
+    amplification_threshold: float,
+    smoothing_mode: str,
+    prior_confidence_matchups: float,
     per_side_fallback: bool,
+    leave_one_out: bool,
 ) -> int:
     written = 0
     for raw in _stream_split(split, limit):
+        if leave_one_out:
+            _leave_one_out(raw)
         block = _smoothed_features(
             raw,
             prior_mean=prior_mean,
             prior_strength=prior_strength,
+            amplification_threshold=amplification_threshold,
+            smoothing_mode=smoothing_mode,
+            prior_confidence_matchups=prior_confidence_matchups,
             per_side_fallback=per_side_fallback,
         )
         start = offset + written
@@ -263,7 +346,11 @@ def _write_meta(cfg: DatasetConfig, n_games: int, splits: dict[str, int]) -> Pat
                 "smoothing": {
                     "prior_mean": cfg.smoothing_prior_mean,
                     "prior_strength": cfg.smoothing_prior_strength,
+                    "amplification_threshold": cfg.amplification_threshold,
+                    "smoothing_mode": cfg.smoothing_mode,
+                    "prior_confidence_matchups": cfg.prior_confidence_matchups,
                     "interaction_per_side_fallback": cfg.interaction_per_side_fallback,
+                    "interaction_loo": cfg.interaction_loo,
                 },
             },
             indent=2,
@@ -290,7 +377,11 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             offset=offset,
             prior_mean=cfg.smoothing_prior_mean,
             prior_strength=cfg.smoothing_prior_strength,
+            amplification_threshold=cfg.amplification_threshold,
+            smoothing_mode=cfg.smoothing_mode,
+            prior_confidence_matchups=cfg.prior_confidence_matchups,
             per_side_fallback=cfg.interaction_per_side_fallback,
+            leave_one_out=cfg.interaction_loo and sql_split == "train",
         )
         if written != counts[meta_split]:
             raise RuntimeError(

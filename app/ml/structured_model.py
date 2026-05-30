@@ -129,7 +129,7 @@ def build_synergy_objects(
     synergy_2vx: np.ndarray,
     s2vx_cnt: np.ndarray,
     *,
-    prior_strength: float,
+    confidence_strength: float,
     delta_baseline_mode: DeltaBaselineMode = "logit",
 ) -> np.ndarray:
     if win_rate.ndim != 2 or win_rate.shape[1] != 10:
@@ -157,7 +157,7 @@ def build_synergy_objects(
             objects[:, side_idx, pair_idx, 3] = expected_logit
             objects[:, side_idx, pair_idx, 4] = confidence_from_counts(
                 s2vx_cnt[:, feature_idx],
-                prior_strength=prior_strength,
+                prior_strength=confidence_strength,
             )
             objects[:, side_idx, pair_idx, 5] = joint_logit - expected_logit
     return objects
@@ -168,7 +168,7 @@ def build_matchup_objects(
     matchup_1v1: np.ndarray,
     m1v1_cnt: np.ndarray,
     *,
-    prior_strength: float,
+    confidence_strength: float,
     delta_baseline_mode: DeltaBaselineMode = "logit",
 ) -> np.ndarray:
     if win_rate.ndim != 2 or win_rate.shape[1] != 10:
@@ -198,7 +198,7 @@ def build_matchup_objects(
             objects[:, feature_idx, 3] = expected_logit
             objects[:, feature_idx, 4] = confidence_from_counts(
                 m1v1_cnt[:, feature_idx],
-                prior_strength=prior_strength,
+                prior_strength=confidence_strength,
             )
             objects[:, feature_idx, 5] = matchup_logits[:, feature_idx] - expected_logit
     return objects
@@ -209,11 +209,11 @@ def build_confidence_summaries(
     m1v1_cnt: np.ndarray,
     s2vx_cnt: np.ndarray,
     *,
-    prior_strength: float,
+    confidence_strength: float,
 ) -> np.ndarray:
-    p1_conf = confidence_from_counts(p1_cnt, prior_strength=prior_strength)
-    m1_conf = confidence_from_counts(m1v1_cnt, prior_strength=prior_strength)
-    s2_conf = confidence_from_counts(s2vx_cnt, prior_strength=prior_strength)
+    p1_conf = confidence_from_counts(p1_cnt, prior_strength=confidence_strength)
+    m1_conf = confidence_from_counts(m1v1_cnt, prior_strength=confidence_strength)
+    s2_conf = confidence_from_counts(s2vx_cnt, prior_strength=confidence_strength)
     return np.column_stack(
         [
             p1_conf.mean(axis=1),
@@ -235,7 +235,7 @@ def build_structured_input_arrays(
     p1_cnt: np.ndarray,
     m1v1_cnt: np.ndarray,
     s2vx_cnt: np.ndarray,
-    prior_strength: float,
+    confidence_strength: float,
     delta_baseline_mode: DeltaBaselineMode = "logit",
 ) -> StructuredInputArrays:
     return StructuredInputArrays(
@@ -244,21 +244,21 @@ def build_structured_input_arrays(
             win_rate,
             synergy_2vx,
             s2vx_cnt,
-            prior_strength=prior_strength,
+            confidence_strength=confidence_strength,
             delta_baseline_mode=delta_baseline_mode,
         ),
         matchup_objects=build_matchup_objects(
             win_rate,
             matchup_1v1,
             m1v1_cnt,
-            prior_strength=prior_strength,
+            confidence_strength=confidence_strength,
             delta_baseline_mode=delta_baseline_mode,
         ),
         confidence_summaries=build_confidence_summaries(
             p1_cnt,
             m1v1_cnt,
             s2vx_cnt,
-            prior_strength=prior_strength,
+            confidence_strength=confidence_strength,
         ),
         role_pair_type_ids=role_pair_type_ids(),
     )
@@ -649,12 +649,12 @@ def _config_from_payload(payload: dict[str, Any]) -> StructuredModelConfig:
     return StructuredModelConfig(**config_dict)
 
 
-def save_structured_model(path: Path, model: StructuredWinModel, *, prior_strength: float) -> None:
+def save_structured_model(path: Path, model: StructuredWinModel, *, confidence_strength: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "model_config": asdict(model.config),
-            "prior_strength": float(prior_strength),
+            "confidence_strength": float(confidence_strength),
             "state_dict": model.state_dict(),
         },
         path,
@@ -671,4 +671,6 @@ def load_structured_model(
     model = StructuredWinModel(config).to(device)
     model.load_state_dict(payload["state_dict"])
     model.eval()
-    return model, config, float(payload.get("prior_strength", 20.0))
+    # "prior_strength" is the legacy key; new artifacts use "confidence_strength".
+    strength = payload.get("confidence_strength") or payload.get("prior_strength", 20.0)
+    return model, config, float(strength)
