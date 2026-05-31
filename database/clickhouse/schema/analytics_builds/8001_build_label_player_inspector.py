@@ -9,7 +9,7 @@ Examples:
     python 8001_build_label_player_inspector.py
     python 8001_build_label_player_inspector.py 2 JUNGLE mr_tank
 
-The underlying participant_item_value_totals table is built by 5133 against
+The underlying participant_item_value_totals table is built by 5132 against
 item_value_map_dict with the composite key (championid, teamposition, itemid).
 Specific (championid, teamposition) rows in item_value_map.jsonl are applied
 to that exact pair; rows with NULL championid/teamposition act as the general

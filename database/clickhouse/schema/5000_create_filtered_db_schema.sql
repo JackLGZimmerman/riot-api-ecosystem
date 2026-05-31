@@ -1,168 +1,88 @@
+-- noqa: disable=PRS
 CREATE DATABASE IF NOT EXISTS game_data_filtered;
 
--- Persistent MergeTree tables: filtered snapshots of game_data base tables.
--- Populated by the corresponding build script after the filter pipeline runs.
--- ORDER BY keys mirror the source tables.
+-- The filtered database now keeps only tables used by the production ML and
+-- classification feature paths. Raw match snapshots, metadata, most timeline
+-- event copies, temporal classification artifacts, and retired experiment
+-- aggregations are derived or obsolete and should be dropped rather than
+-- recreated here.
 DROP TABLE IF EXISTS game_data_filtered.metadata;
-CREATE TABLE IF NOT EXISTS game_data_filtered.metadata
-AS game_data.metadata
-ENGINE = MergeTree
-ORDER BY (matchid, run_id);
 DROP TABLE IF EXISTS game_data_filtered.info;
-CREATE TABLE IF NOT EXISTS game_data_filtered.info
-AS game_data.info
-ENGINE = MergeTree
-ORDER BY (matchid, run_id);
 DROP TABLE IF EXISTS game_data_filtered.bans;
-CREATE TABLE IF NOT EXISTS game_data_filtered.bans
-AS game_data.bans
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, pickturn, run_id);
 DROP TABLE IF EXISTS game_data_filtered.feats;
-CREATE TABLE IF NOT EXISTS game_data_filtered.feats
-AS game_data.feats
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, feattype, run_id);
 DROP TABLE IF EXISTS game_data_filtered.objectives;
-CREATE TABLE IF NOT EXISTS game_data_filtered.objectives
-AS game_data.objectives
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, objectivetype, run_id);
+DROP TABLE IF EXISTS game_data_filtered.participant_challenges;
+DROP TABLE IF EXISTS game_data_filtered.participant_perk_values;
+DROP TABLE IF EXISTS game_data_filtered.participant_perk_ids;
+DROP TABLE IF EXISTS game_data_filtered.tl_ward_placed;
+DROP TABLE IF EXISTS game_data_filtered.tl_ward_kill;
+DROP TABLE IF EXISTS game_data_filtered.tl_item_purchased;
+DROP TABLE IF EXISTS game_data_filtered.tl_item_sold;
+DROP TABLE IF EXISTS game_data_filtered.tl_item_destroyed;
+DROP TABLE IF EXISTS game_data_filtered.tl_item_undo;
+DROP TABLE IF EXISTS game_data_filtered.tl_level_up;
+DROP TABLE IF EXISTS game_data_filtered.tl_skill_level_up;
+DROP TABLE IF EXISTS game_data_filtered.tl_pause_end;
+DROP TABLE IF EXISTS game_data_filtered.tl_game_end;
+DROP TABLE IF EXISTS game_data_filtered.tl_objective_bounty_prestart;
+DROP TABLE IF EXISTS game_data_filtered.tl_objective_bounty_finish;
+DROP TABLE IF EXISTS game_data_filtered.tl_feat_update;
+DROP TABLE IF EXISTS game_data_filtered.tl_champion_transform;
+DROP TABLE IF EXISTS game_data_filtered.tl_building_kill;
+DROP TABLE IF EXISTS game_data_filtered.tl_champion_kill;
+DROP TABLE IF EXISTS game_data_filtered.tl_champion_special_kill;
+DROP TABLE IF EXISTS game_data_filtered.tl_dragon_soul_given;
+DROP TABLE IF EXISTS game_data_filtered.tl_elite_monster_kill;
+DROP TABLE IF EXISTS game_data_filtered.tl_turret_plate_destroyed;
+DROP TABLE IF EXISTS game_data_filtered.tl_ck_victim_damage_dealt;
+DROP TABLE IF EXISTS game_data_filtered.tl_ck_victim_damage_received;
+DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal;
+DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal_prior_sibling;
+DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal_prior_champion_role;
+DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal_prior_role_build;
+DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal_prior_champion_build;
+DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal_prior_build;
+DROP TABLE IF EXISTS game_data_filtered.matchup_3v2;
+DROP TABLE IF EXISTS game_data_filtered.matchup_3v3;
+DROP TABLE IF EXISTS game_data_filtered.synergy_2v2;
+DROP TABLE IF EXISTS game_data_filtered.synergy_3v3;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_recent_s16_synergy_1vx_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_recent_s16_matchup_1v1_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_recent_s16_synergy_2vx_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_recent_s16_matchup_1v1_nobuild_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_recent_s16_matchup_1v1_champ_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_recent_s16_synergy_2vx_nobuild_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_recent_s16_synergy_2vx_champ_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_smoke_synergy_1vx_unknown_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_smoke_matchup_1v1_unknown_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_smoke_synergy_2vx_unknown_dict;
+DROP DICTIONARY IF EXISTS game_data_filtered.hgnn_synergy_3vx_dict;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_recent_s16_ml_game_player_pivot;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_recent_s16_synergy_1vx;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_recent_s16_matchup_1v1;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_recent_s16_synergy_2vx;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_recent_s16_matchup_1v1_nobuild;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_recent_s16_matchup_1v1_champ;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_recent_s16_synergy_2vx_nobuild;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_recent_s16_synergy_2vx_champ;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_smoke_ml_game_player_pivot_unknown;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_smoke_synergy_1vx_unknown;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_smoke_matchup_1v1_unknown;
+DROP TABLE IF EXISTS game_data_filtered.hgnn_smoke_synergy_2vx_unknown;
+
+-- Persistent ML input table populated by 5003_filtered_tables_build.sql.
 DROP TABLE IF EXISTS game_data_filtered.participant_stats;
 CREATE TABLE IF NOT EXISTS game_data_filtered.participant_stats
 AS game_data.participant_stats
 ENGINE = MergeTree
 ORDER BY (matchid, participantid, puuid, run_id);
-DROP TABLE IF EXISTS game_data_filtered.participant_challenges;
-CREATE TABLE IF NOT EXISTS game_data_filtered.participant_challenges
-AS game_data.participant_challenges
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, puuid, run_id);
-DROP TABLE IF EXISTS game_data_filtered.participant_perk_values;
-CREATE TABLE IF NOT EXISTS game_data_filtered.participant_perk_values
-AS game_data.participant_perk_values
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, puuid, run_id);
-DROP TABLE IF EXISTS game_data_filtered.participant_perk_ids;
-CREATE TABLE IF NOT EXISTS game_data_filtered.participant_perk_ids
-AS game_data.participant_perk_ids
-ENGINE = MergeTree
-ORDER BY (matchid, teamid, puuid, run_id);
+
+-- Classification embeddings still consume final participant timeline states.
 DROP TABLE IF EXISTS game_data_filtered.tl_participant_stats;
 CREATE TABLE IF NOT EXISTS game_data_filtered.tl_participant_stats
 AS game_data.tl_participant_stats
 ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, participantid, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_ward_placed;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_ward_placed
-AS game_data.tl_ward_placed
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_ward_kill;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_ward_kill
-AS game_data.tl_ward_kill
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_item_purchased;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_item_purchased
-AS game_data.tl_item_purchased
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_item_sold;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_item_sold
-AS game_data.tl_item_sold
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_item_destroyed;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_item_destroyed
-AS game_data.tl_item_destroyed
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_item_undo;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_item_undo
-AS game_data.tl_item_undo
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_level_up;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_level_up
-AS game_data.tl_level_up
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_skill_level_up;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_skill_level_up
-AS game_data.tl_skill_level_up
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_pause_end;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_pause_end
-AS game_data.tl_pause_end
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_game_end;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_game_end
-AS game_data.tl_game_end
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_objective_bounty_prestart;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_objective_bounty_prestart
-AS game_data.tl_objective_bounty_prestart
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_objective_bounty_finish;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_objective_bounty_finish
-AS game_data.tl_objective_bounty_finish
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_feat_update;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_feat_update
-AS game_data.tl_feat_update
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_champion_transform;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_champion_transform
-AS game_data.tl_champion_transform
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_building_kill;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_building_kill
-AS game_data.tl_building_kill
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_champion_kill;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_champion_kill
-AS game_data.tl_champion_kill
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, champion_kill_event_id, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_champion_special_kill;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_champion_special_kill
-AS game_data.tl_champion_special_kill
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_dragon_soul_given;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_dragon_soul_given
-AS game_data.tl_dragon_soul_given
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_elite_monster_kill;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_elite_monster_kill
-AS game_data.tl_elite_monster_kill
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_turret_plate_destroyed;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_turret_plate_destroyed
-AS game_data.tl_turret_plate_destroyed
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_ck_victim_damage_dealt;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_ck_victim_damage_dealt
-AS game_data.tl_ck_victim_damage_dealt
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, champion_kill_event_id, idx, run_id);
-DROP TABLE IF EXISTS game_data_filtered.tl_ck_victim_damage_received;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_ck_victim_damage_received
-AS game_data.tl_ck_victim_damage_received
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, champion_kill_event_id, idx, run_id);
 
 DROP TABLE IF EXISTS game_data_filtered.participant_item_value_totals;
 CREATE TABLE IF NOT EXISTS game_data_filtered.participant_item_value_totals

@@ -33,9 +33,8 @@ def test_nested_pooling_backs_off_to_dense_parent_effective_support() -> None:
     assert eff_n[0, 0] == 800.0
 
 
-def test_hgnn_inputs_use_effective_support_for_variance_and_raw_support_features() -> None:
+def test_hgnn_inputs_use_raw_relationship_support_features() -> None:
     raw_counts = np.zeros((1, 25), dtype=np.float32)
-    effective_counts = np.full((1, 25), 800.0, dtype=np.float32)
 
     inputs = build_hgnn_inputs(
         champion_id=np.zeros((1, 10), dtype=np.int64),
@@ -46,15 +45,12 @@ def test_hgnn_inputs_use_effective_support_for_variance_and_raw_support_features
         p1_cnt=np.zeros((1, 10), dtype=np.float32),
         m1v1_cnt=raw_counts,
         s2vx_cnt=np.zeros((1, 20), dtype=np.float32),
-        m1v1_eff_n=effective_counts,
-        s2vx_eff_n=np.full((1, 20), 400.0, dtype=np.float32),
         strength=30.0,
     )
 
-    assert float(inputs["var_1v1"][0, 0]) < 0.001
     assert float(inputs["conf_1v1"][0, 0]) == 0.0
-    assert float(inputs["log_count_1v1"][0, 0]) == 0.0
     assert float(inputs["missing_1v1"][0, 0]) == 1.0
+    assert float(inputs["delta_logit_1v1"][0, 0]) > 0.0
 
 
 def test_prior_table_backoff_lookups_match_training_orientation() -> None:

@@ -1,6 +1,5 @@
 -- noqa: disable=LT01,LT05,PRS
 
-DROP TABLE IF EXISTS game_data_filtered.synergy_3v3;
 DROP TABLE IF EXISTS game_data_filtered.synergy_3vx;
 
 CREATE TABLE IF NOT EXISTS game_data_filtered.synergy_3vx

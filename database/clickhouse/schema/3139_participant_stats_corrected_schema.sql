@@ -8,9 +8,10 @@
 --   ITEM_SOLD:      goldspent incremented by 70% of item price (sell value recovered)
 --   ITEM_UNDO:      goldspent adjusted by goldgain (reverses previous transaction)
 --
--- Populated by 3139_participant_stats_corrected_build.sql.
--- Placed in game_data (pre-filter) so 4000_filter_build.sql applies all filters
--- against the corrected stats rather than the raw values.
+-- Populated by 3139_participant_stats_corrected_build.sql for the latest-season
+-- long-game population. Placed in game_data (pre-filter) so
+-- 4000_filter_build.sql applies all filters against the corrected stats rather
+-- than the raw values.
 DROP TABLE IF EXISTS game_data.participant_stats_corrected;
 CREATE TABLE IF NOT EXISTS game_data.participant_stats_corrected
 AS game_data.participant_stats

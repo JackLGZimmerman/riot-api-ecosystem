@@ -2,8 +2,8 @@
 -- Label filtered games as chronological train/validation/test splits.
 --
 -- Read ordering timestamps from source game_data.info filtered by the current
--- valid_game_ids set. This keeps ML splits aligned during fast filter iteration,
--- even when the wider game_data_filtered.info copy has not been refreshed yet.
+-- valid_game_ids set. game_data_filtered.info is no longer mirrored because the
+-- production ML path only needs the split labels and participant-level rows.
 
 TRUNCATE TABLE game_data_filtered.ml_game_split;
 

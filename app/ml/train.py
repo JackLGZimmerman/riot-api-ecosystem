@@ -8,6 +8,7 @@ Run with:
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import logging
@@ -50,8 +51,6 @@ class RawTensorSplit:
     p1_cnt: torch.Tensor
     m1v1_cnt: torch.Tensor
     s2vx_cnt: torch.Tensor
-    m1v1_eff_n: torch.Tensor
-    s2vx_eff_n: torch.Tensor
     blue_win: torch.Tensor
     champion_id: torch.Tensor | None = None
     build_id: torch.Tensor | None = None
@@ -68,6 +67,25 @@ def _project_relative(path: Path) -> str:
         return str(path.resolve().relative_to(PROJECT_ROOT))
     except ValueError:
         return str(path)
+
+
+def _limit_split(split: SplitData, max_games: int | None) -> SplitData:
+    if max_games is None or split.blue_win.size <= max_games:
+        return split
+    n = int(max_games)
+    return SplitData(
+        win_rate=split.win_rate[:n],
+        matchup_1v1=split.matchup_1v1[:n],
+        synergy_2vx=split.synergy_2vx[:n],
+        p1_cnt=split.p1_cnt[:n],
+        m1v1_cnt=split.m1v1_cnt[:n],
+        s2vx_cnt=split.s2vx_cnt[:n],
+        m1v1_eff_n=split.m1v1_eff_n[:n] if split.m1v1_eff_n is not None else None,
+        s2vx_eff_n=split.s2vx_eff_n[:n] if split.s2vx_eff_n is not None else None,
+        blue_win=split.blue_win[:n],
+        champion_id=split.champion_id[:n] if split.champion_id is not None else None,
+        build_id=split.build_id[:n] if split.build_id is not None else None,
+    )
 
 
 def _binary_auc(scores: np.ndarray, targets: np.ndarray) -> float:
@@ -169,14 +187,6 @@ def _cache_raw_tensor_split(
         p1_cnt=torch.tensor(split.p1_cnt, dtype=torch.float32, device=device),
         m1v1_cnt=torch.tensor(split.m1v1_cnt, dtype=torch.float32, device=device),
         s2vx_cnt=torch.tensor(split.s2vx_cnt, dtype=torch.float32, device=device),
-        m1v1_eff_n=torch.tensor(
-            split.m1v1_eff_n if split.m1v1_eff_n is not None else split.m1v1_cnt,
-            dtype=torch.float32, device=device,
-        ),
-        s2vx_eff_n=torch.tensor(
-            split.s2vx_eff_n if split.s2vx_eff_n is not None else split.s2vx_cnt,
-            dtype=torch.float32, device=device,
-        ),
         blue_win=torch.tensor(split.blue_win, dtype=torch.float32, device=device),
         champion_id=(
             torch.tensor(split.champion_id, dtype=torch.long, device=device)
@@ -214,8 +224,6 @@ def _raw_batch(raw: RawTensorSplit, rows: slice | torch.Tensor) -> RawTensorSpli
         p1_cnt=take(raw.p1_cnt),
         m1v1_cnt=take(raw.m1v1_cnt),
         s2vx_cnt=take(raw.s2vx_cnt),
-        m1v1_eff_n=take(raw.m1v1_eff_n),
-        s2vx_eff_n=take(raw.s2vx_eff_n),
         blue_win=take(raw.blue_win),
         champion_id=take(raw.champion_id) if raw.champion_id is not None else None,
         build_id=take(raw.build_id) if raw.build_id is not None else None,
@@ -289,8 +297,6 @@ def _hgnn_inputs_from_raw(
         p1_cnt=raw.p1_cnt,
         m1v1_cnt=raw.m1v1_cnt,
         s2vx_cnt=raw.s2vx_cnt,
-        m1v1_eff_n=raw.m1v1_eff_n,
-        s2vx_eff_n=raw.s2vx_eff_n,
         strength=strength,
         device=device,
     )
@@ -327,11 +333,13 @@ def train(
     started = time.monotonic()
     # The Beta-posterior variance strength reused for the HGNN confidence gate.
     strength = dataset_cfg.confidence_gate_strength
-    # Cap the training batch — message-passing intermediates are heavy and each step also
-    # runs a team-swapped copy.
+    # Cap the training batch because each step also runs a team-swapped copy.
     train_batch_size = min(train_cfg.batch_size, HGNN_TRAIN_BATCH)
 
-    splits = load_splits(dataset_cfg, require_counts=True)
+    splits = {
+        name: _limit_split(split, dataset_cfg.max_games)
+        for name, split in load_splits(dataset_cfg, require_counts=True).items()
+    }
     if splits["train"].blue_win.size == 0:
         raise ValueError("Training split is empty; rebuild the cache with train games.")
     tensor_splits = {
@@ -527,5 +535,52 @@ def train(
     return train_cfg.model_path
 
 
+def _parse_args() -> tuple[DatasetConfig, TrainConfig]:
+    dataset_defaults = DatasetConfig()
+    train_defaults = TrainConfig()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cache-dir", type=Path, default=dataset_defaults.cache_dir)
+    parser.add_argument("--max-games", type=int, default=dataset_defaults.max_games)
+    parser.add_argument("--model-path", type=Path, default=train_defaults.model_path)
+    parser.add_argument("--metrics-path", type=Path, default=train_defaults.metrics_path)
+    parser.add_argument("--batch-size", type=int, default=train_defaults.batch_size)
+    parser.add_argument("--max-epochs", type=int, default=train_defaults.max_epochs)
+    parser.add_argument("--patience", type=int, default=train_defaults.patience)
+    parser.add_argument("--learning-rate", type=float, default=train_defaults.learning_rate)
+    parser.add_argument("--weight-decay", type=float, default=train_defaults.weight_decay)
+    parser.add_argument("--device", default=train_defaults.device)
+    parser.add_argument("--seed", type=int, default=train_defaults.seed)
+    parser.add_argument("--max-grad-norm", type=float, default=train_defaults.max_grad_norm)
+    parser.add_argument("--checkpoint-metric", default=train_defaults.checkpoint_metric)
+    parser.add_argument(
+        "--checkpoint-min-delta",
+        type=float,
+        default=train_defaults.checkpoint_min_delta,
+    )
+    args = parser.parse_args()
+    return (
+        DatasetConfig(cache_dir=args.cache_dir, max_games=args.max_games),
+        TrainConfig(
+            model_path=args.model_path,
+            metrics_path=args.metrics_path,
+            batch_size=args.batch_size,
+            max_epochs=args.max_epochs,
+            patience=args.patience,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            device=args.device,
+            seed=args.seed,
+            max_grad_norm=args.max_grad_norm,
+            checkpoint_metric=args.checkpoint_metric,
+            checkpoint_min_delta=args.checkpoint_min_delta,
+        ),
+    )
+
+
+def main() -> None:
+    dataset_cfg, train_cfg = _parse_args()
+    train(dataset_cfg, train_cfg)
+
+
 if __name__ == "__main__":
-    train()
+    main()

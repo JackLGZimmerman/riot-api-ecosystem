@@ -1,16 +1,17 @@
 -- Filter pipeline: complete table DDL for the 2-stage filter.
 --
--- Pre-filter (f14): games with gameduration > 990 s are collected into
---          filter_stg_f14_long_games first. All subsequent stages operate
---          exclusively on this long-game population via SEMI JOIN.
+-- Pre-filter (f14): games from the latest season with gameduration > 990 s
+--          are collected into filter_stg_f14_long_games first. All subsequent
+--          stages operate exclusively on this latest-season long-game
+--          population via SEMI JOIN.
 -- Stage 1: cheap per-participant / per-team / per-game filters scanned over
---          f14_long_games.
+--          latest-season f14_long_games.
 -- Stage 2: build label computation + low-build-value detection
 --          (highest_value < 1.0) over stage-1-clean games only.
 --
 -- Run with clickhouse-client --multiquery before 4000_filter_build.sql.
 
--- Pre-filter stage: long games only (gameduration > 990 s).
+-- Pre-filter stage: latest-season long games only (gameduration > 990 s).
 DROP TABLE IF EXISTS game_data.filter_stg_f14_long_games;
 
 CREATE TABLE game_data.filter_stg_f14_long_games
@@ -65,8 +66,9 @@ ENGINE = MergeTree
 ORDER BY (matchid, teamid);
 
 -- Stage 1 output: per-participant cheap flags.
--- game_time_lte_16_5 is applied as a base-population pre-filter at the scan
--- level; short games never enter this table, so that column is absent.
+-- Latest-season-only and game_time_lte_16_5 are applied as base-population
+-- pre-filters at the scan level; older-season and short games never enter
+-- this table, so those columns are absent.
 DROP TABLE IF EXISTS game_data.filter_stg_participant_flags;
 
 CREATE TABLE game_data.filter_stg_participant_flags

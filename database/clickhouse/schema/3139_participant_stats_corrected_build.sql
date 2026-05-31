@@ -22,7 +22,8 @@
 --   ITEM_UNDO: d_goldspent -= goldgain (reverses the prior transaction's gold delta)
 --
 -- Run after the raw game_data.* schemas and before 4000_filter_build.sql so
--- the filter applies to corrected stats from game_data.
+-- the filter applies to corrected stats from the latest-season long-game
+-- population in game_data.
 
 SET max_threads = 1, max_block_size = 8192, max_insert_block_size = 32768,
     join_algorithm = 'partial_merge',
@@ -48,9 +49,11 @@ ENGINE = MergeTree
 ORDER BY matchid;
 
 INSERT INTO game_data.participant_stats_corrected_long_game_ids
-SELECT matchid
-FROM game_data.info
-WHERE gameduration > 990;
+SELECT i.matchid
+FROM game_data.info AS i
+WHERE
+    i.season = (SELECT max(latest_i.season) FROM game_data.info AS latest_i)
+    AND i.gameduration > 990;
 
 CREATE TABLE game_data.participant_stats_corrected_game_end_ts
 (

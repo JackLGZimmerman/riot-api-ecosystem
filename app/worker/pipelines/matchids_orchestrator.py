@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
-from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from uuid import uuid4
 
 from app.core.config.constants import (
@@ -41,6 +42,55 @@ from database.clickhouse.operations.players import PlayerKeyRow, load_players
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MATCHIDS_SEASON = 16
+MATCHIDS_SEASON_ENV = "MATCHIDS_SEASON"
+MATCHIDS_SEASON_START_TIMES = {
+    # Riot Support patch schedule: 26.01 / Data Dragon 16.1.x, 2026-01-08 UTC.
+    16: 1767830400,
+}
+
+
+def _season_start_ts(season: int) -> int:
+    start_ts = MATCHIDS_SEASON_START_TIMES.get(season)
+    if start_ts is None:
+        known = ", ".join(str(s) for s in sorted(MATCHIDS_SEASON_START_TIMES))
+        raise ValueError(
+            f"Unsupported matchids season {season}. Known seasons: {known}"
+        )
+    return start_ts
+
+
+def _selected_matchids_season() -> int | None:
+    raw = os.getenv(MATCHIDS_SEASON_ENV)
+    if raw is None or raw.strip() == "":
+        return DEFAULT_MATCHIDS_SEASON
+
+    value = raw.strip().lower()
+    if value in {"all", "none", "null", "0"}:
+        return None
+
+    season = int(value)
+    if season <= 0:
+        raise ValueError(f"{MATCHIDS_SEASON_ENV} must be a positive integer")
+    return season
+
+
+def build_matchids_time_window(season: int | None, *, ts: int) -> tuple[int, int]:
+    if season is None:
+        return 0, ts
+
+    start_ts = _season_start_ts(season)
+    end_ts = (
+        _season_start_ts(season + 1)
+        if season + 1 in MATCHIDS_SEASON_START_TIMES
+        else ts
+    )
+    if start_ts > end_ts:
+        raise ValueError(
+            f"Matchids season {season} starts after the requested end timestamp"
+        )
+    return start_ts, end_ts
+
 
 def build_initial_player_states(
     players: list[PlayerKeyRow],
@@ -48,6 +98,7 @@ def build_initial_player_states(
     collected_puuids_ts: int,
     *,
     ts: int,
+    start_time_floor: int = 0,
 ) -> list[PlayerCrawlState]:
     template = str(ENDPOINTS["match"]["by_puuid"])
     states: list[PlayerCrawlState] = []
@@ -63,6 +114,7 @@ def build_initial_player_states(
             if (puuid in collected_puuids and collected_puuids_ts > 0)
             else 0
         )
+        start_time = min(max(start_time, start_time_floor), ts)
 
         base_url = template.format(
             continent=continent,
@@ -131,23 +183,36 @@ class MatchIDOrchestrator(Orchestrator):
 
 
 class MatchIDLoader:
+    def __init__(self, *, season: int | None = _selected_matchids_season()) -> None:
+        self.season = season
+
     def load(self, ctx: OrchestrationContext) -> MatchIDCollectorState:
         players: list[PlayerKeyRow] = load_players()
         collected_player_keys = load_matchid_puuids()
         collected_puuids: set[str] = {puuid for puuid, _ in collected_player_keys}
         collected_puuid_ts: int = load_matchid_puuid_ts()
+        start_ts, end_ts = build_matchids_time_window(self.season, ts=ctx.ts)
 
         initial_states = build_initial_player_states(
             players,
             collected_puuids,
             collected_puuid_ts,
-            ts=ctx.ts,
+            ts=end_ts,
+            start_time_floor=start_ts,
+        )
+
+        logger.info(
+            "MatchIDLoaderWindow season=%s start_ts=%d end_ts=%d collected_ts=%d",
+            self.season,
+            start_ts,
+            end_ts,
+            collected_puuid_ts,
         )
 
         return MatchIDCollectorState(
             initial_states=initial_states,
             full_player_keys=[(p.puuid, p.queue_type) for p in players],
-            ts=ctx.ts,
+            ts=end_ts,
         )
 
 

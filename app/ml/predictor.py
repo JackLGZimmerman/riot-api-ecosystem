@@ -171,7 +171,7 @@ class WinRatePredictor:
         m1v1_l0_wr, m1v1_l0_cnt = self._priors.lookup_1v1_blue(blue_tuples, red_tuples)
         m1v1_nb_wr, m1v1_nb_cnt = self._priors.lookup_1v1_blue_nobuild(blue_tuples, red_tuples)
         m1v1_ch_wr, m1v1_ch_cnt = self._priors.lookup_1v1_blue_champ(blue_tuples, red_tuples)
-        m1v1_wr, m1v1_eff_n = self._pool_interaction(
+        m1v1_wr, _ = self._pool_interaction(
             [m1v1_l0_wr, m1v1_nb_wr, m1v1_ch_wr],
             [m1v1_l0_cnt, m1v1_nb_cnt, m1v1_ch_cnt],
             self._level_strengths["m1v1"],
@@ -181,7 +181,6 @@ class WinRatePredictor:
         # 2vx levels per team (own-team, 10 each): build -> no-build -> champion pair.
         synergy_2vx = np.full((1, N_SYNERGIES_2VX), DEFAULT_WIN_RATE, dtype=np.float64)
         s2vx_cnt = np.full((1, N_SYNERGIES_2VX), DEFAULT_MATCHUPS, dtype=np.float64)
-        s2vx_eff_n = np.zeros((1, N_SYNERGIES_2VX), dtype=np.float64)
         for offset, team, floor in (
             (0, blue_tuples, blue_pair_priors),
             (10, red_tuples, red_pair_priors),
@@ -189,13 +188,12 @@ class WinRatePredictor:
             l0 = self._priors.lookup_2vx_team(team)
             nb = self._priors.lookup_2vx_team_nobuild(team)
             ch = self._priors.lookup_2vx_team_champ(team)
-            wr, eff = self._pool_interaction(
+            wr, _ = self._pool_interaction(
                 [l0[0], nb[0], ch[0]], [l0[1], nb[1], ch[1]],
                 self._level_strengths["s2vx"], floor,
             )
             synergy_2vx[0, offset : offset + 10] = wr
             s2vx_cnt[0, offset : offset + 10] = l0[1]
-            s2vx_eff_n[0, offset : offset + 10] = eff
 
         return {
             "win_rate": win_rate,
@@ -204,8 +202,6 @@ class WinRatePredictor:
             "p1_cnt": p1_cnt.reshape(1, -1),
             "m1v1_cnt": m1v1_l0_cnt.reshape(1, -1),
             "s2vx_cnt": s2vx_cnt,
-            "m1v1_eff_n": m1v1_eff_n.reshape(1, -1),
-            "s2vx_eff_n": s2vx_eff_n,
         }
 
     def _pool_interaction(
@@ -277,8 +273,6 @@ class WinRatePredictor:
             p1_cnt=raw["p1_cnt"],
             m1v1_cnt=raw["m1v1_cnt"],
             s2vx_cnt=raw["s2vx_cnt"],
-            m1v1_eff_n=raw["m1v1_eff_n"],
-            s2vx_eff_n=raw["s2vx_eff_n"],
             strength=self._prior_strength,
             device=self._device,
         )

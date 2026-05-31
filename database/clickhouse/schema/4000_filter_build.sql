@@ -1,12 +1,13 @@
 -- noqa: disable=PRS,RF01,AL09
 -- Filter pipeline: population in dependency order.
 --
--- Base population: filter 14 (gameduration > 990 s) is applied first as an
--- explicit pre-stage. All downstream stages SEMI JOIN filter_stg_f14_long_games
--- instead of scanning game_data.info, so no stage touches short games.
+-- Base population: the latest season in game_data.info is selected first, then
+-- filter 14 (gameduration > 990 s) is applied as an explicit pre-stage. All
+-- downstream stages SEMI JOIN filter_stg_f14_long_games instead of scanning
+-- game_data.info, so no stage touches older seasons or short games.
 --
 -- Flow:
---   0.  f14_long_games         (pre-filter: matchids with gameduration > 990)
+--   0.  f14_long_games         (pre-filter: latest season, gameduration > 990)
 --   1a. player_winrates        (from game_data.players)
 --   1b. team_flags             (from game_data.participant_stats SEMI JOIN f14)
 --   1.  participant_flags      (stage 1 flags; SEMI JOIN f14)
@@ -34,16 +35,19 @@
 -- Run with clickhouse-client --multiquery after 4000_filter_schema.sql.
 
 -- =============================================================================
--- Pre-stage (f14): collect long-game matchids (gameduration > 990 s).
--- All subsequent stages restrict to this set via SEMI JOIN.
+-- Pre-stage (f14): collect matchids from the latest season only, then apply
+-- the long-game threshold (gameduration > 990 s). All subsequent stages
+-- restrict to this set via SEMI JOIN.
 -- =============================================================================
 
 TRUNCATE TABLE game_data.filter_stg_f14_long_games;
 
 INSERT INTO game_data.filter_stg_f14_long_games (matchid)
-SELECT matchid
-FROM game_data.info
-WHERE gameduration > 990;
+SELECT i.matchid
+FROM game_data.info AS i
+WHERE
+    i.season = (SELECT max(latest_i.season) FROM game_data.info AS latest_i)
+    AND i.gameduration > 990;
 
 -- =============================================================================
 -- Stage 1a: player win rates (from game_data.players, one row per puuid)
@@ -60,7 +64,7 @@ FROM game_data.players
 GROUP BY puuid;
 
 -- =============================================================================
--- Stage 1b: team flags with enemy-relative stats (long games only)
+-- Stage 1b: team flags with enemy-relative stats (latest-season long games only)
 -- =============================================================================
 
 TRUNCATE TABLE game_data.filter_stg_team_flags;
@@ -155,7 +159,7 @@ SELECT
 FROM team_rows;
 
 -- =============================================================================
--- Stage 1c2: f03 player_high_winrate flags (long games only).
+-- Stage 1c2: f03 player_high_winrate flags (latest-season long games only).
 -- Identify suspect players (lifetime > 40 games AND WR > 70%), then within
 -- each suspect player's collected long-games sorted by gamecreation ASC,
 -- flag games from the earliest while the suffix WR (games from current row
@@ -203,9 +207,10 @@ SELECT
 FROM suspect_games;
 
 -- =============================================================================
--- Stage 1: per-participant flags for all active filters (long games only).
--- Only rows for games with gameduration > 990 are inserted; short games never
--- enter the staging tables.
+-- Stage 1: per-participant flags for all active filters
+-- (latest-season long games only).
+-- Only rows from the latest season with gameduration > 990 are inserted; older
+-- seasons and short games never enter the staging tables.
 -- =============================================================================
 
 TRUNCATE TABLE game_data.filter_stg_participant_flags;

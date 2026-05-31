@@ -4,8 +4,8 @@ This documents the production win prediction path in `app/ml`.
 
 ## Production Model
 
-As of 2026-05-30, production uses the Match-Outcome HGNN in
-`app/ml/hgnn_model.py`.
+As of 2026-05-31, production trains the Match-Outcome HGNN from
+`app/ml/hgnn_model.py` via `app/ml/train.py`.
 
 Rebuild the cache before training if the cache format or priors changed:
 
@@ -47,10 +47,11 @@ An identity is `(champion_id, team_position, build)`. The cache format is
 `identity = {n_champions, n_builds, build_vocab}`. `n_champions` is
 `max(champion_id)+1` because champion ids are raw embedding indices.
 
-The HGNN consumes both raw support and nested-pooling effective support:
-`*_cnt` feeds explicit confidence features, while `m1v1_eff_n` and `s2vx_eff_n`
-feed the posterior variance so backed-off interactions can still be treated as
-confident.
+The current HGNN consumes raw support: `p1_cnt` feeds the `1vx` posterior
+variance, while `m1v1_cnt` and `s2vx_cnt` feed direct relationship confidence and
+missing flags. The effective-support arrays remain in the cache for the
+nested-pooled relationship priors and historical artifacts, but they are not live
+model inputs.
 
 ## Smoothing
 
@@ -73,13 +74,16 @@ those priors are missing.
 
 ## Model Shape
 
-`HGNNWinModel` treats the 10 players as nodes and `1v1` / `2vx` priors as
-hyperedges. For each receiving node, the shared message function partitions edge
-members into allies and enemies via `TEAM_OF`, so cross-team priors are read from
-the receiver's perspective.
+`HGNNWinModel` has one production path: identity + `1vx` node init, blue/red team
+readout, direct `1v1`/`2vx` residual head, and direct prior shortcut. See
+`HGNN_CURRENT.md` for the full mechanics.
 
-Each player node starts from a factored champion, role, and build identity, then
-fuses the `1vx` posterior. Relationship edges encode:
+Each of the 10 player slots starts from a multiplicative champion, role, and
+build identity embedding. The node initializer then fuses that identity with the
+slot's `1vx` posterior through the uncertainty-gated `PhiEncoder`.
+
+The relationship feature contract is shared by `1v1` matchup and `2vx` synergy
+priors:
 
 ```text
 joint    = logit(mu_edge)
@@ -87,13 +91,24 @@ expected = logit(generic 1vx baseline)
 delta    = joint - expected
 ```
 
-The forward pass is:
+Those relationship priors enter the final prediction through two direct paths:
+
+- `residual_head`: an MLP over signed `1v1`/`2vx` deltas, raw confidence,
+  confidence-weighted deltas, and missing flags.
+- `prior_shortcut`: a linear shortcut over `1vx` identity logits plus signed
+  deltas and confidence-weighted deltas.
+
+`2vx` features are signed so blue-side synergies are positive and red-side
+synergies are negated before they are concatenated with blue-vs-red `1v1`
+features.
+
+The default forward pass is:
 
 ```text
 identity + 1vx posterior -> node init
-2vx hypergraph rounds    -> synergy-aware nodes
-1v1 hypergraph rounds    -> matchup-aware nodes
-team readout + residual/prior shortcut -> final logit -> sigmoid
+blue/red team readouts + residual head -> neural logit
+1vx logits + deltas + weighted deltas  -> prior shortcut logit
+neural logit + shortcut logit          -> final logit -> sigmoid
 ```
 
 Training uses team-swap augmentation through `swap_hgnn_inputs`: each match is
@@ -103,31 +118,28 @@ also trained mirrored with a flipped label.
 
 | Setting | Value |
 | --- | ---: |
-| `node_dim` / `msg_dim` | 96 / 96 |
+| `node_dim` | 96 |
 | `edge_hidden` | 64 |
 | champion / role / build embed | `n_champions+1` / 5 / `n_builds+1` x 96 |
-| intra / cross rounds | 2 / 2 |
 | readout hidden | 256 |
 | residual head hidden | 128 |
 | dropout | 0.1 |
 | logit clip | 5.0 |
 | explicit count features | enabled |
-| explicit edge residual features | enabled |
-| direct residual head / prior shortcut | enabled / enabled |
-| params (approx) | ~0.69M |
+| residual head / prior shortcut | enabled / enabled |
+| params (approx) | ~0.33M |
 
-## Metrics To Retain
+## Benchmark Notes
+
+The current source shape is the relationship-direct HGNN. Rerun training after
+model-shape changes so `structured_winrate_model.pt` and `metrics_latest.json`
+match the code.
 
 | Model | Test Acc | Test AUC | Test NLL | Test ECE |
 | --- | ---: | ---: | ---: | ---: |
+| Relationship-direct HGNN | 0.5713 | 0.5985 | 0.6771 | 0.0255 |
+| Previous structured production | 0.5712 | 0.5972 | 0.6770 | 0.0201 |
 | L2 logistic reference (55 flat priors) | 0.5701 | 0.5945 | 0.6860 | - |
-| Structured pre-fix (delta + max/min pool) | 0.5303 | 0.5384 | 0.8031 | 0.1699 |
-| Structured leakage-robust raw (pre-LOO) | 0.5673 | 0.5928 | 0.6788 | 0.0204 |
-| Structured LOO + full delta + cascade (prev. production) | 0.5712 | 0.5972 | 0.6770 | 0.0201 |
-| Match-Outcome HGNN (priors-only node init) | 0.5704 | 0.5947 | 0.6776 | 0.0167 |
-| Match-Outcome HGNN + identity (current) | 0.5709 | 0.5984 | 0.6775 | 0.0297 |
-| HGNN + count/residual/head shortcut | 0.5707 | 0.5993 | 0.6772 | 0.0294 |
-| HGNN + v18 effective support + residual/head shortcut | 0.5718 | 0.5992 | 0.6771 | 0.0263 |
 
 The structured and logistic rows are retained as historical benchmarks; their
 training and test code has been removed from the package.

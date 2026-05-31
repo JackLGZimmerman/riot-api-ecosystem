@@ -4,6 +4,13 @@ This directory builds phase-aware identity descriptors for draft prediction.
 
 > An identity is the tuple `(championid, teamposition, build)`.
 
+> 2026-05-31 note: the ClickHouse temporal source tables
+> (`synergy_1vx_temporal` and `synergy_1vx_temporal_prior_*`) have been removed
+> from the production rebuild path. The next direction for this package is to
+> drop the phase axis and rebuild classification features as non-temporal
+> identity descriptors, so the documentation below is historical until that
+> refactor lands.
+
 Each output is preserved by temporal phase so a downstream model can compare
 what an identity usually contributes in early/mid/late game contexts.
 

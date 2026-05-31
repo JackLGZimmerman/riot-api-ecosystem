@@ -17,17 +17,21 @@ from typing import Any, cast
 
 import numpy as np
 import torch
+from torch import nn
 
+from app.ml.cache_layout import ARRAY_FILES
 from app.ml.config import CACHE_DIR, DatasetConfig, TrainConfig
 from app.ml.dataset import SplitData, load_splits
 from app.ml.hgnn_model import (
     LOGIT_EPS,
-    TEAM_PAIRS,
     HGNNWinModel,
+    TEAM_PAIRS,
+    _logit,
     build_hgnn_inputs,
     load_hgnn_model,
     relationship_logit_features,
     resolve_device,
+    swap_hgnn_inputs,
 )
 from app.ml.train import (
     RawTensorSplit,
@@ -40,6 +44,24 @@ from app.ml.train import (
 
 
 DEFAULT_OUT_DIR = Path("app/ml/data/experiments/hgnn_relationship_audit")
+RELATIONSHIP_GRAD_KEYS: tuple[str, ...] = (
+    "delta_logit_1v1",
+    "delta_logit_2vx",
+)
+PATH_GRADIENT_PATHS: tuple[str, ...] = (
+    "full",
+    "core_main",
+    "residual_slot",
+    "prior_shortcut",
+)
+MODULE_GRADIENT_PREFIXES: dict[str, str] = {
+    "phi_1vx": "phi.1vx.",
+    "residual_head": "residual_head.",
+    "prior_shortcut": "prior_shortcut.",
+    "head": "head.",
+    "identity": "identity.",
+    "node_init": "node_init.",
+}
 COUNT_BUCKETS: tuple[tuple[str, float, float], ...] = (
     ("zero_count", 0.0, 0.0),
     ("sparse_1_4", 1.0, 4.0),
@@ -60,6 +82,9 @@ class AuditConfig:
     max_games: int | None = None
     examples: int = 12
     seed: int = 0
+    include_path_grads: bool = False
+    grad_batch_size: int = 512
+    grad_split: str = "train"
 
 
 def _jsonable(value: Any) -> Any:
@@ -125,8 +150,6 @@ def _neutralized(raw: RawTensorSplit, *, onev1: bool, twovx: bool, missing: bool
         synergy_2vx=synergy if twovx else raw.synergy_2vx,
         m1v1_cnt=zero_1v1 if onev1 and missing else raw.m1v1_cnt,
         s2vx_cnt=zero_2vx if twovx and missing else raw.s2vx_cnt,
-        m1v1_eff_n=zero_1v1 if onev1 and missing else raw.m1v1_eff_n,
-        s2vx_eff_n=zero_2vx if twovx and missing else raw.s2vx_eff_n,
     )
 
 
@@ -274,11 +297,207 @@ def _edge_inputs(raw: RawTensorSplit, strength: float, device: str) -> dict[str,
         p1_cnt=raw.p1_cnt,
         m1v1_cnt=raw.m1v1_cnt,
         s2vx_cnt=raw.s2vx_cnt,
-        m1v1_eff_n=raw.m1v1_eff_n,
-        s2vx_eff_n=raw.s2vx_eff_n,
         strength=strength,
         device=device,
     )
+
+
+def relationship_contract(cache_dir: Path) -> dict[str, dict[str, Any]]:
+    """Report which relationship families exist in the cache/model contract."""
+
+    cache_arrays = set(ARRAY_FILES)
+
+    def cache_present(*names: str) -> bool:
+        return all(name in cache_arrays and (cache_dir / ARRAY_FILES[name]).exists() for name in names)
+
+    return {
+        "1v1": {
+            "present_in_cache": cache_present("matchup_1v1", "m1v1_cnt"),
+            "present_in_forward": True,
+            "cache_arrays": ["matchup_1v1", "m1v1_cnt"],
+            "forward_inputs": ["mu_1v1", "delta_logit_1v1", "conf_1v1", "missing_1v1"],
+        },
+        "2vx": {
+            "present_in_cache": cache_present("synergy_2vx", "s2vx_cnt"),
+            "present_in_forward": True,
+            "cache_arrays": ["synergy_2vx", "s2vx_cnt"],
+            "forward_inputs": ["mu_2vx", "delta_logit_2vx", "conf_2vx", "missing_2vx"],
+        },
+    }
+
+
+def _clone_inputs_for_gradients(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    cloned: dict[str, torch.Tensor] = {}
+    for key, value in inputs.items():
+        item = value.detach().clone()
+        if key in RELATIONSHIP_GRAD_KEYS:
+            item.requires_grad_(True)
+        cloned[key] = item
+    return cloned
+
+
+def _gradient_stats(inputs: dict[str, torch.Tensor]) -> dict[str, dict[str, float | int]]:
+    rows: dict[str, dict[str, float | int]] = {}
+    for key in RELATIONSHIP_GRAD_KEYS:
+        tensor = inputs[key]
+        grad = tensor.grad
+        if grad is None:
+            rows[key] = {
+                "abs_mean": 0.0,
+                "l2": 0.0,
+                "max_abs": 0.0,
+                "zero_fraction": 1.0,
+                "n": int(tensor.numel()),
+            }
+            continue
+        abs_grad = grad.detach().abs()
+        rows[key] = {
+            "abs_mean": float(abs_grad.mean().cpu()),
+            "l2": float(grad.detach().norm().cpu()),
+            "max_abs": float(abs_grad.max().cpu()),
+            "zero_fraction": float((abs_grad == 0.0).to(torch.float32).mean().cpu()),
+            "n": int(grad.numel()),
+        }
+    return rows
+
+
+def _core_readout_parts(
+    model: HGNNWinModel,
+    inputs: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    c = model.config
+    h0 = model.identity(inputs["champion_id"], inputs["build_id"])
+    phi_node = model.phi["1vx"](
+        _logit(inputs["mu_1vx"], c.logit_clip),
+        inputs["var_1vx"],
+        inputs.get("conf_1vx"),
+        inputs.get("log_count_1vx"),
+        inputs.get("missing_1vx"),
+    )
+    h = model.node_norm(model.node_init(torch.cat([h0, phi_node], dim=-1)))
+    return model._readout(h[:, :5]), model._readout(h[:, 5:])
+
+
+def _path_logits(
+    model: HGNNWinModel,
+    inputs: dict[str, torch.Tensor],
+    path: str,
+) -> torch.Tensor:
+    if path == "full":
+        return model(**inputs)["final_logit"]
+    if path == "prior_shortcut":
+        return model._prior_shortcut_logit(
+            mu_1vx=inputs["mu_1vx"],
+            delta_logit_2vx=inputs["delta_logit_2vx"],
+            delta_logit_1v1=inputs["delta_logit_1v1"],
+            conf_2vx=inputs.get("conf_2vx"),
+            conf_1v1=inputs.get("conf_1v1"),
+        )
+
+    a, b = _core_readout_parts(model, inputs)
+    core_parts = [a, b, a - b, a * b]
+    if path == "core_main":
+        core_parts.append(torch.zeros_like(a))
+        return model.head(torch.cat(core_parts, dim=-1)).squeeze(-1)
+    if path == "residual_slot":
+        residual = model._residual_readout(
+            delta_logit_2vx=inputs["delta_logit_2vx"],
+            delta_logit_1v1=inputs["delta_logit_1v1"],
+            conf_2vx=inputs.get("conf_2vx"),
+            conf_1v1=inputs.get("conf_1v1"),
+            missing_2vx=inputs.get("missing_2vx"),
+            missing_1v1=inputs.get("missing_1v1"),
+        )
+        detached_core = [part.detach() for part in core_parts]
+        head_parts = [*detached_core, residual]
+        return model.head(torch.cat(head_parts, dim=-1)).squeeze(-1)
+    raise ValueError(f"Unsupported path gradient target: {path}")
+
+
+def path_gradient_diagnostics(
+    model: HGNNWinModel,
+    inputs: dict[str, torch.Tensor],
+    *,
+    paths: tuple[str, ...] = PATH_GRADIENT_PATHS,
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    """Measure final-logit sensitivity to explicit relationship logit tensors."""
+
+    was_training = model.training
+    model.eval()
+    out: dict[str, dict[str, dict[str, float | int]]] = {}
+    for path in paths:
+        grad_inputs = _clone_inputs_for_gradients(inputs)
+        model.zero_grad(set_to_none=True)
+        _path_logits(model, grad_inputs, path).mean().backward()
+        out[path] = _gradient_stats(grad_inputs)
+    model.zero_grad(set_to_none=True)
+    model.train(was_training)
+    return out
+
+
+def module_gradient_diagnostics(
+    model: HGNNWinModel,
+    inputs: dict[str, torch.Tensor],
+    labels: torch.Tensor,
+    *,
+    seed: int = 0,
+) -> dict[str, dict[str, float | int]]:
+    """Measure parameter-gradient pressure from one training-style BCE batch."""
+
+    groups = {
+        name: {"l2sq": 0.0, "max_abs": 0.0, "params": 0, "grad_params": 0}
+        for name in MODULE_GRADIENT_PREFIXES
+    }
+    groups["other"] = {"l2sq": 0.0, "max_abs": 0.0, "params": 0, "grad_params": 0}
+    was_training = model.training
+    torch.manual_seed(seed)
+    model.train()
+    model.zero_grad(set_to_none=True)
+    loss_fn = nn.BCEWithLogitsLoss()
+    direct_loss = loss_fn(model(**inputs)["final_logit"], labels)
+    (0.5 * direct_loss).backward()
+    swapped_loss = loss_fn(model(**swap_hgnn_inputs(inputs))["final_logit"], 1.0 - labels)
+    (0.5 * swapped_loss).backward()
+    for param_name, param in model.named_parameters():
+        group_name = "other"
+        for candidate, prefix in MODULE_GRADIENT_PREFIXES.items():
+            if param_name.startswith(prefix):
+                group_name = candidate
+                break
+        row = groups[group_name]
+        row["params"] += int(param.numel())
+        if param.grad is None:
+            continue
+        grad = param.grad.detach()
+        row["grad_params"] += int(param.numel())
+        row["l2sq"] += float((grad * grad).sum().cpu())
+        row["max_abs"] = max(float(row["max_abs"]), float(grad.abs().max().cpu()))
+    out: dict[str, dict[str, float | int]] = {}
+    for group_name, row in groups.items():
+        out[group_name] = {
+            "l2": math.sqrt(float(row["l2sq"])),
+            "max_abs": float(row["max_abs"]),
+            "params": int(row["params"]),
+            "grad_params": int(row["grad_params"]),
+        }
+    model.zero_grad(set_to_none=True)
+    model.train(was_training)
+    return out
+
+
+def _gradient_raw_batch(
+    *,
+    split_name: str,
+    dataset_cfg: DatasetConfig,
+    max_games: int | None,
+    batch_size: int,
+    device: str,
+) -> RawTensorSplit:
+    split = _limit_split(load_splits(dataset_cfg, require_counts=True)[split_name], max_games)
+    n = min(int(batch_size), int(split.blue_win.size))
+    if n <= 0:
+        raise ValueError(f"Gradient split {split_name!r} is empty")
+    return _cache_raw_tensor_split(split_name, _limit_split(split, n), device=device)
 
 
 def _phi_gate_tensor(
@@ -290,14 +509,11 @@ def _phi_gate_tensor(
     strength: float,
 ) -> torch.Tensor:
     precision = 1.0 / (1.0 + var)
-    if model.config.use_count_features:
-        conf = _confidence(count, strength)
-        gate_input = torch.stack(
-            [precision, conf, torch.log1p(count.clamp_min(0.0)), (count <= 0.0).to(count.dtype)],
-            dim=-1,
-        )
-    else:
-        gate_input = precision.unsqueeze(-1)
+    conf = _confidence(count, strength)
+    gate_input = torch.stack(
+        [precision, conf, torch.log1p(count.clamp_min(0.0)), (count <= 0.0).to(count.dtype)],
+        dim=-1,
+    )
     phi = cast(Any, model.phi[key])
     return torch.sigmoid(phi.gate(gate_input)).mean(dim=-1)
 
@@ -344,7 +560,7 @@ def _phi_diagnostics(
     device: str,
     batch_size: int,
 ) -> dict[str, list[dict[str, float | int | str]]]:
-    accum: dict[str, list[dict[str, np.ndarray]]] = {"1vx": [], "1v1": [], "2vx": []}
+    accum: dict[str, list[dict[str, np.ndarray]]] = {"1vx": []}
     n_rows = raw.blue_win.numel()
     model.eval()
     with torch.no_grad():
@@ -356,8 +572,6 @@ def _phi_diagnostics(
                 p1_cnt=raw.p1_cnt[start : start + batch_size],
                 m1v1_cnt=raw.m1v1_cnt[start : start + batch_size],
                 s2vx_cnt=raw.s2vx_cnt[start : start + batch_size],
-                m1v1_eff_n=raw.m1v1_eff_n[start : start + batch_size],
-                s2vx_eff_n=raw.s2vx_eff_n[start : start + batch_size],
                 blue_win=raw.blue_win[start : start + batch_size],
                 champion_id=raw.champion_id[start : start + batch_size] if raw.champion_id is not None else None,
                 build_id=raw.build_id[start : start + batch_size] if raw.build_id is not None else None,
@@ -383,60 +597,6 @@ def _phi_diagnostics(
                         strength=strength,
                     ).detach().cpu().numpy(),
                     "norm": phi_1vx.norm(dim=-1).detach().cpu().numpy(),
-                }
-            )
-
-            phi_1v1 = model._edge_phi(
-                "onev1",
-                inputs["mu_1v1"],
-                inputs["var_1v1"],
-                inputs.get("joint_logit_1v1"),
-                inputs.get("expected_logit_1v1"),
-                inputs.get("delta_logit_1v1"),
-                inputs.get("conf_1v1"),
-                inputs.get("log_count_1v1"),
-                inputs.get("missing_1v1"),
-            )
-            accum["1v1"].append(
-                {
-                    "count": part.m1v1_cnt.detach().cpu().numpy(),
-                    "eff_n": part.m1v1_eff_n.detach().cpu().numpy(),
-                    "raw": inputs["delta_logit_1v1"].detach().cpu().numpy(),
-                    "gate": _phi_gate_tensor(
-                        model,
-                        "onev1",
-                        inputs["var_1v1"],
-                        part.m1v1_cnt,
-                        strength=strength,
-                    ).detach().cpu().numpy(),
-                    "norm": phi_1v1.norm(dim=-1).mean(dim=-1).detach().cpu().numpy(),
-                }
-            )
-
-            phi_2vx = model._edge_phi(
-                "twovx",
-                inputs["mu_2vx"],
-                inputs["var_2vx"],
-                inputs.get("joint_logit_2vx"),
-                inputs.get("expected_logit_2vx"),
-                inputs.get("delta_logit_2vx"),
-                inputs.get("conf_2vx"),
-                inputs.get("log_count_2vx"),
-                inputs.get("missing_2vx"),
-            )
-            accum["2vx"].append(
-                {
-                    "count": part.s2vx_cnt.detach().cpu().numpy(),
-                    "eff_n": part.s2vx_eff_n.detach().cpu().numpy(),
-                    "raw": inputs["delta_logit_2vx"].detach().cpu().numpy(),
-                    "gate": _phi_gate_tensor(
-                        model,
-                        "twovx",
-                        inputs["var_2vx"],
-                        part.s2vx_cnt,
-                        strength=strength,
-                    ).detach().cpu().numpy(),
-                    "norm": phi_2vx.norm(dim=-1).mean(dim=-1).detach().cpu().numpy(),
                 }
             )
     out: dict[str, list[dict[str, float | int | str]]] = {}
@@ -511,6 +671,45 @@ def _write_report_md(report: dict[str, Any], path: Path) -> None:
                 f"| {row['bucket']} | {row['n_edges']} | {row['mean_count']:.4f} | "
                 f"{row['mean_eff_n']:.4f} | {row['mean_gate']:.4f} | {row['mean_phi_norm']:.4f} |"
             )
+    lines.extend(["", "## Relationship Contract", "", "| family | cache | forward |", "| --- | ---: | ---: |"])
+    for family, row in report["relationship_contract"].items():
+        lines.append(
+            f"| {family} | {str(row['present_in_cache']).lower()} | "
+            f"{str(row['present_in_forward']).lower()} |"
+        )
+    if report.get("path_gradients"):
+        lines.extend(["", "## Path Gradients"])
+        for path_name, rows in report["path_gradients"].items():
+            lines.extend(
+                [
+                    "",
+                    f"### {path_name}",
+                    "",
+                    "| input | abs_mean | l2 | max_abs | zero_fraction |",
+                    "| --- | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            for key in RELATIONSHIP_GRAD_KEYS:
+                row = rows[key]
+                lines.append(
+                    f"| {key} | {row['abs_mean']:.3e} | {row['l2']:.3e} | "
+                    f"{row['max_abs']:.3e} | {row['zero_fraction']:.4f} |"
+                )
+    if report.get("module_gradients"):
+        lines.extend(
+            [
+                "",
+                "## Module Gradients",
+                "",
+                "| module | l2 | max_abs | grad_params | params |",
+                "| --- | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for module, row in report["module_gradients"].items():
+            lines.append(
+                f"| {module} | {row['l2']:.3e} | {row['max_abs']:.3e} | "
+                f"{row['grad_params']} | {row['params']} |"
+            )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -521,6 +720,17 @@ def run_audit(config: AuditConfig) -> dict[str, Any]:
     model, model_config, strength = load_hgnn_model(config.model_path, device=device)
     raw = _cache_raw_tensor_split(config.split, split, device=device)
     targets = split.blue_win.astype(np.float64, copy=False)
+    grad_raw = None
+    grad_inputs = None
+    if config.include_path_grads:
+        grad_raw = _gradient_raw_batch(
+            split_name=config.grad_split,
+            dataset_cfg=dataset_cfg,
+            max_games=config.max_games,
+            batch_size=config.grad_batch_size,
+            device=device,
+        )
+        grad_inputs = _edge_inputs(grad_raw, strength, device)
 
     variants = {
         "original": raw,
@@ -553,6 +763,7 @@ def run_audit(config: AuditConfig) -> dict[str, Any]:
         "device": device,
         "model_config": _jsonable(model_config),
         "n_rows": int(targets.size),
+        "relationship_contract": relationship_contract(config.cache_dir),
         "variant_metrics": variant_metrics,
         "residual_summary": _residual_summary(
             raw,
@@ -576,6 +787,16 @@ def run_audit(config: AuditConfig) -> dict[str, Any]:
             n=config.examples,
         ),
     }
+    if config.include_path_grads:
+        if grad_raw is None or grad_inputs is None:
+            raise RuntimeError("Gradient inputs were not prepared")
+        report["path_gradients"] = path_gradient_diagnostics(model, grad_inputs)
+        report["module_gradients"] = module_gradient_diagnostics(
+            model,
+            grad_inputs,
+            grad_raw.blue_win,
+            seed=config.seed,
+        )
     config.out_dir.mkdir(parents=True, exist_ok=True)
     (config.out_dir / "report.json").write_text(
         json.dumps(_jsonable(report), indent=2, sort_keys=True),
@@ -596,6 +817,9 @@ def _parse_args() -> AuditConfig:
     parser.add_argument("--max-games", type=int)
     parser.add_argument("--examples", type=int, default=12)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--include-path-grads", action="store_true")
+    parser.add_argument("--grad-batch-size", type=int, default=512)
+    parser.add_argument("--grad-split", choices=("train", "val", "test"), default="train")
     return AuditConfig(**vars(parser.parse_args()))
 
 

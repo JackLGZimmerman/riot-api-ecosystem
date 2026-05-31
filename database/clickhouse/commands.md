@@ -1,7 +1,7 @@
 # Filter & Filtered-DB Refresh Commands
 
 Refresh procedures for the filter pipeline and the downstream
-`game_data_filtered.*` copies. This file is operational only — for rule
+the ML-facing `game_data_filtered.*` copies. This file is operational only — for rule
 semantics, win-rate analysis, threshold history, and bitmask layout, see
 [`filter_evidence.md`](filter_evidence.md).
 
@@ -21,7 +21,8 @@ game_data.participant_stats
   ├─► filter_result                                  (bitmask, one row per participant)
   │
   └─► game_data_filtered.valid_game_ids
-        └─► game_data_filtered.*                     (SEMI JOIN copy of every game_data.* table)
+        ├─► game_data_filtered.participant_stats     (SEMI JOIN copy for ML feature builds)
+        └─► game_data_filtered.tl_participant_stats  (classification final-state features)
 ```
 
 ## Files
@@ -33,12 +34,13 @@ game_data.participant_stats
 | `3140_migrate_raw_tables_to_replacing_merge_tree.sql` | One-shot migration for existing raw `3xxx` tables to `ReplacingMergeTree` natural keys |
 | `4000_filter_schema.sql` | DROP + CREATE for all `filter_stg_*` + `filter_result` tables |
 | `4000_filter_build.sql` | Populate all three stages, rollups, and `filter_result` |
-| `5000_create_filtered_db_schema.sql` | `game_data_filtered` database + DROP/CREATE for persistent copies |
+| `5000_create_filtered_db_schema.sql` | `game_data_filtered` database + cleanup of retired copies + DROP/CREATE for ML persistent tables |
 | `5001_valid_game_ids_schema.sql` | `game_data_filtered.valid_game_ids` (not dropped by 5000) |
 | `5001_valid_game_ids_build.sql` | Populate `valid_game_ids` from `filter_stg_game_flags` |
-| `5003_filtered_tables_build.sql` | Populate every `game_data_filtered.*` via `SEMI JOIN valid_game_ids` |
-| `5003_participant_stats_only_build.sql` | Fast iteration copy for only `game_data_filtered.participant_stats` |
-| `5130`, `5132`, `5134` | Derived analytical tables on top of `game_data_filtered.*` |
+| `5003_filtered_tables_build.sql` | Populate `participant_stats` and `tl_participant_stats` via `SEMI JOIN valid_game_ids` |
+| `5003_participant_stats_only_build.sql` | Fast iteration copy for the same two 5003 tables |
+| `5132` | Build labels in `game_data_filtered.participant_item_value_totals` |
+| `5133` | Temporal scaling weights in `game_data_filtered.participant_scaling_weights` |
 | `5900_ml_game_split_schema.sql` | Persistent chronological train/validation/test label table |
 | `5900_ml_game_split_build.sql` | Populate the 80/10/10 split labels used by 6000+ aggregate builds |
 | `analytics_builds/8xxx_*.sql` | Human-facing inspection / reporting queries |
@@ -89,10 +91,13 @@ docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/5003_filtered_tables_build.sql
 
 docker exec clickhouse clickhouse-client --multiquery \
-  --queries-file /docker-entrypoint-initdb.d/5130_tl_participant_per_minute_stats_build.sql
+  --queries-file /docker-entrypoint-initdb.d/5132_participant_item_value_totals_build.sql
 
 docker exec clickhouse clickhouse-client --multiquery \
-  --queries-file /docker-entrypoint-initdb.d/5132_participant_item_value_totals_build.sql
+  --queries-file /docker-entrypoint-initdb.d/5133_participant_scaling_weights_schema.sql
+
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/5133_participant_scaling_weights_build.sql
 
 docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/5900_ml_game_split_schema.sql
@@ -106,8 +111,10 @@ docker exec clickhouse clickhouse-client --multiquery \
 docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/6900_ml_game_player_pivot_build.sql
 
-docker exec clickhouse clickhouse-client --multiquery \
-  --queries-file /docker-entrypoint-initdb.d/6002_1vx_aggregations_simple.sql
+# Then rebuild the active ML priors:
+#   6003, 6000, 6004, 6020, 6021, 6022, 6023
+# and reload dictionaries:
+#   7004, 7005, 7006, 7010, 7011, 7012, 7013
 ```
 
 To rebuild from scratch (drops `game_data_filtered.*` first), run `5000`
@@ -120,18 +127,18 @@ After the SQL path finishes, rebuild the Python ML cache:
 uv run python -m app.ml.build_dataset
 ```
 
-Memory note: `5003` carries `max_threads=1, max_block_size=8192,
-max_insert_block_size=32768` and a 4-way hash split on
-`participant_challenges` to stay under the 4.5 GiB container cap.
+Memory note: `5003` now copies only `participant_stats` and
+`tl_participant_stats`. The wider filtered timeline snapshots and non-ML
+matchdata copies were retired to keep `game_data_filtered` focused on active
+feature paths.
 
-## Fast filter iteration (participant_stats + profiling events)
+## Fast Filter Iteration
 
 Use when validating filter changes and checks need `filter_stg_*`,
-`valid_game_ids`, `game_data_filtered.participant_stats`, and the timeline
-event tables required for profiling (`tl_participant_stats`,
-`tl_champion_kill`, `tl_item_purchased`, `tl_item_sold`, `tl_item_undo`,
-`tl_elite_monster_kill`, `tl_building_kill`). Skips the rest of the
-`tl_*` copies and derived analytical rebuilds.
+`valid_game_ids`, `game_data_filtered.participant_stats`, and
+`game_data_filtered.tl_participant_stats`. Other timeline event tables are no
+longer mirrored into `game_data_filtered`; use raw `game_data` tables directly
+for one-off profiling.
 
 ```bash
 docker exec clickhouse clickhouse-client --multiquery \
@@ -160,8 +167,8 @@ docker exec -i clickhouse clickhouse-client \
   < database/clickhouse/schema/analytics_builds/8003_filter_statistics.sql
 ```
 
-Run the standard rebuild later when timeline tables or other derived
-artifacts need to reflect the new valid-game pool.
+Run the standard rebuild later when ML aggregate tables need to reflect the new
+valid-game pool.
 
 ## Rule-only re-measurement
 
