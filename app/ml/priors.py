@@ -40,6 +40,13 @@ class PriorTables:
         tuple[int, str, str, int, str, str],
         tuple[float, int],
     ]
+    # Backoff levels for nested EB pooling (mirror build_dataset). 1v1 levels are
+    # stored directionally (blue-perspective, no inversion); 2vx levels are
+    # canonicalised smaller-key-first (own-team win rate, symmetric).
+    m1v1_nb: dict[tuple[int, str, int, str], tuple[float, int]]
+    m1v1_champ: dict[tuple[int, int], tuple[float, int]]
+    s2vx_nb: dict[tuple[int, str, int, str], tuple[float, int]]
+    s2vx_champ: dict[tuple[int, int], tuple[float, int]]
 
     def lookup_player(
         self, tuples: Iterable[tuple[int, str, str]]
@@ -77,10 +84,69 @@ class PriorTables:
                 idx += 1
         return wr, cnt
 
+    def lookup_1v1_blue_nobuild(
+        self,
+        blue_tuples: list[tuple[int, str, str]],
+        red_tuples: list[tuple[int, str, str]],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """No-build 1v1 backoff: blue-perspective rate/count for 25 (b, r) pairs."""
+        return self._lookup_1v1_directional(
+            blue_tuples, red_tuples, self.m1v1_nb, lambda b, r: (b[0], b[1], r[0], r[1])
+        )
+
+    def lookup_1v1_blue_champ(
+        self,
+        blue_tuples: list[tuple[int, str, str]],
+        red_tuples: list[tuple[int, str, str]],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Champion-pair 1v1 backoff: blue-perspective rate/count for 25 pairs."""
+        return self._lookup_1v1_directional(
+            blue_tuples, red_tuples, self.m1v1_champ, lambda b, r: (b[0], r[0])
+        )
+
+    @staticmethod
+    def _lookup_1v1_directional(
+        blue_tuples: list[tuple[int, str, str]],
+        red_tuples: list[tuple[int, str, str]],
+        table: dict,
+        key_of,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        n_pairs = len(blue_tuples) * len(red_tuples)
+        wr = np.empty(n_pairs, dtype=np.float64)
+        cnt = np.empty(n_pairs, dtype=np.float64)
+        get = table.get
+        default = (DEFAULT_WIN_RATE, DEFAULT_MATCHUPS)
+        idx = 0
+        for b in blue_tuples:
+            for r in red_tuples:
+                wr[idx], cnt[idx] = get(key_of(b, r), default)
+                idx += 1
+        return wr, cnt
+
     def lookup_2vx_team(
         self, team_tuples: list[tuple[int, str, str]]
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return synergy win rate and matchup count for C(5, 2) = 10 pairs."""
+        return self._lookup_2vx_team(team_tuples, self.s2vx, lambda t: t)
+
+    def lookup_2vx_team_nobuild(
+        self, team_tuples: list[tuple[int, str, str]]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """No-build 2vx backoff: rate/count for C(5, 2) = 10 (champ, role) pairs."""
+        return self._lookup_2vx_team(team_tuples, self.s2vx_nb, lambda t: (t[0], t[1]))
+
+    def lookup_2vx_team_champ(
+        self, team_tuples: list[tuple[int, str, str]]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Champion-pair 2vx backoff: rate/count for C(5, 2) = 10 champ pairs."""
+        return self._lookup_2vx_team(team_tuples, self.s2vx_champ, lambda t: (t[0],))
+
+    @staticmethod
+    def _lookup_2vx_team(
+        team_tuples: list[tuple[int, str, str]],
+        table: dict,
+        reduce_key,
+    ) -> tuple[np.ndarray, np.ndarray]:
         pairs = (
             (0, 1), (0, 2), (0, 3), (0, 4),
             (1, 2), (1, 3), (1, 4),
@@ -89,11 +155,11 @@ class PriorTables:
         )
         wr = np.empty(len(pairs), dtype=np.float64)
         cnt = np.empty(len(pairs), dtype=np.float64)
-        get = self.s2vx.get
+        get = table.get
         default = (DEFAULT_WIN_RATE, DEFAULT_MATCHUPS)
         for i, (a, b) in enumerate(pairs):
-            ta, tb = team_tuples[a], team_tuples[b]
-            key = (*ta, *tb) if ta <= tb else (*tb, *ta)
+            ka, kb = reduce_key(team_tuples[a]), reduce_key(team_tuples[b])
+            key = (*ka, *kb) if ka <= kb else (*kb, *ka)
             wr[i], cnt[i] = get(key, default)
         return wr, cnt
 
@@ -143,7 +209,54 @@ def load_priors() -> PriorTables:
         for c1, p1k, b1, c2, p2k, b2, w, m in s2vx_rows
     }
 
-    return PriorTables(p1=p1, m1v1=m1v1, s2vx=s2vx)
+    m1v1_nb_rows = client.query(
+        """
+        SELECT blue_championid, blue_teamposition, red_championid, red_teamposition,
+               blue_win_rate, matchups
+        FROM game_data_filtered.matchup_1v1_nobuild WHERE split = 'train'
+        """
+    ).result_rows
+    m1v1_nb = {
+        (int(bc), str(bp), int(rc), str(rp)): (float(w), int(m))
+        for bc, bp, rc, rp, w, m in m1v1_nb_rows
+    }
+
+    m1v1_champ_rows = client.query(
+        """
+        SELECT blue_championid, red_championid, blue_win_rate, matchups
+        FROM game_data_filtered.matchup_1v1_champ WHERE split = 'train'
+        """
+    ).result_rows
+    m1v1_champ = {
+        (int(bc), int(rc)): (float(w), int(m)) for bc, rc, w, m in m1v1_champ_rows
+    }
+
+    s2vx_nb_rows = client.query(
+        """
+        SELECT championid_1, teamposition_1, championid_2, teamposition_2, win_rate, matchups
+        FROM game_data_filtered.synergy_2vx_nobuild WHERE split = 'train'
+        """
+    ).result_rows
+    s2vx_nb = {
+        (int(c1), str(p1k), int(c2), str(p2k)): (float(w), int(m))
+        for c1, p1k, c2, p2k, w, m in s2vx_nb_rows
+    }
+
+    s2vx_champ_rows = client.query(
+        """
+        SELECT championid_1, championid_2, win_rate, matchups
+        FROM game_data_filtered.synergy_2vx_champ WHERE split = 'train'
+        """
+    ).result_rows
+    s2vx_champ = {
+        (int(c1), int(c2)): (float(w), int(m)) for c1, c2, w, m in s2vx_champ_rows
+    }
+
+    return PriorTables(
+        p1=p1, m1v1=m1v1, s2vx=s2vx,
+        m1v1_nb=m1v1_nb, m1v1_champ=m1v1_champ,
+        s2vx_nb=s2vx_nb, s2vx_champ=s2vx_champ,
+    )
 
 
 __all__ = ["DEFAULT_MATCHUPS", "DEFAULT_WIN_RATE", "PriorTables", "load_priors"]

@@ -159,6 +159,114 @@ def cascade_dynamic_smoothed_rate(
     )
 
 
+def eb_strength_from_moments(
+    prior_mean: float,
+    total_var: float,
+    within_var: float,
+    *,
+    min_strength: float = 1.0,
+    max_strength: float = 10_000.0,
+    default: float = DEFAULT_PRIOR_STRENGTH,
+) -> float:
+    """Method-of-moments Beta-Binomial concentration (pseudo-count) ``kappa``.
+
+    Given the population moments of a level's empirical cell rates:
+
+    * ``prior_mean`` = support-weighted mean rate ``mu``,
+    * ``total_var``  = variance of the observed cell rates,
+    * ``within_var`` = mean sampling variance ``E[r(1-r)/n]``,
+
+    the between-cell (true effect) variance is ``total_var - within_var`` and the
+    Beta concentration that reproduces it is ``mu(1-mu)/between_var - 1``. Large
+    when true effects are tiny (shrink hard), small when they spread out. Falls
+    back to `default` for degenerate inputs (no spread, non-finite).
+    """
+    mu = float(prior_mean)
+    spread = mu * (1.0 - mu)
+    between = float(total_var) - float(within_var)
+    if not np.isfinite(between) or between <= 0.0 or spread <= 0.0:
+        return float(default)
+    kappa = spread / between - 1.0
+    if not np.isfinite(kappa):
+        return float(default)
+    return float(np.clip(kappa, min_strength, max_strength))
+
+
+def eb_strength(
+    win_rate: np.ndarray,
+    sample_count: np.ndarray,
+    **kwargs: float,
+) -> float:
+    """`eb_strength_from_moments` computed from a level's rate/count arrays.
+
+    Cells with zero support carry no information and are dropped. The mean is
+    support-weighted; ``within_var`` is the mean per-cell sampling variance.
+    """
+    rates = np.asarray(win_rate, dtype=np.float64).reshape(-1)
+    counts = np.asarray(sample_count, dtype=np.float64).reshape(-1)
+    valid = counts > 0.0
+    if not np.any(valid):
+        return float(kwargs.get("default", DEFAULT_PRIOR_STRENGTH))
+    rates, counts = rates[valid], counts[valid]
+    mu = float(np.sum(rates * counts) / np.sum(counts))
+    total_var = float(np.average((rates - mu) ** 2, weights=counts))
+    # Support-weighted mean sampling variance: sum(r(1-r)) / sum(n), matching the
+    # ClickHouse moments the cache builder feeds to eb_strength_from_moments.
+    within_var = float(np.sum(rates * (1.0 - rates)) / np.sum(counts))
+    return eb_strength_from_moments(mu, total_var, within_var, **kwargs)
+
+
+def nested_shrunk_rate(
+    rates: Sequence[np.ndarray],
+    counts: Sequence[np.ndarray],
+    *,
+    strengths: Sequence[float],
+    floor_prior: float | np.ndarray = DEFAULT_PRIOR_MEAN,
+    amplification_threshold: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nested empirical-Bayes partial pooling, finest level first.
+
+    `rates`/`counts` are per-level arrays ordered most→least specific (L0..Lk);
+    `strengths` is the matching per-level Beta pseudo-count. Each level is shrunk
+    toward the posterior of its parent (the next-coarser level), the coarsest
+    toward `floor_prior`. Reuses `bayesian_smoothed_rate` per level.
+
+    Returns ``(posterior_mean, effective_n)``. The effective sample size inherits
+    the parent's support in proportion to how much the estimate leaned on it
+    (``n_eff = n + (1-w)·n_eff_parent`` with ``w = n/(n+kappa)``), so a sparse
+    finest cell backed by a dense parent is treated as well-supported by the
+    φ-gate rather than suppressed.
+    """
+    if not (len(rates) == len(counts) == len(strengths)):
+        raise ValueError("rates, counts, and strengths must be the same length")
+    if not rates:
+        raise ValueError("nested_shrunk_rate requires at least one level")
+
+    prior = np.broadcast_to(
+        np.asarray(floor_prior, dtype=np.float64), np.asarray(rates[0]).shape
+    ).astype(np.float64)
+    prior_neff = np.zeros_like(prior)
+    # Coarsest -> finest, so the finest posterior is produced last.
+    for rate, count, base in zip(
+        reversed(rates), reversed(counts), reversed(list(strengths))
+    ):
+        count_f = np.asarray(count, dtype=np.float64)
+        kappa = float(base) * amplification_factor(count_f, amplification_threshold)
+        mean = bayesian_smoothed_rate(
+            np.asarray(rate, dtype=np.float64),
+            count_f,
+            prior_mean=prior,
+            prior_strength=kappa,
+        )
+        denom = count_f + kappa
+        own_weight = np.divide(
+            count_f, denom, out=np.zeros_like(count_f), where=denom > 0.0
+        )
+        prior = mean
+        prior_neff = count_f + (1.0 - own_weight) * prior_neff
+    return prior, prior_neff
+
+
 def cascade_selection(
     prior_lookups: Mapping[LevelT, Mapping[str, np.ndarray]],
     levels: Sequence[LevelT],
@@ -217,4 +325,7 @@ __all__ = [
     "cascade_dynamic_smoothed_rate",
     "cascade_selection",
     "dynamic_smoothed_rate",
+    "eb_strength",
+    "eb_strength_from_moments",
+    "nested_shrunk_rate",
 ]

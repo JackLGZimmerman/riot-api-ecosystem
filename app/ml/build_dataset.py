@@ -1,4 +1,4 @@
-"""Build per-game arrays (priors + outcomes) used by the linear model."""
+"""Build per-game arrays used by the HGNN win-rate model."""
 
 from __future__ import annotations
 
@@ -18,10 +18,16 @@ from app.ml.cache_layout import (
     N_MATCHUPS_1V1,
     array_paths,
 )
-from app.ml.config import PLAYER_PIVOT_TABLE, DatasetConfig
+from app.ml.config import (
+    DatasetConfig,
+    MATCHUP_1V1_LEVEL_TABLES,
+    SYNERGY_2VX_LEVEL_TABLES,
+)
 from app.core.utils.smoothing import (
     cascade_dynamic_smoothed_rate,
     dynamic_smoothed_rate,
+    eb_strength_from_moments,
+    nested_shrunk_rate,
 )
 from clickhouse_connect.driver.exceptions import StreamFailureError
 
@@ -78,37 +84,39 @@ def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
     """Subtract each train game's own outcome from its in-sample priors, in place.
 
     Own-outcome per slot is the focal side's win: solo blue 0-4 / red 5-9; 1v1 is
-    blue-perspective for all 25; 2vx blue pairs 0-9 / red pairs 10-19. Count-1 pairs
-    collapse to count 0, so smoothing returns their composite prior.
+    blue-perspective for all 25; 2vx blue pairs 0-9 / red pairs 10-19. The own
+    outcome is identical across every backoff level of an interaction (the build,
+    no-build, and champion levels all counted this same game), so each level is
+    LOO'd with the same own array. Count-1 cells collapse to count 0, so nested
+    pooling returns their parent/composite prior.
     """
     blue_win = raw["blue_win"]
     red_win = 1.0 - blue_win
-    own = {
-        "p1_raw": np.concatenate(
-            [np.broadcast_to(blue_win[:, None], (blue_win.size, 5)),
-             np.broadcast_to(red_win[:, None], (blue_win.size, 5))], axis=1
-        ),
-        "m1v1_raw": np.broadcast_to(blue_win[:, None], (blue_win.size, 25)),
-        "s2vx_raw": np.concatenate(
-            [np.broadcast_to(blue_win[:, None], (blue_win.size, 10)),
-             np.broadcast_to(red_win[:, None], (blue_win.size, 10))], axis=1
-        ),
-    }
-    for raw_key, cnt_key in (("p1_raw", "p1_cnt"), ("m1v1_raw", "m1v1_cnt"), ("s2vx_raw", "s2vx_cnt")):
+    solo_own = np.concatenate(
+        [np.broadcast_to(blue_win[:, None], (blue_win.size, 5)),
+         np.broadcast_to(red_win[:, None], (blue_win.size, 5))], axis=1
+    )
+    m1v1_own = np.broadcast_to(blue_win[:, None], (blue_win.size, 25))
+    s2vx_own = np.concatenate(
+        [np.broadcast_to(blue_win[:, None], (blue_win.size, 10)),
+         np.broadcast_to(red_win[:, None], (blue_win.size, 10))], axis=1
+    )
+
+    levels: list[tuple[str, str, np.ndarray]] = [("p1_raw", "p1_cnt", solo_own)]
+    levels += [(rk, ck, m1v1_own) for rk, ck in _M1V1_LEVELS]
+    levels += [(rk, ck, s2vx_own) for rk, ck in _S2VX_LEVELS]
+    for raw_key, cnt_key, own in levels:
         count = raw[cnt_key]
         loo_count = count - 1.0
-        loo_wins = np.rint(raw[raw_key] * count) - own[raw_key]
+        loo_wins = np.rint(raw[raw_key] * count) - own
         safe = loo_count > 0.0
         raw[raw_key] = np.where(safe, loo_wins / np.where(safe, loo_count, 1.0), 0.5)
         raw[cnt_key] = np.maximum(loo_count, 0.0)
 
 
-_DICT = "game_data_filtered"
-
-
 def _solo(attr: str, default: str) -> str:
     # The solo prior key is the player tuple (championid, teamposition, build) itself.
-    return f"arrayMap(k -> dictGetOrDefault('{_DICT}.synergy_1vx_dict', '{attr}', k, {default}), solo_keys)"
+    return f"arrayMap(k -> dictGetOrDefault('{{solo_prior_dict}}', '{attr}', k, {default}), solo_keys)"
 
 
 def _pair_keys(team_col: str) -> str:
@@ -117,6 +125,31 @@ def _pair_keys(team_col: str) -> str:
     return (
         f"arrayMap(ix -> if({t}[ix.1] <= {t}[ix.2], "
         f"tupleConcat({t}[ix.1], {t}[ix.2]), tupleConcat({t}[ix.2], {t}[ix.1])), "
+        f"{_TEAM_PAIRS_SQL})"
+    )
+
+
+def _pair_keys_nobuild(team_col: str) -> str:
+    # C(5,2) same-team keys with build dropped: (champ, role) per member,
+    # canonicalised smaller-2-tuple-first to match synergy_2vx_nobuild_dict.
+    t = team_col
+    a = f"({t}[ix.1].1, {t}[ix.1].2)"
+    b = f"({t}[ix.2].1, {t}[ix.2].2)"
+    return (
+        f"arrayMap(ix -> if({a} <= {b}, "
+        f"({t}[ix.1].1, {t}[ix.1].2, {t}[ix.2].1, {t}[ix.2].2), "
+        f"({t}[ix.2].1, {t}[ix.2].2, {t}[ix.1].1, {t}[ix.1].2)), "
+        f"{_TEAM_PAIRS_SQL})"
+    )
+
+
+def _pair_keys_champ(team_col: str) -> str:
+    # C(5,2) same-team keys with only championid, canonicalised smaller-id-first
+    # to match synergy_2vx_champ_dict.
+    t = team_col
+    return (
+        f"arrayMap(ix -> if({t}[ix.1].1 <= {t}[ix.2].1, "
+        f"({t}[ix.1].1, {t}[ix.2].1), ({t}[ix.2].1, {t}[ix.1].1)), "
         f"{_TEAM_PAIRS_SQL})"
     )
 
@@ -131,22 +164,38 @@ SELECT
     {_solo("win_rate", "toFloat32(0.5)")} AS p1_raw,
     {_solo("matchups", "toUInt32(0)")} AS p1_cnt,
     arrayMap((k, swapped) -> if(swapped,
-        toFloat32(1.0) - dictGetOrDefault('{_DICT}.matchup_1v1_dict', 'left_win_rate', k, toFloat32(0.5)),
-        dictGetOrDefault('{_DICT}.matchup_1v1_dict', 'left_win_rate', k, toFloat32(0.5))
+        toFloat32(1.0) - dictGetOrDefault('{{matchup_1v1_dict}}', 'left_win_rate', k, toFloat32(0.5)),
+        dictGetOrDefault('{{matchup_1v1_dict}}', 'left_win_rate', k, toFloat32(0.5))
     ), matchup_keys, matchup_swapped) AS m1v1_raw,
-    arrayMap(k -> dictGetOrDefault('{_DICT}.matchup_1v1_dict', 'matchups', k, toUInt64(0)), matchup_keys) AS m1v1_cnt,
-    arrayMap(k -> dictGetOrDefault('{_DICT}.synergy_2vx_dict', 'win_rate', k, toFloat32(0.5)), synergy_keys) AS s2vx_raw,
-    arrayMap(k -> dictGetOrDefault('{_DICT}.synergy_2vx_dict', 'matchups', k, toUInt64(0)), synergy_keys) AS s2vx_cnt,
+    arrayMap(k -> dictGetOrDefault('{{matchup_1v1_dict}}', 'matchups', k, toUInt64(0)), matchup_keys) AS m1v1_cnt,
+    arrayMap(k -> dictGetOrDefault('{{matchup_1v1_nobuild_dict}}', 'blue_win_rate', k, toFloat32(0.5)), matchup_nb_keys) AS m1v1_nb_raw,
+    arrayMap(k -> dictGetOrDefault('{{matchup_1v1_nobuild_dict}}', 'matchups', k, toUInt64(0)), matchup_nb_keys) AS m1v1_nb_cnt,
+    arrayMap(k -> dictGetOrDefault('{{matchup_1v1_champ_dict}}', 'blue_win_rate', k, toFloat32(0.5)), matchup_champ_keys) AS m1v1_champ_raw,
+    arrayMap(k -> dictGetOrDefault('{{matchup_1v1_champ_dict}}', 'matchups', k, toUInt64(0)), matchup_champ_keys) AS m1v1_champ_cnt,
+    arrayMap(k -> dictGetOrDefault('{{synergy_2vx_dict}}', 'win_rate', k, toFloat32(0.5)), synergy_keys) AS s2vx_raw,
+    arrayMap(k -> dictGetOrDefault('{{synergy_2vx_dict}}', 'matchups', k, toUInt64(0)), synergy_keys) AS s2vx_cnt,
+    arrayMap(k -> dictGetOrDefault('{{synergy_2vx_nobuild_dict}}', 'win_rate', k, toFloat32(0.5)), synergy_nb_keys) AS s2vx_nb_raw,
+    arrayMap(k -> dictGetOrDefault('{{synergy_2vx_nobuild_dict}}', 'matchups', k, toUInt64(0)), synergy_nb_keys) AS s2vx_nb_cnt,
+    arrayMap(k -> dictGetOrDefault('{{synergy_2vx_champ_dict}}', 'win_rate', k, toFloat32(0.5)), synergy_champ_keys) AS s2vx_champ_raw,
+    arrayMap(k -> dictGetOrDefault('{{synergy_2vx_champ_dict}}', 'matchups', k, toUInt64(0)), synergy_champ_keys) AS s2vx_champ_cnt,
+    arrayMap(k -> toInt16(k.1), solo_keys) AS champion_id,
+    arrayMap(k -> toInt16(if(indexOf({{build_vocab}}, toString(k.3)) = 0, {{n_builds}}, indexOf({{build_vocab}}, toString(k.3)) - 1)), solo_keys) AS build_id,
     matchid
 FROM (
     SELECT
         matchid,
         blue_win,
-        arrayConcat(blue_players, red_players) AS solo_keys,
+        arrayMap(p -> (tupleElement(p, 1), tupleElement(p, 2), {{key_build_expr}}), blue_players) AS blue_key_players,
+        arrayMap(p -> (tupleElement(p, 1), tupleElement(p, 2), {{key_build_expr}}), red_players) AS red_key_players,
+        arrayConcat(blue_key_players, red_key_players) AS solo_keys,
         arrayFlatten(arrayMap(b -> arrayMap(r ->
-            if(b <= r, tupleConcat(b, r), tupleConcat(r, b)), red_players), blue_players)) AS matchup_keys,
-        arrayFlatten(arrayMap(b -> arrayMap(r -> b > r, red_players), blue_players)) AS matchup_swapped,
-        arrayConcat({_pair_keys("blue_players")}, {_pair_keys("red_players")}) AS synergy_keys
+            if(b <= r, tupleConcat(b, r), tupleConcat(r, b)), red_key_players), blue_key_players)) AS matchup_keys,
+        arrayFlatten(arrayMap(b -> arrayMap(r -> b > r, red_key_players), blue_key_players)) AS matchup_swapped,
+        arrayFlatten(arrayMap(b -> arrayMap(r -> (b.1, b.2, r.1, r.2), red_key_players), blue_key_players)) AS matchup_nb_keys,
+        arrayFlatten(arrayMap(b -> arrayMap(r -> (b.1, r.1), red_key_players), blue_key_players)) AS matchup_champ_keys,
+        arrayConcat({_pair_keys("blue_key_players")}, {_pair_keys("red_key_players")}) AS synergy_keys,
+        arrayConcat({_pair_keys_nobuild("blue_key_players")}, {_pair_keys_nobuild("red_key_players")}) AS synergy_nb_keys,
+        arrayConcat({_pair_keys_champ("blue_key_players")}, {_pair_keys_champ("red_key_players")}) AS synergy_champ_keys
     FROM {{table}}
     WHERE split = '{{split}}' AND matchid > '{{last_matchid}}'
     ORDER BY matchid
@@ -160,7 +209,7 @@ def _split_counts(cfg: DatasetConfig) -> dict[str, int]:
     rows = get_client().query(
         f"""
         SELECT split, count()
-        FROM {PLAYER_PIVOT_TABLE}
+        FROM {cfg.player_pivot_table}
         WHERE split IN ('train', 'validation', 'test')
         GROUP BY split
         """
@@ -194,9 +243,93 @@ def _open_arrays(n_games: int, cache_dir: Path) -> dict[str, np.ndarray]:
     return arrays
 
 
-# Outer-SELECT columns of _CHUNK_QUERY_TEMPLATE, by position.
-_RAW_COLUMNS = ("blue_win", "p1_raw", "p1_cnt", "m1v1_raw", "m1v1_cnt", "s2vx_raw", "s2vx_cnt")
+# Outer-SELECT columns of _CHUNK_QUERY_TEMPLATE, by position (matchid trails them).
+_RAW_COLUMNS = (
+    "blue_win", "p1_raw", "p1_cnt",
+    "m1v1_raw", "m1v1_cnt", "m1v1_nb_raw", "m1v1_nb_cnt", "m1v1_champ_raw", "m1v1_champ_cnt",
+    "s2vx_raw", "s2vx_cnt", "s2vx_nb_raw", "s2vx_nb_cnt", "s2vx_champ_raw", "s2vx_champ_cnt",
+    "champion_id", "build_id",
+)
+
+# Nested-pooling level layout: finest -> coarsest raw/count column pairs per
+# interaction, plus the cache key the smoothed rate and effective N are stored
+# under. The composite per-side prior is the terminal floor below the coarsest.
+_M1V1_LEVELS = (("m1v1_raw", "m1v1_cnt"), ("m1v1_nb_raw", "m1v1_nb_cnt"), ("m1v1_champ_raw", "m1v1_champ_cnt"))
+_S2VX_LEVELS = (("s2vx_raw", "s2vx_cnt"), ("s2vx_nb_raw", "s2vx_nb_cnt"), ("s2vx_champ_raw", "s2vx_champ_cnt"))
 _CHUNK_SIZE = 200_000
+
+
+def _identity_meta(cfg: DatasetConfig) -> tuple[int, list[str]]:
+    """Identity embedding metadata from train priors.
+
+    Champion ids are used as raw embedding indices, so the table covers
+    ``max(championid)+1`` rows. Builds are string labels mapped to a sorted vocab;
+    the model reserves one extra row in each table for unknown ids at inference.
+    """
+    client = get_client()
+    if cfg.use_final_build_labels:
+        max_champ = client.query(
+            f"SELECT toInt32(max(championid)) FROM {cfg.solo_prior_table} WHERE split = 'train'"
+        ).result_rows[0][0]
+    else:
+        rows = client.query(
+            f"""
+            SELECT
+                toInt32(max(championid)) AS max_championid,
+                countIf(build = {{label:String}}) AS no_build_rows
+            FROM {cfg.solo_prior_table}
+            WHERE split = 'train'
+            """,
+            parameters={"label": cfg.draft_unknown_build_label},
+        ).result_rows
+        max_champ, no_build_rows = rows[0]
+        if int(no_build_rows) <= 0:
+            raise ValueError(
+                "Draft-time-safe cache requested (use_final_build_labels=False), "
+                "but no train priors use draft_unknown_build_label="
+                f"{cfg.draft_unknown_build_label!r}. Rebuild the no-build aggregate "
+                "priors before building this cache."
+            )
+        return int(max_champ) + 1, [cfg.draft_unknown_build_label]
+    builds = client.query(
+        f"SELECT DISTINCT build FROM {cfg.solo_prior_table} WHERE split = 'train' ORDER BY build"
+    ).result_rows
+    return int(max_champ) + 1, [str(b[0]) for b in builds]
+
+
+def _level_strengths(cfg: DatasetConfig) -> dict[str, list[float]]:
+    """Empirical-Bayes Beta strength per interaction level (finest -> coarsest).
+
+    Estimated once per build from each level table's support-weighted rate
+    moments via `eb_strength_from_moments`. A level whose true effects are tiny
+    relative to sampling noise gets a large pseudo-count (shrink hard toward its
+    parent); a level with real spread gets a small one.
+    """
+    client = get_client()
+
+    def strengths(tables: tuple[tuple[str, str], ...]) -> list[float]:
+        out: list[float] = []
+        for table, rate_col in tables:
+            r = client.query(
+                f"""
+                SELECT
+                    sum(toFloat64({rate_col}) * matchups) / sum(matchups) AS mu,
+                    sum(toFloat64({rate_col}) * toFloat64({rate_col}) * matchups)
+                        / sum(matchups) AS e_sq,
+                    sum(toFloat64({rate_col}) * (1 - toFloat64({rate_col})))
+                        / sum(matchups) AS within_var
+                FROM {table}
+                WHERE split = 'train' AND matchups > 0
+                """
+            ).result_rows[0]
+            mu, e_sq, within_var = (float(r[0]), float(r[1]), float(r[2]))
+            out.append(eb_strength_from_moments(mu, e_sq - mu * mu, within_var))
+        return out
+
+    return {
+        "m1v1": strengths(MATCHUP_1V1_LEVEL_TABLES),
+        "s2vx": strengths(SYNERGY_2VX_LEVEL_TABLES),
+    }
 
 
 def _smoothed_features(
@@ -208,6 +341,8 @@ def _smoothed_features(
     smoothing_mode: str,
     prior_confidence_matchups: float,
     per_side_fallback: bool,
+    nested_pooling: bool,
+    level_strengths: dict[str, list[float]],
 ) -> dict[str, np.ndarray]:
     def smooth_rate(
         win_rate: np.ndarray,
@@ -233,6 +368,23 @@ def _smoothed_features(
             )
         raise ValueError(f"Unsupported smoothing_mode: {smoothing_mode!r}")
 
+    def pool_interaction(
+        levels: tuple[tuple[str, str], ...],
+        strengths: list[float],
+        floor_prior: float | np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if nested_pooling:
+            return nested_shrunk_rate(
+                [raw[rk] for rk, _ in levels],
+                [raw[ck] for _, ck in levels],
+                strengths=strengths,
+                floor_prior=floor_prior,
+                amplification_threshold=amplification_threshold,
+            )
+        # Legacy single-level composite smoothing of the build-conditioned cell.
+        rk0, ck0 = levels[0]
+        return smooth_rate(raw[rk0], raw[ck0], floor_prior), raw[ck0]
+
     win_rate = smooth_rate(raw["p1_raw"], raw["p1_cnt"], prior_mean)
     prior_1v1, prior_2vx = (
         _composite_interaction_priors(win_rate)
@@ -240,22 +392,25 @@ def _smoothed_features(
         else (prior_mean, prior_mean)
     )
 
+    matchup_1v1, m1v1_eff_n = pool_interaction(
+        _M1V1_LEVELS, level_strengths["m1v1"], prior_1v1
+    )
+    synergy_2vx, s2vx_eff_n = pool_interaction(
+        _S2VX_LEVELS, level_strengths["s2vx"], prior_2vx
+    )
+
     return {
         "blue_win": raw["blue_win"],
         "win_rate": win_rate.astype(DISK_DTYPES["win_rate"], copy=False),
-        "matchup_1v1": smooth_rate(raw["m1v1_raw"], raw["m1v1_cnt"], prior_1v1).astype(
-            DISK_DTYPES["matchup_1v1"], copy=False
-        ),
-        "synergy_2vx": smooth_rate(raw["s2vx_raw"], raw["s2vx_cnt"], prior_2vx).astype(
-            DISK_DTYPES["synergy_2vx"], copy=False
-        ),
+        "matchup_1v1": matchup_1v1.astype(DISK_DTYPES["matchup_1v1"], copy=False),
+        "synergy_2vx": synergy_2vx.astype(DISK_DTYPES["synergy_2vx"], copy=False),
         "p1_cnt": raw["p1_cnt"].astype(DISK_DTYPES["p1_cnt"], copy=False),
-        "m1v1_cnt": raw["m1v1_cnt"].astype(
-            DISK_DTYPES["m1v1_cnt"], copy=False
-        ),
-        "s2vx_cnt": raw["s2vx_cnt"].astype(
-            DISK_DTYPES["s2vx_cnt"], copy=False
-        ),
+        "m1v1_cnt": raw["m1v1_cnt"].astype(DISK_DTYPES["m1v1_cnt"], copy=False),
+        "s2vx_cnt": raw["s2vx_cnt"].astype(DISK_DTYPES["s2vx_cnt"], copy=False),
+        "m1v1_eff_n": m1v1_eff_n.astype(DISK_DTYPES["m1v1_eff_n"], copy=False),
+        "s2vx_eff_n": s2vx_eff_n.astype(DISK_DTYPES["s2vx_eff_n"], copy=False),
+        "champion_id": raw["champion_id"].astype(DISK_DTYPES["champion_id"], copy=False),
+        "build_id": raw["build_id"].astype(DISK_DTYPES["build_id"], copy=False),
     }
 
 
@@ -279,14 +434,42 @@ def _fetch_chunk_rows(query: str, attempts: int = 4) -> list:
     return []
 
 
-def _stream_split(split: str, limit: int) -> Iterable[dict[str, np.ndarray]]:
+def _stream_split(
+    split: str,
+    limit: int,
+    *,
+    player_pivot_table: str,
+    solo_prior_dict: str,
+    matchup_1v1_dict: str,
+    synergy_2vx_dict: str,
+    matchup_1v1_nobuild_dict: str,
+    matchup_1v1_champ_dict: str,
+    synergy_2vx_nobuild_dict: str,
+    synergy_2vx_champ_dict: str,
+    build_vocab_sql: str,
+    n_builds: int,
+    key_build_expr: str,
+) -> Iterable[dict[str, np.ndarray]]:
     """Yield raw prior columns in chunks, keyset-paginated on matchid (no OFFSET cost)."""
     remaining = int(limit)
     last_matchid = ""
     while remaining > 0:
         chunk = min(_CHUNK_SIZE, remaining)
         query = _CHUNK_QUERY_TEMPLATE.format(
-            table=PLAYER_PIVOT_TABLE, split=split, last_matchid=last_matchid, chunk=chunk
+            table=player_pivot_table,
+            solo_prior_dict=solo_prior_dict,
+            matchup_1v1_dict=matchup_1v1_dict,
+            synergy_2vx_dict=synergy_2vx_dict,
+            matchup_1v1_nobuild_dict=matchup_1v1_nobuild_dict,
+            matchup_1v1_champ_dict=matchup_1v1_champ_dict,
+            synergy_2vx_nobuild_dict=synergy_2vx_nobuild_dict,
+            synergy_2vx_champ_dict=synergy_2vx_champ_dict,
+            split=split,
+            last_matchid=last_matchid,
+            chunk=chunk,
+            build_vocab=build_vocab_sql,
+            n_builds=n_builds,
+            key_build_expr=key_build_expr,
         )
         rows = _fetch_chunk_rows(query)
         if not rows:
@@ -313,10 +496,37 @@ def _write_split(
     smoothing_mode: str,
     prior_confidence_matchups: float,
     per_side_fallback: bool,
+    nested_pooling: bool,
+    level_strengths: dict[str, list[float]],
     leave_one_out: bool,
+    player_pivot_table: str,
+    solo_prior_dict: str,
+    matchup_1v1_dict: str,
+    synergy_2vx_dict: str,
+    matchup_1v1_nobuild_dict: str,
+    matchup_1v1_champ_dict: str,
+    synergy_2vx_nobuild_dict: str,
+    synergy_2vx_champ_dict: str,
+    build_vocab_sql: str,
+    n_builds: int,
+    key_build_expr: str,
 ) -> int:
     written = 0
-    for raw in _stream_split(split, limit):
+    for raw in _stream_split(
+        split,
+        limit,
+        player_pivot_table=player_pivot_table,
+        solo_prior_dict=solo_prior_dict,
+        matchup_1v1_dict=matchup_1v1_dict,
+        synergy_2vx_dict=synergy_2vx_dict,
+        matchup_1v1_nobuild_dict=matchup_1v1_nobuild_dict,
+        matchup_1v1_champ_dict=matchup_1v1_champ_dict,
+        synergy_2vx_nobuild_dict=synergy_2vx_nobuild_dict,
+        synergy_2vx_champ_dict=synergy_2vx_champ_dict,
+        build_vocab_sql=build_vocab_sql,
+        n_builds=n_builds,
+        key_build_expr=key_build_expr,
+    ):
         if leave_one_out:
             _leave_one_out(raw)
         block = _smoothed_features(
@@ -327,6 +537,8 @@ def _write_split(
             smoothing_mode=smoothing_mode,
             prior_confidence_matchups=prior_confidence_matchups,
             per_side_fallback=per_side_fallback,
+            nested_pooling=nested_pooling,
+            level_strengths=level_strengths,
         )
         start = offset + written
         for name, data in block.items():
@@ -335,7 +547,13 @@ def _write_split(
     return written
 
 
-def _write_meta(cfg: DatasetConfig, n_games: int, splits: dict[str, int]) -> Path:
+def _write_meta(
+    cfg: DatasetConfig,
+    n_games: int,
+    splits: dict[str, int],
+    identity: dict,
+    level_strengths: dict[str, list[float]],
+) -> Path:
     meta_path = cfg.cache_dir / CACHE_META_FILE
     meta_path.write_text(
         json.dumps(
@@ -343,6 +561,7 @@ def _write_meta(cfg: DatasetConfig, n_games: int, splits: dict[str, int]) -> Pat
                 "format": CACHE_FORMAT,
                 "n_games": n_games,
                 "splits": splits,
+                "identity": identity,
                 "smoothing": {
                     "prior_mean": cfg.smoothing_prior_mean,
                     "prior_strength": cfg.smoothing_prior_strength,
@@ -351,6 +570,17 @@ def _write_meta(cfg: DatasetConfig, n_games: int, splits: dict[str, int]) -> Pat
                     "prior_confidence_matchups": cfg.prior_confidence_matchups,
                     "interaction_per_side_fallback": cfg.interaction_per_side_fallback,
                     "interaction_loo": cfg.interaction_loo,
+                    "interaction_nested_pooling": cfg.interaction_nested_pooling,
+                    "interaction_level_strengths": level_strengths,
+                    "use_final_build_labels": cfg.use_final_build_labels,
+                    "draft_unknown_build_label": cfg.draft_unknown_build_label,
+                },
+                "sources": {
+                    "player_pivot_table": cfg.player_pivot_table,
+                    "solo_prior_table": cfg.solo_prior_table,
+                    "solo_prior_dict": cfg.solo_prior_dict,
+                    "matchup_1v1_dict": cfg.matchup_1v1_dict,
+                    "synergy_2vx_dict": cfg.synergy_2vx_dict,
                 },
             },
             indent=2,
@@ -366,8 +596,28 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     counts = _split_counts(cfg)
     n_games = sum(counts.values())
     arrays = _open_arrays(n_games, cfg.cache_dir)
+    n_champions, build_vocab = _identity_meta(cfg)
+    n_builds = len(build_vocab)
+    build_vocab_sql = "[" + ",".join(f"'{b}'" for b in build_vocab) + "]"
+    key_build_expr = (
+        "toString(tupleElement(p, 3))"
+        if cfg.use_final_build_labels
+        else f"'{cfg.draft_unknown_build_label}'"
+    )
+    level_strengths = (
+        _level_strengths(cfg)
+        if cfg.interaction_nested_pooling
+        else {"m1v1": [cfg.smoothing_prior_strength], "s2vx": [cfg.smoothing_prior_strength]}
+    )
 
-    logger.info("Building cache: games=%d splits=%s", n_games, counts)
+    logger.info(
+        "Building cache: games=%d splits=%s n_champions=%d n_builds=%d eb_strengths=%s",
+        n_games,
+        counts,
+        n_champions,
+        n_builds,
+        level_strengths,
+    )
     offset = 0
     for sql_split, meta_split in SPLITS:
         written = _write_split(
@@ -381,7 +631,20 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             smoothing_mode=cfg.smoothing_mode,
             prior_confidence_matchups=cfg.prior_confidence_matchups,
             per_side_fallback=cfg.interaction_per_side_fallback,
+            nested_pooling=cfg.interaction_nested_pooling,
+            level_strengths=level_strengths,
             leave_one_out=cfg.interaction_loo and sql_split == "train",
+            player_pivot_table=cfg.player_pivot_table,
+            solo_prior_dict=cfg.solo_prior_dict,
+            matchup_1v1_dict=cfg.matchup_1v1_dict,
+            synergy_2vx_dict=cfg.synergy_2vx_dict,
+            matchup_1v1_nobuild_dict=cfg.matchup_1v1_nobuild_dict,
+            matchup_1v1_champ_dict=cfg.matchup_1v1_champ_dict,
+            synergy_2vx_nobuild_dict=cfg.synergy_2vx_nobuild_dict,
+            synergy_2vx_champ_dict=cfg.synergy_2vx_champ_dict,
+            build_vocab_sql=build_vocab_sql,
+            n_builds=n_builds,
+            key_build_expr=key_build_expr,
         )
         if written != counts[meta_split]:
             raise RuntimeError(
@@ -395,7 +658,13 @@ def build(cfg: DatasetConfig | None = None) -> Path:
         if flush is not None:
             flush()
 
-    return _write_meta(cfg, n_games, counts)
+    return _write_meta(
+        cfg,
+        n_games,
+        counts,
+        {"n_champions": n_champions, "n_builds": n_builds, "build_vocab": build_vocab},
+        level_strengths,
+    )
 
 
 if __name__ == "__main__":

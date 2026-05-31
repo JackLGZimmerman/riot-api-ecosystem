@@ -1,15 +1,16 @@
 # ML Win-Rate Model
 
-This documents the production win prediction model in `app/ml`.
+This documents the production win prediction path in `app/ml`.
 
 ## Production Model
 
-As of 2026-05-29, production uses the Structured Interaction Model With Cross
-Layer.
+As of 2026-05-30, production uses the Match-Outcome HGNN in
+`app/ml/hgnn_model.py`.
 
-Production training:
+Rebuild the cache before training if the cache format or priors changed:
 
 ```bash
+uv run python -m app.ml.build_dataset
 uv run python -m app.ml.train
 ```
 
@@ -17,98 +18,116 @@ Training writes:
 
 | File | Meaning |
 | --- | --- |
-| `app/ml/data/structured_winrate_model.pt` | Structured PyTorch state dict plus model config |
-| `app/ml/data/metrics_latest.json` | Training config, history, and split metrics |
+| `app/ml/data/structured_winrate_model.pt` | HGNN state dict plus `HGNNConfig` |
+| `app/ml/data/metrics_latest.json` | Training config, epoch history, and split metrics |
 
-`app/ml/predictor.py` loads the structured artifact by default through
-`load_predictor()`. Runtime callers still pass teams, roles, and builds and get
-one `P(blue wins)` float.
+`app/ml/predictor.py` loads the artifact through `load_predictor()`. Runtime
+callers pass teams, roles, and builds and receive one `P(blue wins)` float.
 
-## Data Contract
+## Cache Contract
 
-An identity is `(champion_id, team_position, build)`.
-
-The cache is built from train-only priors and chronological splits:
+An identity is `(champion_id, team_position, build)`. The cache format is
+`npy-memmap-v18`, ordered as train, validation, then test.
 
 | Array | Shape | Meaning |
 | --- | --- | --- |
 | `win_rate.npy` | `[games, 10]` | Smoothed `1vx` identity priors |
-| `matchup_1v1.npy` | `[games, 25]` | Smoothed ordered blue-vs-red `1v1` priors |
-| `synergy_2vx.npy` | `[games, 20]` | Smoothed blue and red same-team `2vx` priors |
+| `matchup_1v1.npy` | `[games, 25]` | Nested-pooled ordered blue-vs-red `1v1` priors |
+| `synergy_2vx.npy` | `[games, 20]` | Nested-pooled blue and red same-team `2vx` priors |
 | `p1_cnt.npy` | `[games, 10]` | Support counts for `1vx` |
-| `m1v1_cnt.npy` | `[games, 25]` | Support counts for `1v1` |
-| `s2vx_cnt.npy` | `[games, 20]` | Support counts for `2vx` |
+| `m1v1_cnt.npy` | `[games, 25]` | Build-level support counts for `1v1` |
+| `s2vx_cnt.npy` | `[games, 20]` | Build-level support counts for `2vx` |
+| `m1v1_eff_n.npy` | `[games, 25]` | Effective `1v1` sample size after nested pooling |
+| `s2vx_eff_n.npy` | `[games, 20]` | Effective `2vx` sample size after nested pooling |
+| `champion_id.npy` | `[games, 10]` | Per-slot champion id embedding index |
+| `build_id.npy` | `[games, 10]` | Per-slot build index into `build_vocab` |
 | `blue_win.npy` | `[games]` | Target label |
 
-Structured training requires the count arrays. The cache order is train,
-validation, then test; `app/ml/dataset.py` slices those arrays back into split
-objects.
+`cache_meta.json` records split sizes, smoothing settings, and
+`identity = {n_champions, n_builds, build_vocab}`. `n_champions` is
+`max(champion_id)+1` because champion ids are raw embedding indices.
 
-## Model Structure
+The HGNN consumes both raw support and nested-pooling effective support:
+`*_cnt` feeds explicit confidence features, while `m1v1_eff_n` and `s2vx_eff_n`
+feed the posterior variance so backed-off interactions can still be treated as
+confident.
 
-The model path is:
+## Smoothing
+
+Build-conditioned interactions are nested-pooled from finest to coarsest:
 
 ```text
-ClickHouse train-only priors
-  -> app.ml.build_dataset cache arrays
-  -> app.ml.dataset split loader
-  -> structured feature builders
-  -> StructuredWinModel
-  -> structured_winrate_model.pt
-  -> app.ml.predictor runtime P(blue wins)
+L0 (champ,role,build) x (champ,role,build)
+L1 (champ,role)       x (champ,role)
+L2  champ             x  champ
+L3 per-side composite prior
 ```
 
-`StructuredWinModel` combines three branch logits and confidence summaries:
+Each level shrinks toward the next coarser level with empirical-Bayes strengths
+recorded in `cache_meta.json` under `smoothing.interaction_level_strengths`.
+Runtime prediction uses those stored strengths so training and inference match.
 
-| Branch | Input | Role |
-| --- | --- | --- |
-| Base identity | 10 identity logits plus 5 blue-minus-red role diffs | Main single-identity signal |
-| Synergy | Blue and red `2vx` pair objects | Same-team pair effects |
-| Matchup | 25 ordered `1v1` objects | Blue-vs-red matchup effects |
-| Cross layer | Synergy contexts plus matchup embeddings | Lets team synergy adjust matchup interpretation |
-| Final head | Branch logits plus confidence summaries | Calibrates the final win probability |
+Set `DatasetConfig(use_final_build_labels=False)` only with no-build priors that
+contain the configured `draft_unknown_build_label`; the cache builder fails if
+those priors are missing.
 
-Pair and matchup objects carry observed prior, relevant solo priors, expected
-baseline, support confidence, and observed-minus-expected delta. The final head
-does not see raw champion IDs.
+## Model Shape
 
-### Interaction config (current production)
+`HGNNWinModel` treats the 10 players as nodes and `1v1` / `2vx` priors as
+hyperedges. For each receiving node, the shared message function partitions edge
+members into allies and enemies via `TEAM_OF`, so cross-team priors are read from
+the receiver's perspective.
 
-**Why LOO + full delta:** train `1v1`/`2vx` priors are in-sample — a game's own
-outcome sits in its own priors, leaking the label onto the `joint - expected` delta
-at low support. The old config dropped that delta (`"raw"`), discarding real signal.
-`interaction_loo` subtracts each train game's own outcome first, so `full` (delta-on)
-now uses honest matchup and synergy signal. Test AUC 0.5928 → 0.5972.
+Each player node starts from a factored champion, role, and build identity, then
+fuses the `1vx` posterior. Relationship edges encode:
 
-| Knob | Production value | Why |
-| --- | --- | --- |
-| `interaction_loo` (dataset) | `True` | Leave-one-out encodes train priors (symmetrically across solo/`1v1`/`2vx`) so the delta no longer leaks. Val/test are train-derived and already leak-free, so untouched. |
-| `object_feature_mode` | `"full"` | Keeps the `expected`/`delta` columns; with LOO the delta beats delta-off on val *and* test instead of overfitting. |
-| `confidence_gate` | `True` | Scales each interaction embedding by support confidence, muting the noisiest low-support pairs. |
-| `pooling_ops` | `("weighted",)` | Confidence-weighted mean only; `max`/`min` selected the lowest-support interactions. |
-| `smoothing_mode` | `"cascade"` | Uses the raw contextual rate once support clears `prior_confidence_matchups`, else shrinks toward the broad/composite fallback. Avoids oversmoothing confident identities. |
-| `confidence_gate_strength` | `30` | Confidence column `n/(n+s)` strength. Sweep over 5–150 peaks on a flat 28–35 plateau; below ~20 tail calibration degrades. Requires retrain. |
+```text
+joint    = logit(mu_edge)
+expected = logit(generic 1vx baseline)
+delta    = joint - expected
+```
 
-For tuning guidance and safe non-production output paths, see
-[EXPERIMENTATION.md](EXPERIMENTATION.md).
+The forward pass is:
 
-## Runs To Keep
+```text
+identity + 1vx posterior -> node init
+2vx hypergraph rounds    -> synergy-aware nodes
+1v1 hypergraph rounds    -> matchup-aware nodes
+team readout + residual/prior shortcut -> final logit -> sigmoid
+```
+
+Training uses team-swap augmentation through `swap_hgnn_inputs`: each match is
+also trained mirrored with a flipped label.
+
+## Reference Config
+
+| Setting | Value |
+| --- | ---: |
+| `node_dim` / `msg_dim` | 96 / 96 |
+| `edge_hidden` | 64 |
+| champion / role / build embed | `n_champions+1` / 5 / `n_builds+1` x 96 |
+| intra / cross rounds | 2 / 2 |
+| readout hidden | 256 |
+| residual head hidden | 128 |
+| dropout | 0.1 |
+| logit clip | 5.0 |
+| explicit count features | enabled |
+| explicit edge residual features | enabled |
+| direct residual head / prior shortcut | enabled / enabled |
+| params (approx) | ~0.69M |
+
+## Metrics To Retain
 
 | Model | Test Acc | Test AUC | Test NLL | Test ECE |
 | --- | ---: | ---: | ---: | ---: |
-| L2 logistic reference (55 flat priors) | 0.5701 | 0.5945 | 0.6860 | — |
+| L2 logistic reference (55 flat priors) | 0.5701 | 0.5945 | 0.6860 | - |
 | Structured pre-fix (delta + max/min pool) | 0.5303 | 0.5384 | 0.8031 | 0.1699 |
 | Structured leakage-robust raw (pre-LOO) | 0.5673 | 0.5928 | 0.6788 | 0.0204 |
-| **Structured LOO + full delta + cascade (current)** | **0.5712** | **0.5972** | **0.6770** | **0.0201** |
+| Structured LOO + full delta + cascade (prev. production) | 0.5712 | 0.5972 | 0.6770 | 0.0201 |
+| Match-Outcome HGNN (priors-only node init) | 0.5704 | 0.5947 | 0.6776 | 0.0167 |
+| Match-Outcome HGNN + identity (current) | 0.5709 | 0.5984 | 0.6775 | 0.0297 |
+| HGNN + count/residual/head shortcut | 0.5707 | 0.5993 | 0.6772 | 0.0294 |
+| HGNN + v18 effective support + residual/head shortcut | 0.5718 | 0.5992 | 0.6771 | 0.0263 |
 
-The pre-fix structured model overfit the in-sample train leakage (train AUC 0.83,
-val AUC 0.54, best epoch 1) and was strictly worse than the logistic baseline.
-The pre-LOO `raw` config dropped the delta to survive that leakage; it matched the
-logistic baseline but could not use the interaction signal. LOO encoding removes
-the leak at the source, so `full` (delta-on) now beats both the pre-LOO config and
-the logistic reference on AUC and NLL, while staying ~9x better calibrated than the
-pre-fix model. Training is healthy — train AUC 0.5968 sits *below* val 0.5990
-(no leakage gap), running 29 epochs.
-
-The L2 logistic row is a historical benchmark only; its training code has been
-removed from the package.
+The structured and logistic rows are retained as historical benchmarks; their
+training and test code has been removed from the package.

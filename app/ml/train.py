@@ -1,6 +1,6 @@
 # pyright: reportPrivateImportUsage=false
 
-"""Train the production structured win-rate model.
+"""Train the production HGNN win-rate model.
 
 Run with:
     python -m app.ml.train
@@ -24,25 +24,22 @@ from torch import nn
 from app.core.config.settings import PROJECT_ROOT
 from app.core.logging.logger import setup_logging_config
 from app.ml.config import DatasetConfig, TrainConfig
-from app.ml.dataset import SplitData, load_splits
-from app.ml.structured_model import (
-    DeltaBaselineMode,
-    LOGIT_EPS,
-    MATCHUP_BLUE_INDEX,
-    MATCHUP_RED_INDEX,
-    StructuredModelConfig,
-    StructuredWinModel,
-    TEAM_PAIRS,
-    resolve_device,
-    role_pair_type_ids,
-    save_structured_model,
-    validate_delta_mode,
+from app.ml.dataset import SplitData, identity_meta, load_splits
+from app.ml.hgnn_model import (
+    HGNNConfig,
+    HGNNWinModel,
+    build_hgnn_inputs,
+    save_hgnn_model,
+    swap_hgnn_inputs,
 )
 
 setup_logging_config()
 logger = logging.getLogger(__name__)
 
 EPS = 1e-12
+# Benchmarked on RTX 5070 Ti: 8192 hits the allocator cliff; 7424 maximizes
+# samples/s while preserving a little memory headroom.
+HGNN_TRAIN_BATCH = 7424
 
 
 @dataclass(frozen=True)
@@ -53,13 +50,17 @@ class RawTensorSplit:
     p1_cnt: torch.Tensor
     m1v1_cnt: torch.Tensor
     s2vx_cnt: torch.Tensor
+    m1v1_eff_n: torch.Tensor
+    s2vx_eff_n: torch.Tensor
     blue_win: torch.Tensor
-    role_pair_ids: torch.Tensor
-    pair_a_idx: torch.Tensor
-    pair_b_idx: torch.Tensor
-    pair_slot_idx: torch.Tensor
-    matchup_blue_idx: torch.Tensor
-    matchup_red_idx: torch.Tensor
+    champion_id: torch.Tensor | None = None
+    build_id: torch.Tensor | None = None
+
+
+def resolve_device(device: str) -> str:
+    if device != "auto":
+        return device
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _project_relative(path: Path) -> str:
@@ -107,8 +108,11 @@ def _seed_torch(seed: int, *, device: str) -> None:
     if device == "cuda":
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
 
 
 def _batch_indices(
@@ -165,21 +169,25 @@ def _cache_raw_tensor_split(
         p1_cnt=torch.tensor(split.p1_cnt, dtype=torch.float32, device=device),
         m1v1_cnt=torch.tensor(split.m1v1_cnt, dtype=torch.float32, device=device),
         s2vx_cnt=torch.tensor(split.s2vx_cnt, dtype=torch.float32, device=device),
+        m1v1_eff_n=torch.tensor(
+            split.m1v1_eff_n if split.m1v1_eff_n is not None else split.m1v1_cnt,
+            dtype=torch.float32, device=device,
+        ),
+        s2vx_eff_n=torch.tensor(
+            split.s2vx_eff_n if split.s2vx_eff_n is not None else split.s2vx_cnt,
+            dtype=torch.float32, device=device,
+        ),
         blue_win=torch.tensor(split.blue_win, dtype=torch.float32, device=device),
-        role_pair_ids=torch.as_tensor(role_pair_type_ids(), dtype=torch.long, device=device),
-        pair_a_idx=torch.as_tensor(
-            [pair[0] for pair in TEAM_PAIRS],
-            dtype=torch.long,
-            device=device,
+        champion_id=(
+            torch.tensor(split.champion_id, dtype=torch.long, device=device)
+            if split.champion_id is not None
+            else None
         ),
-        pair_b_idx=torch.as_tensor(
-            [pair[1] for pair in TEAM_PAIRS],
-            dtype=torch.long,
-            device=device,
+        build_id=(
+            torch.tensor(split.build_id, dtype=torch.long, device=device)
+            if split.build_id is not None
+            else None
         ),
-        pair_slot_idx=torch.arange(len(TEAM_PAIRS), dtype=torch.long, device=device),
-        matchup_blue_idx=torch.as_tensor(MATCHUP_BLUE_INDEX, dtype=torch.long, device=device),
-        matchup_red_idx=torch.as_tensor(MATCHUP_RED_INDEX, dtype=torch.long, device=device),
     )
     if device == "cuda":
         torch.cuda.synchronize()
@@ -191,114 +199,6 @@ def _cache_raw_tensor_split(
         time.monotonic() - started,
     )
     return result
-
-
-def _logit_prob_tensor(probabilities: torch.Tensor) -> torch.Tensor:
-    p = probabilities.to(torch.float64).clamp(LOGIT_EPS, 1.0 - LOGIT_EPS)
-    return torch.log(p / (1.0 - p)).to(torch.float32)
-
-
-def _confidence_from_counts_tensor(
-    counts: torch.Tensor,
-    *,
-    prior_strength: float,
-) -> torch.Tensor:
-    count_tensor = counts.to(torch.float64).clamp_min(0.0)
-    return (count_tensor / (count_tensor + float(prior_strength))).to(torch.float32)
-
-
-def _structured_tensors_from_raw(
-    raw: RawTensorSplit,
-    *,
-    confidence_strength: float,
-    delta_baseline_mode: DeltaBaselineMode,
-) -> dict[str, torch.Tensor]:
-    win_rate = raw.win_rate
-    identity_logits = _logit_prob_tensor(win_rate)
-    blue_logits = identity_logits[:, :5]
-    red_logits = identity_logits[:, 5:]
-    base_features = torch.cat([blue_logits, red_logits, blue_logits - red_logits], dim=1)
-
-    synergy_sides: list[torch.Tensor] = []
-    for player_offset, pair_offset in ((0, 0), (5, 10)):
-        side_rates = win_rate[:, player_offset : player_offset + 5]
-        side_logits = identity_logits[:, player_offset : player_offset + 5]
-        joint_logit = _logit_prob_tensor(raw.synergy_2vx[:, pair_offset + raw.pair_slot_idx])
-        a_logit = side_logits.index_select(1, raw.pair_a_idx)
-        b_logit = side_logits.index_select(1, raw.pair_b_idx)
-        if delta_baseline_mode == "logit":
-            expected_logit = 0.5 * (a_logit + b_logit)
-        else:
-            a_rate = side_rates.index_select(1, raw.pair_a_idx)
-            b_rate = side_rates.index_select(1, raw.pair_b_idx)
-            expected_logit = _logit_prob_tensor((a_rate + b_rate) / 2.0)
-        confidence = _confidence_from_counts_tensor(
-            raw.s2vx_cnt[:, pair_offset + raw.pair_slot_idx],
-            prior_strength=confidence_strength,
-        )
-        synergy_sides.append(
-            torch.stack(
-                [
-                    joint_logit,
-                    a_logit,
-                    b_logit,
-                    expected_logit,
-                    confidence,
-                    joint_logit - expected_logit,
-                ],
-                dim=-1,
-            )
-        )
-    synergy_objects = torch.stack(synergy_sides, dim=1)
-
-    matchup_logit = _logit_prob_tensor(raw.matchup_1v1)
-    matchup_blue_logit = blue_logits.index_select(1, raw.matchup_blue_idx)
-    matchup_red_logit = red_logits.index_select(1, raw.matchup_red_idx)
-    if delta_baseline_mode == "logit":
-        expected_matchup_logit = matchup_blue_logit - matchup_red_logit
-    else:
-        blue_rates = win_rate[:, :5].index_select(1, raw.matchup_blue_idx)
-        red_rates = win_rate[:, 5:].index_select(1, raw.matchup_red_idx)
-        expected_matchup_logit = _logit_prob_tensor(0.5 + (blue_rates - red_rates) / 2.0)
-    matchup_confidence = _confidence_from_counts_tensor(
-        raw.m1v1_cnt,
-        prior_strength=confidence_strength,
-    )
-    matchup_objects = torch.stack(
-        [
-            matchup_logit,
-            matchup_blue_logit,
-            matchup_red_logit,
-            expected_matchup_logit,
-            matchup_confidence,
-            matchup_logit - expected_matchup_logit,
-        ],
-        dim=-1,
-    )
-
-    p1_conf = _confidence_from_counts_tensor(raw.p1_cnt, prior_strength=confidence_strength)
-    m1_conf = matchup_confidence
-    s2_conf = _confidence_from_counts_tensor(raw.s2vx_cnt, prior_strength=confidence_strength)
-    confidence_summaries = torch.stack(
-        [
-            p1_conf.mean(dim=1),
-            m1_conf.mean(dim=1),
-            m1_conf.max(dim=1).values,
-            s2_conf.mean(dim=1),
-            s2_conf.max(dim=1).values,
-            s2_conf[:, :10].mean(dim=1),
-            s2_conf[:, 10:].mean(dim=1),
-        ],
-        dim=1,
-    )
-
-    return {
-        "base_features": base_features,
-        "confidence_summaries": confidence_summaries,
-        "synergy_objects": synergy_objects,
-        "matchup_objects": matchup_objects,
-        "role_pair_ids": raw.role_pair_ids,
-    }
 
 
 def _raw_batch(raw: RawTensorSplit, rows: slice | torch.Tensor) -> RawTensorSplit:
@@ -314,23 +214,95 @@ def _raw_batch(raw: RawTensorSplit, rows: slice | torch.Tensor) -> RawTensorSpli
         p1_cnt=take(raw.p1_cnt),
         m1v1_cnt=take(raw.m1v1_cnt),
         s2vx_cnt=take(raw.s2vx_cnt),
+        m1v1_eff_n=take(raw.m1v1_eff_n),
+        s2vx_eff_n=take(raw.s2vx_eff_n),
         blue_win=take(raw.blue_win),
-        role_pair_ids=raw.role_pair_ids,
-        pair_a_idx=raw.pair_a_idx,
-        pair_b_idx=raw.pair_b_idx,
-        pair_slot_idx=raw.pair_slot_idx,
-        matchup_blue_idx=raw.matchup_blue_idx,
-        matchup_red_idx=raw.matchup_red_idx,
+        champion_id=take(raw.champion_id) if raw.champion_id is not None else None,
+        build_id=take(raw.build_id) if raw.build_id is not None else None,
     )
 
 
-def _predict_raw_tensor_split(
-    model: StructuredWinModel,
+def _evaluate_predictions(scores: np.ndarray, split: SplitData) -> dict[str, float | int]:
+    targets = split.blue_win.astype(np.float64, copy=False)
+    if targets.size == 0:
+        return {"n": 0, "accuracy": float("nan"), "auc": float("nan"),
+                "nll": float("nan"), "ece": float("nan"), "brier": float("nan")}
+    return {
+        "n": int(targets.size),
+        "accuracy": float(np.mean((scores >= 0.5) == (targets > 0.5))),
+        "auc": _binary_auc(scores, targets),
+        "nll": _nll(scores, targets),
+        "ece": _ece(scores, targets),
+        "brier": float(np.mean((scores - targets) ** 2)),
+    }
+
+
+def _select_threshold(scores: np.ndarray, targets: np.ndarray) -> tuple[float, float]:
+    if scores.size == 0:
+        return 0.5, float("nan")
+    y = targets > 0.5
+    grid = np.linspace(0.30, 0.70, 401)
+    acc = ((scores[None, :] >= grid[:, None]) == y[None, :]).mean(axis=1)
+    best = int(np.argmax(acc))
+    return float(grid[best]), float(acc[best])
+
+
+def _threshold_accuracy(scores: np.ndarray, targets: np.ndarray, threshold: float) -> float:
+    if scores.size == 0:
+        return float("nan")
+    return float(np.mean((scores >= threshold) == (targets > 0.5)))
+
+
+def _checkpoint_score(
+    metric: str,
+    *,
+    val_metrics: dict[str, float | int],
+    val_threshold_accuracy: float,
+) -> float:
+    if metric == "val_threshold_accuracy":
+        return val_threshold_accuracy
+    if metric == "val_accuracy":
+        return float(val_metrics["accuracy"])
+    if metric == "val_auc":
+        return float(val_metrics["auc"])
+    if metric == "val_nll":
+        return -float(val_metrics["nll"])
+    raise ValueError(
+        "checkpoint_metric must be one of: val_threshold_accuracy, val_accuracy, val_auc, val_nll"
+    )
+
+
+def _hgnn_inputs_from_raw(
+    raw: RawTensorSplit,
+    *,
+    strength: float,
+    device: str,
+) -> dict[str, torch.Tensor]:
+    if raw.champion_id is None or raw.build_id is None:
+        raise ValueError("HGNN inputs require champion_id/build_id; rebuild the cache (v17).")
+    return build_hgnn_inputs(
+        champion_id=raw.champion_id,
+        build_id=raw.build_id,
+        win_rate=raw.win_rate,
+        matchup_1v1=raw.matchup_1v1,
+        synergy_2vx=raw.synergy_2vx,
+        p1_cnt=raw.p1_cnt,
+        m1v1_cnt=raw.m1v1_cnt,
+        s2vx_cnt=raw.s2vx_cnt,
+        m1v1_eff_n=raw.m1v1_eff_n,
+        s2vx_eff_n=raw.s2vx_eff_n,
+        strength=strength,
+        device=device,
+    )
+
+
+def _predict_hgnn(
+    model: HGNNWinModel,
     split: RawTensorSplit,
     *,
     batch_size: int,
-    confidence_strength: float,
-    delta_baseline_mode: DeltaBaselineMode,
+    strength: float,
+    device: str,
 ) -> np.ndarray:
     model.eval()
     predictions: list[np.ndarray] = []
@@ -338,29 +310,10 @@ def _predict_raw_tensor_split(
         n_rows = split.blue_win.numel()
         for start in range(0, n_rows, batch_size):
             raw_batch = _raw_batch(split, slice(start, start + batch_size))
-            logits = model(
-                **_structured_tensors_from_raw(
-                    raw_batch,
-                    confidence_strength=confidence_strength,
-                    delta_baseline_mode=delta_baseline_mode,
-                )
-            )["final_logit"]
+            inputs = _hgnn_inputs_from_raw(raw_batch, strength=strength, device=device)
+            logits = model(**inputs)["final_logit"]
             predictions.append(torch.sigmoid(logits).detach().cpu().numpy())
     return np.concatenate(predictions).astype(np.float64)
-
-
-def _evaluate_predictions(scores: np.ndarray, split: SplitData) -> dict[str, float | int]:
-    targets = split.blue_win.astype(np.float64, copy=False)
-    if targets.size == 0:
-        return {"n": 0, "accuracy": float("nan"), "auc": float("nan"),
-                "nll": float("nan"), "ece": float("nan")}
-    return {
-        "n": int(targets.size),
-        "accuracy": float(np.mean((scores >= 0.5) == (targets > 0.5))),
-        "auc": _binary_auc(scores, targets),
-        "nll": _nll(scores, targets),
-        "ece": _ece(scores, targets),
-    }
 
 
 def train(
@@ -369,10 +322,14 @@ def train(
 ) -> Path:
     dataset_cfg = dataset_cfg or DatasetConfig()
     train_cfg = train_cfg or TrainConfig()
-    delta_mode = validate_delta_mode(train_cfg.delta_baseline_mode)
     device = resolve_device(train_cfg.device)
-    _seed_torch(0, device=device)
+    _seed_torch(train_cfg.seed, device=device)
     started = time.monotonic()
+    # The Beta-posterior variance strength reused for the HGNN confidence gate.
+    strength = dataset_cfg.confidence_gate_strength
+    # Cap the training batch — message-passing intermediates are heavy and each step also
+    # runs a team-swapped copy.
+    train_batch_size = min(train_cfg.batch_size, HGNN_TRAIN_BATCH)
 
     splits = load_splits(dataset_cfg, require_counts=True)
     if splits["train"].blue_win.size == 0:
@@ -382,38 +339,37 @@ def train(
         for name in ("train", "val")
     }
 
-    # "full" objects keep the expected/delta columns that carry the matchup/synergy
-    # signal; DatasetConfig.interaction_loo makes that delta leakage-free.
-    # See documentation/README.md.
-    model_config = StructuredModelConfig(
-        use_synergy=True,
-        use_matchup=True,
-        use_cross=True,
-        delta_baseline_mode=delta_mode,
-        object_feature_mode="full",
-        confidence_gate=True,
-        pooling_ops=("weighted",),
+    meta = identity_meta(dataset_cfg)
+    model_config = HGNNConfig(
+        n_champions=int(meta["n_champions"]),
+        n_builds=int(meta["n_builds"]),
+        build_vocab=tuple(meta["build_vocab"]),
     )
-    model = StructuredWinModel(model_config).to(device)
+    model = HGNNWinModel(model_config).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_cfg.learning_rate,
         weight_decay=train_cfg.weight_decay,
     )
     loss_fn = nn.BCEWithLogitsLoss()
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(train_cfg.seed)
     best_state = copy.deepcopy(model.state_dict())
     best_val_nll = math.inf
+    best_checkpoint_val_nll = math.inf
+    best_checkpoint_score = -math.inf
     best_epoch = 0
+    best_threshold = 0.5
     stale_epochs = 0
     history: list[dict[str, float | int]] = []
 
     logger.info(
-        "Structured training device=%s batch_size=%s max_epochs=%s delta_mode=%s",
+        "HGNN training device=%s batch_size=%s max_epochs=%s strength=%s checkpoint_metric=%s min_delta=%s",
         device,
-        train_cfg.batch_size,
+        train_batch_size,
         train_cfg.max_epochs,
-        delta_mode,
+        strength,
+        train_cfg.checkpoint_metric,
+        train_cfg.checkpoint_min_delta,
     )
     if device == "cuda":
         logger.info("CUDA device: %s", torch.cuda.get_device_name(0))
@@ -424,7 +380,7 @@ def train(
         train_seen = 0
         for batch_idx in _batch_indices(
             splits["train"].blue_win.size,
-            batch_size=train_cfg.batch_size,
+            batch_size=train_batch_size,
             shuffle=True,
             rng=rng,
         ):
@@ -432,40 +388,73 @@ def train(
                 tensor_splits["train"],
                 torch.as_tensor(batch_idx, dtype=torch.long, device=device),
             )
-            batch = _structured_tensors_from_raw(
-                raw_batch,
-                confidence_strength=dataset_cfg.confidence_gate_strength,
-                delta_baseline_mode=delta_mode,
-            )
+            inputs = _hgnn_inputs_from_raw(raw_batch, strength=strength, device=device)
+            labels = raw_batch.blue_win
+            # Team-swap augmentation (design §8/§9): train on the match and its
+            # mirror with the flipped label, enforcing approximate antisymmetry.
             optimizer.zero_grad(set_to_none=True)
-            logits = model(**batch)["final_logit"]
-            loss = loss_fn(logits, raw_batch.blue_win)
-            loss.backward()
+            direct_loss = loss_fn(model(**inputs)["final_logit"], labels)
+            (0.5 * direct_loss).backward()
+            swapped_loss = loss_fn(
+                model(**swap_hgnn_inputs(inputs))["final_logit"],
+                1.0 - labels,
+            )
+            (0.5 * swapped_loss).backward()
+            loss = 0.5 * (direct_loss.detach() + swapped_loss.detach())
+            if train_cfg.max_grad_norm is not None and train_cfg.max_grad_norm > 0.0:
+                nn.utils.clip_grad_norm_(model.parameters(), train_cfg.max_grad_norm)
             optimizer.step()
-            train_loss_sum += float(loss.detach().cpu().item()) * raw_batch.blue_win.numel()
-            train_seen += int(raw_batch.blue_win.numel())
+            train_loss_sum += float(loss.cpu().item()) * labels.numel() * 2
+            train_seen += int(labels.numel() * 2)
 
-        val_predictions = _predict_raw_tensor_split(
+        val_predictions = _predict_hgnn(
             model,
             tensor_splits["val"],
             batch_size=train_cfg.batch_size,
-            confidence_strength=dataset_cfg.confidence_gate_strength,
-            delta_baseline_mode=delta_mode,
+            strength=strength,
+            device=device,
         )
         train_nll = train_loss_sum / max(train_seen, 1)
-        val_nll = _nll(val_predictions, splits["val"].blue_win)
+        val_metrics = _evaluate_predictions(val_predictions, splits["val"])
+        val_nll = float(val_metrics["nll"])
+        val_threshold, val_threshold_accuracy = _select_threshold(
+            val_predictions,
+            splits["val"].blue_win,
+        )
+        checkpoint_score = _checkpoint_score(
+            train_cfg.checkpoint_metric,
+            val_metrics=val_metrics,
+            val_threshold_accuracy=val_threshold_accuracy,
+        )
         history.append(
-            {"epoch": epoch, "train_nll": train_nll, "val_nll": val_nll}
+            {
+                "epoch": epoch,
+                "train_nll": train_nll,
+                "val_nll": val_nll,
+                "val_accuracy": float(val_metrics["accuracy"]),
+                "val_auc": float(val_metrics["auc"]),
+                "val_ece": float(val_metrics["ece"]),
+                "val_threshold": val_threshold,
+                "val_threshold_accuracy": val_threshold_accuracy,
+                "checkpoint_score": checkpoint_score,
+            }
         )
         logger.info(
-            "epoch=%s train_nll=%.5f val_nll=%.5f",
+            "epoch=%s train_nll=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
             epoch,
             train_nll,
             val_nll,
+            val_metrics["accuracy"],
+            val_threshold,
+            val_threshold_accuracy,
         )
-        if val_nll < best_val_nll - 1e-6:
+        if val_nll < best_val_nll:
             best_val_nll = val_nll
+        if checkpoint_score > best_checkpoint_score + train_cfg.checkpoint_min_delta:
+            best_checkpoint_score = checkpoint_score
+            best_checkpoint_val_nll = val_nll
             best_epoch = epoch
+            best_threshold = val_threshold
             best_state = copy.deepcopy(model.state_dict())
             stale_epochs = 0
         else:
@@ -474,25 +463,31 @@ def train(
                 break
 
     model.load_state_dict(best_state)
-    save_structured_model(
-        train_cfg.model_path,
-        model,
-        confidence_strength=dataset_cfg.confidence_gate_strength,
-    )
+    save_hgnn_model(train_cfg.model_path, model, confidence_strength=strength)
 
     tensor_splits["test"] = _cache_raw_tensor_split("test", splits["test"], device=device)
     predictions = {
-        split_name: _predict_raw_tensor_split(
+        split_name: _predict_hgnn(
             model,
             tensor_split,
             batch_size=train_cfg.batch_size,
-            confidence_strength=dataset_cfg.confidence_gate_strength,
-            delta_baseline_mode=delta_mode,
+            strength=strength,
+            device=device,
         )
         for split_name, tensor_split in tensor_splits.items()
     }
+    split_metrics = {
+        split_name: _evaluate_predictions(predictions[split_name], splits[split_name])
+        for split_name in ("train", "val", "test")
+    }
+    for split_name in ("train", "val", "test"):
+        split_metrics[split_name]["threshold_accuracy"] = _threshold_accuracy(
+            predictions[split_name],
+            splits[split_name].blue_win,
+            best_threshold,
+        )
     metrics = {
-        "model_type": "structured_interaction_cross",
+        "model_type": "hgnn",
         "dataset_config": asdict(dataset_cfg),
         "train_config": asdict(train_cfg),
         "model_config": asdict(model_config),
@@ -501,27 +496,32 @@ def train(
         "device": device,
         "best_epoch": best_epoch,
         "best_val_nll": best_val_nll,
+        "best_checkpoint_val_nll": best_checkpoint_val_nll,
+        "best_checkpoint_score": best_checkpoint_score,
+        "decision_threshold": best_threshold,
         "elapsed_seconds": time.monotonic() - started,
         "history": history,
-        "train": _evaluate_predictions(predictions["train"], splits["train"]),
-        "val": _evaluate_predictions(predictions["val"], splits["val"]),
-        "test": _evaluate_predictions(predictions["test"], splits["test"]),
+        "train": split_metrics["train"],
+        "val": split_metrics["val"],
+        "test": split_metrics["test"],
     }
     _write_metrics(train_cfg.metrics_path, metrics)
 
-    logger.info("Saved structured model: %s", _project_relative(train_cfg.model_path))
+    logger.info("Saved HGNN model: %s", _project_relative(train_cfg.model_path))
     logger.info("Saved metrics: %s", _project_relative(train_cfg.metrics_path))
     for split_name in ("train", "val", "test"):
         m = metrics[split_name]
         if isinstance(m, dict):
             logger.info(
-                "%s n=%s acc=%.4f auc=%.4f nll=%.4f ece=%.4f",
+                "%s n=%s acc=%.4f thr_acc=%.4f auc=%.4f nll=%.4f ece=%.4f brier=%.4f",
                 split_name,
                 m["n"],
                 m["accuracy"],
+                m["threshold_accuracy"],
                 m["auc"],
                 m["nll"],
                 m["ece"],
+                m["brier"],
             )
 
     return train_cfg.model_path

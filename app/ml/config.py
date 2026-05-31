@@ -9,6 +9,29 @@ ML_DATA_DIR = PROJECT_ROOT / "app" / "ml" / "data"
 CACHE_DIR = ML_DATA_DIR / "cache"
 
 PLAYER_PIVOT_TABLE = "game_data_filtered.ml_game_player_pivot"
+SOLO_PRIOR_TABLE = "game_data_filtered.synergy_1vx"
+SOLO_PRIOR_DICT = "game_data_filtered.synergy_1vx_dict"
+MATCHUP_1V1_DICT = "game_data_filtered.matchup_1v1_dict"
+SYNERGY_2VX_DICT = "game_data_filtered.synergy_2vx_dict"
+# Backoff levels for nested empirical-Bayes pooling of the interaction priors:
+# a sparse build-conditioned cell shrinks toward its no-build pair, then its
+# champion-only pair, then the per-side composite floor.
+MATCHUP_1V1_NOBUILD_DICT = "game_data_filtered.matchup_1v1_nobuild_dict"
+MATCHUP_1V1_CHAMP_DICT = "game_data_filtered.matchup_1v1_champ_dict"
+SYNERGY_2VX_NOBUILD_DICT = "game_data_filtered.synergy_2vx_nobuild_dict"
+SYNERGY_2VX_CHAMP_DICT = "game_data_filtered.synergy_2vx_champ_dict"
+# Source tables (finest -> coarsest) for the empirical-Bayes per-level strength
+# moments, with the win-rate column each table exposes.
+MATCHUP_1V1_LEVEL_TABLES: tuple[tuple[str, str], ...] = (
+    ("game_data_filtered.matchup_1v1", "left_win_rate"),
+    ("game_data_filtered.matchup_1v1_nobuild", "blue_win_rate"),
+    ("game_data_filtered.matchup_1v1_champ", "blue_win_rate"),
+)
+SYNERGY_2VX_LEVEL_TABLES: tuple[tuple[str, str], ...] = (
+    ("game_data_filtered.synergy_2vx", "win_rate"),
+    ("game_data_filtered.synergy_2vx_nobuild", "win_rate"),
+    ("game_data_filtered.synergy_2vx_champ", "win_rate"),
+)
 
 POSITIONS: tuple[str, ...] = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
 
@@ -17,6 +40,15 @@ POSITIONS: tuple[str, ...] = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
 class DatasetConfig:
     cache_dir: Path = CACHE_DIR
     max_games: int | None = None
+    player_pivot_table: str = PLAYER_PIVOT_TABLE
+    solo_prior_table: str = SOLO_PRIOR_TABLE
+    solo_prior_dict: str = SOLO_PRIOR_DICT
+    matchup_1v1_dict: str = MATCHUP_1V1_DICT
+    synergy_2vx_dict: str = SYNERGY_2VX_DICT
+    matchup_1v1_nobuild_dict: str = MATCHUP_1V1_NOBUILD_DICT
+    matchup_1v1_champ_dict: str = MATCHUP_1V1_CHAMP_DICT
+    synergy_2vx_nobuild_dict: str = SYNERGY_2VX_NOBUILD_DICT
+    synergy_2vx_champ_dict: str = SYNERGY_2VX_CHAMP_DICT
     val_fraction: float = 0.1
     test_fraction: float = 0.1
     smoothing_prior_mean: float = 0.5
@@ -36,33 +68,44 @@ class DatasetConfig:
     smoothing_mode: str = "cascade"
     prior_confidence_matchups: float = 50.0
     # Strength used for confidence = n/(n+s) in object features and pooling.
-    # Was 150 under flat smoothing (a heavy gate to mute leaky low-support pairs).
-    # With amplified smoothing (`amplification_threshold`) those low-support
-    # values are trustworthy, so the gate can open up: sweeping s over 5–150
-    # peaks on a flat 28–35 plateau (val/test AUC); 30 chosen. Below ~20 tail
-    # calibration degrades and s=0 is degenerate (0/0 for zero-support pairs).
     confidence_gate_strength: float = 30.0
     # Shrink under-sampled 1v1/2vx pairs toward a composite of their two sides'
     # solo priors instead of a flat 0.5 (see app/ml docs). Improves interaction
-    # ranking (AUC) once the model is regularised.
+    # ranking (AUC) once the model is regularised. This composite is the terminal
+    # floor of the nested-pooling ladder below.
     interaction_per_side_fallback: bool = True
+    # Nested empirical-Bayes pooling of the 1v1/2vx priors: shrink the
+    # build-conditioned cell toward its no-build pair, then its champion-only
+    # pair, then the per-side composite floor. Per-level Beta strengths are
+    # estimated by method-of-moments from each level's table (see
+    # app.core.utils.smoothing.eb_strength). Disable to fall back to the legacy
+    # single-level composite smoothing of the build-conditioned cell only.
+    interaction_nested_pooling: bool = True
     # Leave-one-out the train split's own outcome from its solo/1v1/2vx priors
     # before smoothing, so the joint-minus-expected delta stops leaking the label.
     # See documentation/README.md.
     interaction_loo: bool = True
+    # Draft-time caches must not use final item-derived build labels. When
+    # false, the cache builder rewrites all prior lookup keys to this constant
+    # build label and requires matching no-build aggregate priors to exist.
+    use_final_build_labels: bool = True
+    draft_unknown_build_label: str = "unknown"
 
 
 @dataclass(frozen=True)
 class TrainConfig:
     model_path: Path = ML_DATA_DIR / "structured_winrate_model.pt"
     metrics_path: Path = ML_DATA_DIR / "metrics_latest.json"
-    # Large batches act as implicit regularization: they slow the first-epoch
-    # fit of the residual in-sample interaction leakage, so the model holds the
-    # honest base ceiling instead of collapsing. See documentation/README.md.
     batch_size: int = 32768
     max_epochs: int = 40
-    patience: int = 6
+    patience: int = 3
     learning_rate: float = 1e-3
     weight_decay: float = 1e-3
-    delta_baseline_mode: str = "logit"
     device: str = "auto"
+    seed: int = 0
+    max_grad_norm: float | None = 1.0
+    checkpoint_metric: str = "val_auc"
+    # Minimum checkpoint-score improvement required to reset early stopping.
+    # For the default val_auc metric, 5e-4 means tiny validation wiggles no
+    # longer keep training alive when we are looking for material movement.
+    checkpoint_min_delta: float = 5e-4

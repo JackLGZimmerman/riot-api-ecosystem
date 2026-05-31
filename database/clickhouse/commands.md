@@ -218,6 +218,33 @@ docker exec clickhouse clickhouse-client --multiquery \
 If a dictionary was renamed or its column list changed, re-run the
 matching `*_schema.sql` first, then the build above.
 
+### Interaction backoff levels (nested EB pooling)
+
+`build_dataset.py` shrinks each build-conditioned 1v1/2vx prior toward denser
+no-build and champion-only parents. Build the backoff aggregations (run each
+`*_schema.sql` once, then its `*_build.sql`) and reload their dictionaries:
+
+```bash
+# 1v1 backoff: no-build pair (6020) then champion pair (6021)
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6020_1v1_nobuild_aggregations_build.sql
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6021_1v1_champ_aggregations_build.sql
+
+# 2vx backoff: no-build pair (6022) then champion pair (6023)
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6022_2vx_nobuild_aggregations_build.sql
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6023_2vx_champ_aggregations_build.sql
+
+# Reload the four backoff dictionaries
+for d in 7010_matchup_1v1_nobuild 7011_matchup_1v1_champ \
+         7012_synergy_2vx_nobuild 7013_synergy_2vx_champ; do
+  docker exec clickhouse clickhouse-client --multiquery \
+    --queries-file /docker-entrypoint-initdb.d/${d}_dict_build.sql
+done
+```
+
 ## Item-value dictionary refresh
 
 The item-value dictionary (`game_data.item_value_map_dict`, from
