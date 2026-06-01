@@ -116,5 +116,7 @@ app/ml/**/events.out.tfevents*
 app/ml/**/metrics*.jsonl
 app/ml/**/metrics_latest.json
 app/ml/**/session_summary*.json
-
+app/ml/data/extracts/
+app/ml/data/experiments/
+app/ml/data/cache/
 app/classification/data/embeddings/

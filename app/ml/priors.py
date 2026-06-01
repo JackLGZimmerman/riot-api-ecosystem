@@ -23,6 +23,7 @@ from typing import Iterable
 
 import numpy as np
 
+from app.core.utils.common import TEAM_PAIRS
 from app.core.utils.smoothing import build_group_for
 from database.clickhouse.client import get_client
 
@@ -157,17 +158,11 @@ class PriorTables:
         table: dict,
         reduce_key,
     ) -> tuple[np.ndarray, np.ndarray]:
-        pairs = (
-            (0, 1), (0, 2), (0, 3), (0, 4),
-            (1, 2), (1, 3), (1, 4),
-            (2, 3), (2, 4),
-            (3, 4),
-        )
-        wr = np.empty(len(pairs), dtype=np.float64)
-        cnt = np.empty(len(pairs), dtype=np.float64)
+        wr = np.empty(len(TEAM_PAIRS), dtype=np.float64)
+        cnt = np.empty(len(TEAM_PAIRS), dtype=np.float64)
         get = table.get
         default = (DEFAULT_WIN_RATE, DEFAULT_MATCHUPS)
-        for i, (a, b) in enumerate(pairs):
+        for i, (a, b) in enumerate(TEAM_PAIRS):
             ka, kb = reduce_key(team_tuples[a]), reduce_key(team_tuples[b])
             key = (*ka, *kb) if ka <= kb else (*kb, *ka)
             wr[i], cnt[i] = get(key, default)

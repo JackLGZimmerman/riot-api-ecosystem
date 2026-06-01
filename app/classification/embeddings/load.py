@@ -33,14 +33,13 @@ from app.classification.embeddings.config import (
     PRIOR_LEVELS,
     RATE_METRICS,
     RATE_LIKE_METRICS,
-    TIMELINE_CHECKPOINT_METRICS,
     TIMELINE_CHECKPOINT_MINUTES,
-    TIMELINE_CHECKPOINT_MISSING_METRICS,
     TIMELINE_SOURCE_METRICS,
     TIMELINE_STATS_TABLE,
     EmbeddingConfig,
     IdentityType,
 )
+from app.core.utils.common import sql_literal
 from app.core.utils.smoothing import (
     SIBLING_BUILD_BY_LABEL,
     build_group_sql,
@@ -164,10 +163,6 @@ def _load_level_rows(path: Path, level: IdentityType) -> LevelRows | None:
     )
 
 
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
 def _rate_aggs(metrics: tuple[str, ...]) -> list[str]:
     return [f"toFloat32(sum(ps.{metric}) / count()) AS {metric}" for metric in metrics]
 
@@ -261,7 +256,7 @@ participant_context AS (
 
 
 def _baseline_query(split: str) -> str:
-    split_sql = _sql_literal(split)
+    split_sql = sql_literal(split)
     placeholder_by_metric = {
         metric: f"toFloat32(0) AS {metric}"
         for metric in ALL_METRICS
@@ -298,7 +293,7 @@ def _direct_metric_query(
     *,
     per_minute: bool,
 ) -> str:
-    split_sql = _sql_literal(split)
+    split_sql = sql_literal(split)
     stat_columns = metrics
     if per_minute:
         stat_columns = ("timeplayed", *metrics)
@@ -327,7 +322,7 @@ SETTINGS
 
 
 def _challenge_query(split: str) -> str:
-    split_sql = _sql_literal(split)
+    split_sql = sql_literal(split)
     metric_aggs = ",\n    ".join(
         f"toFloat32(avg(ps.{metric})) AS {metric}"
         for metric in CHALLENGE_AVG_METRICS
@@ -354,7 +349,7 @@ SETTINGS
 
 
 def _timeline_final_query(split: str) -> str:
-    split_sql = _sql_literal(split)
+    split_sql = sql_literal(split)
     tuple_select = ",\n                ".join(FINAL_SNAPSHOT_AVG_METRICS)
     metric_aggs = ",\n    ".join(
         f"toFloat32(coalesce(avg(tupleElement(ts.final_stats, {i})), 0)) AS {metric}"
@@ -405,7 +400,7 @@ SETTINGS
 
 
 def _timeline_checkpoint_query(split: str, minute: int) -> str:
-    split_sql = _sql_literal(split)
+    split_sql = sql_literal(split)
     checkpoint_tuple = ",\n                ".join(
         expr for _, expr in TIMELINE_SOURCE_METRICS
     )

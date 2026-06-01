@@ -21,12 +21,16 @@ from app.classification.embeddings.config import (
     RELATIONSHIP_DETAIL_FEATURES,
 )
 from app.core.logging.logger import setup_logging_config
+from app.core.utils.common import (
+    POSITIONS,
+    apply_median_mad,
+    median_mad_standardise,
+    sql_literal,
+)
 from app.core.utils.smoothing import build_group_for
 from database.clickhouse.client import get_client
 
 logger = logging.getLogger(__name__)
-
-POSITIONS: tuple[str, ...] = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
 
 
 @dataclass(frozen=True)
@@ -35,23 +39,6 @@ class RelationshipDetailResult:
     path: Path
     exact_rows: int
     dim: int
-
-
-def _signed_log_standardise(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    flat = np.sign(values) * np.log1p(np.abs(values))
-    med = np.median(flat, axis=0, keepdims=True)
-    mad = np.median(np.abs(flat - med), axis=0, keepdims=True) * 1.4826
-    mad = np.where(mad > 1e-8, mad, 1.0)
-    return ((flat - med) / mad).astype(np.float32), med.astype(np.float32), mad.astype(np.float32)
-
-
-def _apply_standardisation(values: np.ndarray, med: np.ndarray, mad: np.ndarray) -> np.ndarray:
-    flat = np.sign(values) * np.log1p(np.abs(values))
-    return ((flat - med) / np.where(mad > 1e-8, mad, 1.0)).astype(np.float32)
-
-
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _participant_context_cte(where_extra: str = "") -> str:
@@ -132,9 +119,9 @@ def _m1v1_query(
     if blue_position is not None and red_position is not None:
         where_extra = (
             "AND ("
-            f"(ps.teamid = 100 AND toString(ps.teamposition) = {_sql_literal(blue_position)})"
+            f"(ps.teamid = 100 AND toString(ps.teamposition) = {sql_literal(blue_position)})"
             " OR "
-            f"(ps.teamid = 200 AND toString(ps.teamposition) = {_sql_literal(red_position)})"
+            f"(ps.teamid = 200 AND toString(ps.teamposition) = {sql_literal(red_position)})"
             ")"
         )
     return f"""
@@ -205,11 +192,11 @@ def _s2vx_query(
     if position_a is not None and position_b is not None:
         where_extra = (
             "AND toString(ps.teamposition) IN "
-            f"({_sql_literal(position_a)}, {_sql_literal(position_b)})"
+            f"({sql_literal(position_a)}, {sql_literal(position_b)})"
         )
         pair_filter = (
-            f"a.teamposition = {_sql_literal(position_a)} "
-            f"AND b.teamposition = {_sql_literal(position_b)}"
+            f"a.teamposition = {sql_literal(position_a)} "
+            f"AND b.teamposition = {sql_literal(position_b)}"
         )
     return f"""
 WITH
@@ -331,7 +318,7 @@ def _write_artifact(kind: str, rows: Iterable[tuple], path: Path) -> Relationshi
         dtype=np.float32,
     )
     levels = _weighted_levels(kind, exact_keys, raw_values, matchups)
-    exact_standardised, med, mad = _signed_log_standardise(levels["exact"][1])
+    exact_standardised, med, mad = median_mad_standardise(levels["exact"][1])
 
     payload: dict[str, np.ndarray] = {
         "feature_names": np.array(RELATIONSHIP_DETAIL_FEATURES, dtype=object),
@@ -343,7 +330,7 @@ def _write_artifact(kind: str, rows: Iterable[tuple], path: Path) -> Relationshi
         payload[f"{level}_keys"] = keys
         payload[f"{level}_raw_values"] = raw.astype(np.float32)
         payload[f"{level}_values"] = (
-            exact_standardised if level == "exact" else _apply_standardisation(raw, med, mad)
+            exact_standardised if level == "exact" else apply_median_mad(raw, med, mad)
         )
         payload[f"{level}_matchups"] = counts.astype(np.float32)
 

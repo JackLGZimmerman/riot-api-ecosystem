@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config.settings import PROJECT_ROOT
+from app.core.utils.common import POSITIONS as POSITIONS
 from app.core.utils.smoothing import (
     BUILD_GROUPS as BUILD_GROUPS,
     BUILD_TO_GROUP as BUILD_TO_GROUP,
@@ -40,9 +41,6 @@ SYNERGY_2VX_LEVEL_TABLES: tuple[tuple[str, str], ...] = (
     ("game_data_filtered.synergy_2vx_build_group", "win_rate"),
     ("game_data_filtered.synergy_2vx_nobuild", "win_rate"),
 )
-
-POSITIONS: tuple[str, ...] = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
-
 
 @dataclass(frozen=True)
 class DatasetConfig:

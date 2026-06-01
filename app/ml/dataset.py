@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass, fields
 
 import numpy as np
 
@@ -9,7 +9,14 @@ from app.ml.cache_layout import CACHE_FORMAT, CACHE_META_FILE, array_paths
 from app.ml.config import DatasetConfig
 
 LEGACY_CACHE_FORMATS = frozenset(
-    {"npy-memmap-v15", "npy-memmap-v17", "npy-memmap-v18", "npy-memmap-v19"}
+    {
+        "npy-memmap-v15",
+        "npy-memmap-v17",
+        "npy-memmap-v18",
+        "npy-memmap-v19",
+        "npy-memmap-v20",
+        "npy-memmap-v21",
+    }
 )
 COUNT_ARRAY_NAMES = ("p1_cnt", "m1v1_cnt", "s2vx_cnt")
 # Effective sample size per interaction edge after nested EB pooling (cache
@@ -40,22 +47,17 @@ class SplitData:
 
 
 def _slice(arrays: dict[str, np.ndarray], lo: int, hi: int) -> SplitData:
+    # Required fields (no default) KeyError if absent, as before; optional
+    # fields default to None when their array was not loaded.
     return SplitData(
-        win_rate=arrays["win_rate"][lo:hi],
-        matchup_1v1=arrays["matchup_1v1"][lo:hi],
-        synergy_2vx=arrays["synergy_2vx"][lo:hi],
-        p1_cnt=arrays["p1_cnt"][lo:hi],
-        m1v1_cnt=arrays["m1v1_cnt"][lo:hi],
-        s2vx_cnt=arrays["s2vx_cnt"][lo:hi],
-        m1v1_eff_n=arrays["m1v1_eff_n"][lo:hi] if "m1v1_eff_n" in arrays else None,
-        s2vx_eff_n=arrays["s2vx_eff_n"][lo:hi] if "s2vx_eff_n" in arrays else None,
-        blue_win=arrays["blue_win"][lo:hi],
-        champion_id=arrays["champion_id"][lo:hi] if "champion_id" in arrays else None,
-        build_id=arrays["build_id"][lo:hi] if "build_id" in arrays else None,
-        identity_semantic=arrays["identity_semantic"][lo:hi] if "identity_semantic" in arrays else None,
-        identity_profile=arrays["identity_profile"][lo:hi] if "identity_profile" in arrays else None,
-        m1v1_detail=arrays["m1v1_detail"][lo:hi] if "m1v1_detail" in arrays else None,
-        s2vx_detail=arrays["s2vx_detail"][lo:hi] if "s2vx_detail" in arrays else None,
+        **{
+            f.name: (
+                arrays[f.name][lo:hi]
+                if f.name in arrays or f.default is MISSING
+                else None
+            )
+            for f in fields(SplitData)
+        }
     )
 
 

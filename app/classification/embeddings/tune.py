@@ -29,7 +29,11 @@ from app.classification.embeddings.config import (
 )
 from app.classification.embeddings.load import LevelRows, load_all
 from app.classification.embeddings.matrices import build_all_matrices
-from app.classification.embeddings.similarity import median_pair_similarity
+from app.classification.embeddings.similarity import (
+    _sort_groups,
+    _split_by_coherence,
+    median_pair_similarity,
+)
 from app.core.logging.logger import setup_logging_config
 from app.core.utils.smoothing import apply_hierarchical_shrinkage
 
@@ -73,13 +77,6 @@ class _SweepContext:
     n: int
 
 
-def _sort_groups(groups: list[list[int]]) -> list[list[int]]:
-    return sorted(
-        (sorted(group) for group in groups),
-        key=lambda group: (-len(group), group[0]),
-    )
-
-
 def _sweep_context(embeddings: np.ndarray) -> _SweepContext:
     sim = embeddings @ embeddings.T
     if embeddings.shape[0] < 2:
@@ -114,19 +111,6 @@ def _groups_for_threshold(
         for cluster in np.unique(clusters)
     ]
     return _sort_groups(groups)
-
-
-def _split_by_coherence(
-    sim: np.ndarray,
-    groups: list[list[int]],
-    min_median_sim: float,
-) -> tuple[list[list[int]], list[list[int]]]:
-    kept: list[list[int]] = []
-    dropped: list[list[int]] = []
-    for group in groups:
-        median = median_pair_similarity(sim, group)
-        (kept if median >= min_median_sim else dropped).append(group)
-    return kept, dropped
 
 
 def sweep_specialist(

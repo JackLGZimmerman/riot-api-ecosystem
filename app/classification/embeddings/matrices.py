@@ -19,6 +19,7 @@ from app.classification.embeddings.config import (
     IdentityType,
 )
 from app.classification.embeddings.load import LevelRows
+from app.core.utils.common import median_mad_standardise
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +40,6 @@ def _identity_key_strings(rows: LevelRows, key_cols: tuple[str, ...]) -> np.ndar
         ["\x00".join(str(c[i]) for c in cols) for i in range(rows.n)],
         dtype=object,
     )
-
-
-def _standardise_columns(values: np.ndarray) -> np.ndarray:
-    flat = np.sign(values) * np.log1p(np.abs(values))
-    med = np.median(flat, axis=0, keepdims=True)
-    mad = np.median(np.abs(flat - med), axis=0, keepdims=True) * 1.4826
-    mad = np.where(mad > 1e-8, mad, 1.0)
-    return ((flat - med) / mad).astype(np.float32)
 
 
 class _MetricValues(Mapping[str, np.ndarray]):
@@ -125,7 +118,7 @@ def build_level_matrix(
     base_matrix = np.stack(feature_cols, axis=-1)
     matchups = rows.columns["matchups"][sorted_row_idx].astype(np.float32)
 
-    standardised = _standardise_columns(base_matrix)
+    standardised, _, _ = median_mad_standardise(base_matrix)
     matrix = standardised.astype(np.float32)
     feature_names = tuple(cfg.feature_set)
 

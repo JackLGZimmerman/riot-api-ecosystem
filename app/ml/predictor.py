@@ -31,6 +31,7 @@ from app.ml.hgnn_model import (
     load_hgnn_model,
     resolve_device,
 )
+from app.core.utils.common import fit_last_dim
 from app.core.utils.smoothing import (
     smooth_ml_prior_features,
 )
@@ -57,15 +58,6 @@ def _team_tuples(
             build_str = force_build_label
         tuples.append((int(champ), pos, build_str))
     return tuples
-
-
-def _fit_last_dim(values: np.ndarray, dim: int) -> np.ndarray:
-    if values.shape[-1] == dim:
-        return values.astype(np.float32, copy=False)
-    if values.shape[-1] > dim:
-        return values[..., :dim].astype(np.float32, copy=False)
-    pad = np.zeros((*values.shape[:-1], dim - values.shape[-1]), dtype=np.float32)
-    return np.concatenate([values.astype(np.float32, copy=False), pad], axis=-1)
 
 
 def _interaction_pooling_from_cache_meta(
@@ -316,10 +308,10 @@ class WinRatePredictor:
             m1v1_cnt=raw["m1v1_cnt"],
             s2vx_cnt=raw["s2vx_cnt"],
             strength=self._prior_strength,
-            identity_semantic=_fit_last_dim(identity_semantic, IDENTITY_SEMANTIC_DIM),
-            identity_profile=_fit_last_dim(identity_profile, IDENTITY_PROFILE_DIM),
-            m1v1_detail=_fit_last_dim(m1v1_detail, RELATIONSHIP_DETAIL_DIM),
-            s2vx_detail=_fit_last_dim(s2vx_detail, RELATIONSHIP_DETAIL_DIM),
+            identity_semantic=fit_last_dim(identity_semantic, IDENTITY_SEMANTIC_DIM),
+            identity_profile=fit_last_dim(identity_profile, IDENTITY_PROFILE_DIM),
+            m1v1_detail=fit_last_dim(m1v1_detail, RELATIONSHIP_DETAIL_DIM),
+            s2vx_detail=fit_last_dim(s2vx_detail, RELATIONSHIP_DETAIL_DIM),
             device=self._device,
         )
         with torch.no_grad():

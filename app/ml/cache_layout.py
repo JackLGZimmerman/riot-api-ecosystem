@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-CACHE_FORMAT = "npy-memmap-v20"
+CACHE_FORMAT = "npy-memmap-v23"
 CACHE_META_FILE = "cache_meta.json"
 
 WIN_RATE_FILE = "win_rate.npy"
@@ -30,7 +30,7 @@ N_PLAYERS_PER_GAME = 10
 N_MATCHUPS_1V1 = 25
 N_SYNERGIES_2VX = 20
 IDENTITY_SEMANTIC_DIM = 64
-IDENTITY_PROFILE_DIM = 5
+IDENTITY_PROFILE_DIM = 9
 RELATIONSHIP_DETAIL_DIM = 16
 
 ARRAY_FILES = {

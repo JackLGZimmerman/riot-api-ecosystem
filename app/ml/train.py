@@ -14,9 +14,9 @@ import json
 import logging
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import numpy as np
 import torch
@@ -73,25 +73,24 @@ def _project_relative(path: Path) -> str:
         return str(path)
 
 
+_LONG_TENSOR_FIELDS = frozenset({"champion_id", "build_id"})
+
+
+def _map_split(split: Any, fn: Callable[[Any], Any]) -> Any:
+    """Apply `fn` to every present field, rebuilding the same split dataclass."""
+    return type(split)(
+        **{
+            f.name: (None if (value := getattr(split, f.name)) is None else fn(value))
+            for f in fields(split)
+        }
+    )
+
+
 def _limit_split(split: SplitData, max_games: int | None) -> SplitData:
     if max_games is None or split.blue_win.size <= max_games:
         return split
     n = int(max_games)
-    return SplitData(
-        win_rate=split.win_rate[:n],
-        matchup_1v1=split.matchup_1v1[:n],
-        synergy_2vx=split.synergy_2vx[:n],
-        p1_cnt=split.p1_cnt[:n],
-        m1v1_cnt=split.m1v1_cnt[:n],
-        s2vx_cnt=split.s2vx_cnt[:n],
-        blue_win=split.blue_win[:n],
-        champion_id=split.champion_id[:n] if split.champion_id is not None else None,
-        build_id=split.build_id[:n] if split.build_id is not None else None,
-        identity_semantic=split.identity_semantic[:n] if split.identity_semantic is not None else None,
-        identity_profile=split.identity_profile[:n] if split.identity_profile is not None else None,
-        m1v1_detail=split.m1v1_detail[:n] if split.m1v1_detail is not None else None,
-        s2vx_detail=split.s2vx_detail[:n] if split.s2vx_detail is not None else None,
-    )
+    return _map_split(split, lambda array: array[:n])
 
 
 def _binary_auc(scores: np.ndarray, targets: np.ndarray) -> float:
@@ -186,44 +185,20 @@ def _cache_raw_tensor_split(
     device: str,
 ) -> RawTensorSplit:
     started = time.monotonic()
+
+    def to_tensor(name: str, value: np.ndarray) -> torch.Tensor:
+        dtype = torch.long if name in _LONG_TENSOR_FIELDS else torch.float32
+        return torch.tensor(value, dtype=dtype, device=device)
+
     result = RawTensorSplit(
-        win_rate=torch.tensor(split.win_rate, dtype=torch.float32, device=device),
-        matchup_1v1=torch.tensor(split.matchup_1v1, dtype=torch.float32, device=device),
-        synergy_2vx=torch.tensor(split.synergy_2vx, dtype=torch.float32, device=device),
-        p1_cnt=torch.tensor(split.p1_cnt, dtype=torch.float32, device=device),
-        m1v1_cnt=torch.tensor(split.m1v1_cnt, dtype=torch.float32, device=device),
-        s2vx_cnt=torch.tensor(split.s2vx_cnt, dtype=torch.float32, device=device),
-        blue_win=torch.tensor(split.blue_win, dtype=torch.float32, device=device),
-        champion_id=(
-            torch.tensor(split.champion_id, dtype=torch.long, device=device)
-            if split.champion_id is not None
-            else None
-        ),
-        build_id=(
-            torch.tensor(split.build_id, dtype=torch.long, device=device)
-            if split.build_id is not None
-            else None
-        ),
-        identity_semantic=(
-            torch.tensor(split.identity_semantic, dtype=torch.float32, device=device)
-            if split.identity_semantic is not None
-            else None
-        ),
-        identity_profile=(
-            torch.tensor(split.identity_profile, dtype=torch.float32, device=device)
-            if split.identity_profile is not None
-            else None
-        ),
-        m1v1_detail=(
-            torch.tensor(split.m1v1_detail, dtype=torch.float32, device=device)
-            if split.m1v1_detail is not None
-            else None
-        ),
-        s2vx_detail=(
-            torch.tensor(split.s2vx_detail, dtype=torch.float32, device=device)
-            if split.s2vx_detail is not None
-            else None
-        ),
+        **{
+            f.name: (
+                None
+                if (value := getattr(split, f.name)) is None
+                else to_tensor(f.name, value)
+            )
+            for f in fields(RawTensorSplit)
+        }
     )
     if device == "cuda":
         torch.cuda.synchronize()
@@ -243,21 +218,7 @@ def _raw_batch(raw: RawTensorSplit, rows: slice | torch.Tensor) -> RawTensorSpli
             return tensor[rows]
         return tensor.index_select(0, rows)
 
-    return RawTensorSplit(
-        win_rate=take(raw.win_rate),
-        matchup_1v1=take(raw.matchup_1v1),
-        synergy_2vx=take(raw.synergy_2vx),
-        p1_cnt=take(raw.p1_cnt),
-        m1v1_cnt=take(raw.m1v1_cnt),
-        s2vx_cnt=take(raw.s2vx_cnt),
-        blue_win=take(raw.blue_win),
-        champion_id=take(raw.champion_id) if raw.champion_id is not None else None,
-        build_id=take(raw.build_id) if raw.build_id is not None else None,
-        identity_semantic=take(raw.identity_semantic) if raw.identity_semantic is not None else None,
-        identity_profile=take(raw.identity_profile) if raw.identity_profile is not None else None,
-        m1v1_detail=take(raw.m1v1_detail) if raw.m1v1_detail is not None else None,
-        s2vx_detail=take(raw.s2vx_detail) if raw.s2vx_detail is not None else None,
-    )
+    return _map_split(raw, take)
 
 
 def _evaluate_predictions(scores: np.ndarray, split: SplitData) -> dict[str, float | int]:
@@ -390,14 +351,29 @@ def _hgnn_config_from_meta(meta: dict[str, Any]) -> HGNNConfig:
     # arrays; flip these dims to re-enable a pathway for experiments.
     # The cross-team matchup-profile interaction adds the enemy-composition
     # conditioning axis the win-rate prior is structurally blind to (e.g. an
-    # armor-stacking identity vs a physical-damage enemy team). It is a tiny,
-    # antisymmetric, zero-init term, so it is enabled by default.
+    # armor-stacking identity vs a physical-damage enemy team). The profile now
+    # carries expected champion-damage pressure, so the head receives a
+    # draft-time, damage-weighted enemy offense context instead of treating all
+    # five opponents as equal damage contributors. Explicit resistance x enemy
+    # offense products expose the core specialization axis to the shared profile
+    # head (armor tanks into physical damage, MR tanks into magic damage, etc.).
+    # The broad semantic node path stays disabled, but a tiny semantic bottleneck
+    # is enabled inside the profile head so historical durability/identity
+    # context can condition the response without becoming a standalone memorizer.
     return HGNNConfig(
         n_champions=int(meta["n_champions"]),
         n_builds=int(meta["n_builds"]),
         build_vocab=tuple(meta["build_vocab"]),
         identity_semantic_dim=0,
         identity_profile_dim=int(classification.get("identity_profile_dim", 5)),
+        profile_context_dim=int(classification.get("identity_semantic_dim", 0)),
+        profile_context_rank=4,
+        profile_include_ally_context=False,
+        profile_include_weighted_enemy_context=True,
+        profile_include_resistance_products=True,
+        profile_offense_dims=3,
+        profile_damage_pressure_index=5,
+        profile_head_hidden=(24,),
         m1v1_detail_dim=0,
         s2vx_detail_dim=int(classification.get("s2vx_detail_dim", 16)),
     )

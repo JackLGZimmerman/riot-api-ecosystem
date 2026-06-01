@@ -108,19 +108,22 @@ RELATIONSHIP_DETAIL_DIM = len(RELATIONSHIP_DETAIL_FEATURES)
 
 # Interpretable per-identity "matchup profile" consumed by the HGNN cross-team
 # interaction term. Each identity is summarised by where it deals champion
-# damage (offense damage-type mix) and where it invests resistance (armor vs
-# magic-resist fraction). The model crosses one team's profile against the
-# other's, so e.g. an armor-stacking identity gains logit against a physical-
-# damage enemy team -- a conditioning axis the (enemy-blind) win-rate prior
-# cannot represent. All dims are in [0, 1] so the bilinear term is well-scaled.
+# damage, how much champion-damage pressure it usually supplies, and where it
+# invests resistance (armor vs magic-resist fraction). The model crosses one
+# team's profile against the other's, so e.g. an armor-stacking identity gains
+# logit against a physical-damage enemy team -- a conditioning axis the
+# (enemy-blind) win-rate prior cannot represent. All dims are in [0, 1] so the
+# profile term is well-scaled.
 # Source features needed to build the profile (resolved from the smoothed
-# baseline matrix); armor/magic-resist are turned into fractions in the writer.
+# baseline matrix); armor/magic-resist are turned into fractions and champion
+# damage is robust-scaled into pressure axes in the writer.
 IDENTITY_PROFILE_SOURCE_FEATURES: tuple[str, ...] = (
     "physicaldamagedealttochampions_share",
     "magicdamagedealttochampions_share",
     "truedamagedealttochampions_share",
     "armor",
     "magicresist",
+    "totaldamagedealttochampions",
 )
 IDENTITY_PROFILE_FEATURES: tuple[str, ...] = (
     "phys_offense_share",
@@ -128,6 +131,10 @@ IDENTITY_PROFILE_FEATURES: tuple[str, ...] = (
     "true_offense_share",
     "armor_resist_frac",
     "mr_resist_frac",
+    "champion_damage_pressure",
+    "phys_damage_pressure",
+    "magic_damage_pressure",
+    "true_damage_pressure",
 )
 IDENTITY_PROFILE_DIM = len(IDENTITY_PROFILE_FEATURES)
 

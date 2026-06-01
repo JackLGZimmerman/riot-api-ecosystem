@@ -16,21 +16,8 @@ from app.classification.embeddings.config import (
     RELATIONSHIP_DETAIL_CACHE_DIR,
     RELATIONSHIP_DETAIL_DIM,
 )
+from app.core.utils.common import TEAM_PAIRS
 from app.core.utils.smoothing import build_group_for
-
-TEAM_PAIRS: tuple[tuple[int, int], ...] = (
-    (0, 1),
-    (0, 2),
-    (0, 3),
-    (0, 4),
-    (1, 2),
-    (1, 3),
-    (1, 4),
-    (2, 3),
-    (2, 4),
-    (3, 4),
-)
-POSITIONS: tuple[str, ...] = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
 
 
 def _empty(dim: int) -> np.ndarray:

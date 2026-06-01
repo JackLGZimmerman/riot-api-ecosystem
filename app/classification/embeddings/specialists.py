@@ -28,6 +28,7 @@ from app.classification.embeddings.embed import LevelEmbeddings
 from app.classification.embeddings.load import LevelRows, load_all
 from app.classification.embeddings.matrices import build_all_matrices
 from app.classification.embeddings.similarity import (
+    _split_by_coherence,
     cosine_similarity_matrix,
     group_by_threshold,
     median_pair_similarity,
@@ -55,19 +56,6 @@ class SpecialistResult:
     largest_group: int
     median_within_sim: float
     top_groups: list[tuple[int, float, list[tuple]]]
-
-
-def _split_by_coherence(
-    sim: np.ndarray,
-    groups: list[list[int]],
-    min_median_sim: float,
-) -> tuple[list[list[int]], list[list[int]]]:
-    kept: list[list[int]] = []
-    dropped: list[list[int]] = []
-    for group in groups:
-        median = median_pair_similarity(sim, group)
-        (kept if median >= min_median_sim else dropped).append(group)
-    return kept, dropped
 
 
 def _save_labels(

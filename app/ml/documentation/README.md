@@ -1,8 +1,9 @@
 # ML Win-Rate Model
 
-As of 2026-05-31, production uses the direct relationship HGNN path. The typed
-relation encoder experiments were removed after the same-split ablation showed
-the direct model had the best NLL/Brier/ECE while matching relation AUC.
+As of 2026-06-01, production uses the direct relationship HGNN path plus the
+semantic matchup-profile interaction. The typed relation encoder experiments
+were removed after the same-split ablation showed the direct model had the best
+NLL/Brier/ECE while matching relation AUC.
 
 ## Production Path
 
@@ -13,6 +14,8 @@ cache/prior arrays
 -> blue/red team readout
 -> direct 1v1/2vX residual head
 -> direct prior shortcut
+-> 2vX semantic-detail nudge
+-> cross-team matchup-profile interaction
 -> final logit
 -> sigmoid = P(blue wins)
 ```
@@ -34,7 +37,7 @@ Runtime prediction uses `load_predictor()` from `app/ml/predictor.py`.
 
 ## Cache Contract
 
-The model consumes `npy-memmap-v18` cache arrays with 10 ordered slots:
+The model consumes `npy-memmap-v23` cache arrays with 10 ordered slots:
 
 ```text
 0..4 = blue TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
@@ -51,11 +54,14 @@ The model consumes `npy-memmap-v18` cache arrays with 10 ordered slots:
 | `s2vx_cnt.npy` | `[games, 20]` | raw `2vX` support for direct confidence/missing features |
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
+| `identity_semantic.npy` | `[games, 10, 64]` | low-rank profile conditioning context |
+| `identity_profile.npy` | `[games, 10, 9]` | interpretable cross-team matchup profile |
+| `s2vx_detail.npy` | `[games, 20, 16]` | small 2vX semantic-detail nudge |
 | `blue_win.npy` | `[games]` | target label |
 
 The cache may also contain `m1v1_eff_n.npy` and `s2vx_eff_n.npy` from nested
-pooling. These are retained in the cache for prior construction and audit
-history, but the production direct HGNN does not consume them.
+pooling. These are retained in the cache for prior construction and backward
+compatibility, but the production direct HGNN does not consume them.
 
 ## Relationship Features
 
@@ -94,6 +100,7 @@ Final prediction:
 
 ```text
 final_logit = main_head_logit + prior_shortcut_logit
+            + detail_logit + profile_logit
 P(blue wins) = sigmoid(final_logit)
 ```
 
@@ -137,13 +144,14 @@ The same-split ablation selected the direct model:
 | relation encoder | 0.5998 | 0.6767 | 0.2419 | 0.0266 |
 
 Production therefore keeps the calibrated direct priors and direct sparse
-residual corrections, and removes the typed relation transfer layer.
+residual corrections, removes the typed relation transfer layer, and adds a
+small semantic matchup-profile term for enemy-composition context.
 
-After cleanup, the full production training run saved
+The current production profile-v2 artifact saved
 `app/ml/data/structured_winrate_model.pt` with:
 
 | Split | Accuracy | Threshold Acc | AUC | NLL | Brier | ECE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| train | 0.5687 | 0.5673 | 0.5980 | 0.6773 | 0.2423 | 0.0059 |
-| val | 0.5715 | 0.5725 | 0.5998 | 0.6764 | 0.2418 | 0.0132 |
-| test | 0.5722 | 0.5737 | 0.5985 | 0.6768 | 0.2420 | 0.0234 |
+| train | 0.5731 | 0.5713 | 0.6037 | 0.6747 | 0.2410 | 0.0030 |
+| val | 0.5733 | 0.5765 | 0.5994 | 0.6755 | 0.2414 | 0.0248 |
+| test | 0.5693 | 0.5722 | 0.5942 | 0.6773 | 0.2422 | 0.0221 |

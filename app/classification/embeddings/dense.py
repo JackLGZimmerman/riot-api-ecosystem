@@ -127,13 +127,33 @@ def write_identity_profile_embeddings(
         axis=-1,
     ).astype(np.float64)
 
-    phys_off, magic_off, true_off, armor, magicresist = (raw[:, i] for i in range(5))
+    phys_off, magic_off, true_off, armor, magicresist, champion_damage = (
+        raw[:, i] for i in range(6)
+    )
     resist_denom = armor + magicresist
     safe = resist_denom > 1e-9
     armor_frac = np.where(safe, armor / np.where(safe, resist_denom, 1.0), 0.5)
     mr_frac = np.where(safe, magicresist / np.where(safe, resist_denom, 1.0), 0.5)
+    finite_damage = champion_damage[np.isfinite(champion_damage) & (champion_damage > 0.0)]
+    damage_scale = float(np.percentile(finite_damage, 95)) if finite_damage.size else 1.0
+    if not np.isfinite(damage_scale) or damage_scale <= 1.0e-9:
+        damage_scale = 1.0
+    damage_pressure = np.clip(champion_damage / damage_scale, 0.0, 1.0)
     profile = np.clip(
-        np.stack([phys_off, magic_off, true_off, armor_frac, mr_frac], axis=-1),
+        np.stack(
+            [
+                phys_off,
+                magic_off,
+                true_off,
+                armor_frac,
+                mr_frac,
+                damage_pressure,
+                damage_pressure * phys_off,
+                damage_pressure * magic_off,
+                damage_pressure * true_off,
+            ],
+            axis=-1,
+        ),
         0.0,
         1.0,
     ).astype(np.float32)

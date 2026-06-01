@@ -1,6 +1,6 @@
 # Current HGNN Mechanics
 
-As of 2026-05-31, `HGNNWinModel` has one production path:
+As of 2026-06-01, `HGNNWinModel` has one production path:
 
 ```text
 cache/prior arrays
@@ -9,6 +9,7 @@ cache/prior arrays
 -> blue/red team readout
 -> direct 1v1/2vX residual head
 -> direct prior shortcut
+-> cross-team matchup-profile interaction
 -> final logit
 -> sigmoid = P(blue wins)
 ```
@@ -26,7 +27,7 @@ Each row is one match with 10 ordered slots:
 5..9 = red  TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
 ```
 
-The model consumes these `npy-memmap-v18` cache arrays:
+The model consumes these `npy-memmap-v23` cache arrays:
 
 | Array | Shape | Used as |
 | --- | --- | --- |
@@ -38,6 +39,9 @@ The model consumes these `npy-memmap-v18` cache arrays:
 | `s2vx_cnt.npy` | `[games, 20]` | raw build-level `2vX` support |
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
+| `identity_semantic.npy` | `[games, 10, 64]` | low-rank profile conditioning context |
+| `identity_profile.npy` | `[games, 10, 9]` | per-player matchup profile (cross-team term) |
+| `s2vx_detail.npy` | `[games, 20, 16]` | small 2vX semantic-detail nudge |
 | `blue_win.npy` | `[games]` | target label |
 
 `m1v1_eff_n.npy` and `s2vx_eff_n.npy` may exist in the cache as nested-pooling
@@ -179,7 +183,7 @@ final_logit = main_head_logit + prior_shortcut_logit + detail_logit + profile_lo
 P(blue wins) = sigmoid(final_logit)
 ```
 
-Default source model size with `n_champions=951` and `n_builds=11` is `330,521`
+Default source model size with `n_champions=951` and `n_builds=11` is `331,465`
 parameters.
 
 ## Classification-Feature Integration
@@ -193,8 +197,8 @@ bucketed by prior centrality) showed:
 - **1v1 matchup detail is redundant** with the matchup win-rate prior — zero
   residual correlation with the outcome, even in the central band. The
   win-rate prior already encodes how a matchup resolves.
-- **The dense semantic identity is redundant** with the learned champion
-  embedding.
+- **The dense semantic identity is redundant as a broad node feature** with the
+  learned champion embedding.
 - **2vX synergy detail carries a small residual signal**, concentrated where
   the win-rate prior is a coin-flip (the central band). Out-of-sample it lifts
   ranking by `+0.004` AUC at `|p-0.5|<0.03` and `+0.008` at `|p-0.5|<0.02`.
@@ -215,8 +219,84 @@ detail_logit = detail_gate * centrality * detail_logit_raw         # gate init 0
 (no capacity spent learning the mirror). `centrality` restricts the nudge to
 coin-flip matchups where the signal lives; the zero-init `detail_gate` makes the
 whole term opt-in on top of the win-rate model. `_hgnn_config_from_meta` sets
-`identity_semantic_dim=0` and `m1v1_detail_dim=0`; flip them to re-enable a
-pathway for experiments.
+`identity_semantic_dim=0` and `m1v1_detail_dim=0`; the semantic descriptor is
+used only by the low-rank profile-v2 conditioning path described below.
+
+## Cross-Team Matchup-Profile Interaction
+
+The win-rate prior and the pairwise `1v1`/`2vX` priors all marginalize over the
+*whole-enemy-team damage composition*: the `1vX` prior is a single scalar per
+identity, and pairwise priors never see the enemy team's aggregate damage-type
+mix. So a relationship like "an armor-stacked tank gains win rate as the enemy
+team's physical-damage share rises" is invisible by construction. Measured
+example: Malphite (`54`) `ar_tank` rises from ~50.0% win rate at enemy physical
+share `<50%` to ~58% at `>80%`, while every prior the model sees for that
+identity is constant across enemy comps.
+
+To expose this, the classification pipeline writes a 9-dim **matchup profile**
+per identity (`identity_profile_embedding.npz`, built by
+`python -m app.classification.embeddings.dense`), all axes in `[0, 1]`:
+
+```text
+phys_offense_share   physicaldamagedealttochampions_share
+magic_offense_share  magicdamagedealttochampions_share
+true_offense_share   truedamagedealttochampions_share
+armor_resist_frac    armor / (armor + magicresist)
+mr_resist_frac       magicresist / (armor + magicresist)
+champion_damage_pressure  robust-scaled totaldamagedealttochampions
+phys_damage_pressure      champion_damage_pressure * phys_offense_share
+magic_damage_pressure     champion_damage_pressure * magic_offense_share
+true_damage_pressure      champion_damage_pressure * true_offense_share
+```
+
+These are raw smoothed identity values (not the standardized dense-embedding
+features), so the share/fraction semantics survive. The model consumes them
+through a per-player antisymmetric interaction term:
+
+```text
+blue, red = identity_profile[:, :5], identity_profile[:, 5:]   # [B, 5, 9]
+enemy_weighted = weighted_mean(enemy[:, :3], weight=enemy[:, 5])
+products = [self_armor * enemy_phys, self_mr * enemy_magic, ...]
+fwd = sum_blue  profile_head([player, red_team_mean, red_weighted, products, context])
+rev = sum_red   profile_head([player, blue_team_mean, blue_weighted, products, context])
+profile_logit = fwd - rev
+profile_head: Linear(29 -> 24) -> ReLU -> Linear(24 -> 1), zero-init final layer
+```
+
+Each player is scored against the *opposing* team's mean profile, then summed
+over the team; `fwd - rev` flips sign under team swap so the term is exactly
+antisymmetric. Scoring per-player (rather than on team-mean profiles) keeps a
+single extreme champion — e.g. one armor tank against a fully physical enemy —
+from being diluted by its four teammates. The final layer is zero-initialized so
+the term is opt-in on top of the win-rate model.
+
+The production profile-v2 path keeps the broad semantic descriptor out of
+node initialization, but uses it as a tiny **rank-4 conditioning bottleneck**
+inside the profile head. It also appends a deterministic damage-weighted enemy
+offense context and four explicit resistance × enemy-offense products, so the
+head does not need to infer the core multiplication from raw axes:
+
+```text
+identity_semantic: [B, 10, 64] historical dense identity descriptor
+profile_context = tanh(Linear(LayerNorm(identity_semantic))): [B, 10, 4]
+profile_head input = [
+    player_profile, enemy_team_profile_mean,
+    enemy_damage_weighted_offense, resistance_products, profile_context,
+]
+                   = 9 + 9 + 3 + 4 + 4 dims
+profile_head: Linear(29 -> 24) -> ReLU -> Linear(24 -> 1), zero-init final layer
+```
+
+This lets historical, pregame-estimable identity tendencies condition the
+profile response without becoming a wide standalone memorizer. It does **not**
+consume the current match's realized damage dealt, damage taken, mitigation, or
+item effects.
+
+On the Malphite `ar_tank` evaluation, the selected profile-v2 checkpoint moves the
+all-role low-to-high enemy physical-share response from `+5.41pp` to `+7.60pp`
+(actual `+8.43pp`) and TOP-only from `+5.27pp` to `+7.53pp` (actual `+7.24pp`).
+Overall held-out quality improves versus the current profile model: test AUC
+`0.5942`, NLL `0.6773`, Brier `0.2422`.
 
 ## Training
 
@@ -251,11 +331,11 @@ Training saves `structured_winrate_model.pt` with `model_type`, `model_config`,
 config/state keys; `load_hgnn_model()` keeps only current config keys and loads
 matching weights.
 
-The current production artifact (synergy-detail term, current cache) has test
-accuracy `0.5678`, threshold accuracy `0.5708`, AUC `0.5921`, NLL `0.6779`,
-Brier `0.2425`, and ECE `0.0233`, with a train-test AUC gap of `0.008` (no
-overfitting). Absolute numbers are not comparable to runs on earlier caches:
-the current filtered dataset is smaller (1.15M vs 1.56M train games).
+The production rank-4 profile-v2 artifact (`app/ml/data/structured_winrate_model.pt`)
+has test accuracy `0.5693`, threshold accuracy `0.5722`, AUC `0.5942`, NLL
+`0.6773`, Brier `0.2422`, and ECE `0.0221`, with a train-test AUC gap of
+`0.0095`. Absolute numbers are not comparable to runs on earlier caches: the
+current filtered dataset is smaller (1.15M vs 1.56M train games).
 
 ## Runtime Prediction
 

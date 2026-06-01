@@ -17,20 +17,10 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+from app.core.utils.common import TEAM_PAIRS as TEAM_PAIRS
+
 N_PLAYERS = 10
 N_RELATIONSHIP_EDGES = 45
-TEAM_PAIRS: tuple[tuple[int, int], ...] = (
-    (0, 1),
-    (0, 2),
-    (0, 3),
-    (0, 4),
-    (1, 2),
-    (1, 3),
-    (1, 4),
-    (2, 3),
-    (2, 4),
-    (3, 4),
-)
 LOGIT_EPS = 1e-6
 
 
@@ -50,6 +40,14 @@ class HGNNConfig:
     logit_clip: float | None = 5.0
     identity_semantic_dim: int = 64
     identity_profile_dim: int = 5
+    profile_context_dim: int = 0
+    profile_context_rank: int = 8
+    profile_include_ally_context: bool = False
+    profile_include_weighted_enemy_context: bool = False
+    profile_include_resistance_products: bool = False
+    profile_offense_dims: int = 3
+    profile_damage_pressure_index: int = 5
+    profile_head_hidden: tuple[int, ...] = (16,)
     m1v1_detail_dim: int = 16
     s2vx_detail_dim: int = 16
     # Classification-feature integration (semantic identity + relationship
@@ -425,26 +423,69 @@ class HGNNWinModel(nn.Module):
         # Cross-team matchup-profile interaction: each identity carries an
         # interpretable profile (offense damage-type mix + resistance fractions).
         # The win-rate prior marginalises over enemy compositions, so it cannot
-        # express "armor-stacking identity vs a physical-damage enemy team". This
-        # term crosses one team's mean profile against the other's via a single
-        # learned matrix M, antisymmetrised as a blue<->red difference. M is
-        # zero-init, so the model starts identical to the no-profile model and
-        # only the antisymmetric part of M receives gradient (the symmetric part
-        # never contributes to the team difference). Each learned M[i, j] is one
-        # named relationship, e.g. M[armor_resist_frac(self), phys_offense(enemy)].
-        # The win effect of a profile match (e.g. armor vs a physical enemy team)
-        # is a threshold/tail nonlinearity, not linear in the enemy damage share,
-        # so the term is `h(self, enemy) - h(enemy, self)` with a tiny MLP h over
-        # the two team-mean profiles. The antisymmetric difference makes it exact
-        # under team swap for any h; the final layer is zero-init so it starts as
-        # the no-profile model and only opens if it lowers loss.
+        # express "armor-stacking identity vs a physical-damage enemy team". The
+        # profile head scores each player against the enemy-team profile and then
+        # subtracts the mirrored red score, making the term exactly antisymmetric.
+        #
+        # Profile v2 can additionally condition that score on a low-rank view of
+        # the dense identity descriptor. That descriptor is historical/cache
+        # context keyed by champion/role/build; it may summarize durability and
+        # damage-taken tendencies, but it never sees the current match's realised
+        # postgame fields. Keeping it inside this tiny profile bottleneck avoids
+        # reintroducing the wide semantic node path that overfit in ablations.
+        #
+        # Profile v3 can also append a deterministic, damage-weighted enemy
+        # offense context. The identity profile carries each opponent's expected
+        # champion-damage pressure, so the context approximates "what share of
+        # the enemy team's expected damage is physical/magic/true" at draft time
+        # instead of treating all five enemy identities as equal contributors.
+        # Product features make the key specialization axis explicit (for
+        # example, self armor fraction × weighted enemy physical share) while
+        # retaining the same global/shared profile head.
         self.profile_enabled = c.identity_profile_dim > 0
         if self.profile_enabled:
+            self.profile_context_enabled = c.profile_context_dim > 0 and c.profile_context_rank > 0
+            self.profile_weighted_context_dim = (
+                min(c.profile_offense_dims, c.identity_profile_dim)
+                if c.profile_include_weighted_enemy_context
+                else 0
+            )
+            self.profile_resistance_product_dim = (
+                4
+                if c.profile_include_resistance_products
+                and c.identity_profile_dim > 4
+                and min(c.profile_offense_dims, c.identity_profile_dim) >= 2
+                else 0
+            )
+            self.profile_context_proj = (
+                nn.Sequential(
+                    nn.LayerNorm(c.profile_context_dim),
+                    nn.Linear(c.profile_context_dim, c.profile_context_rank),
+                    nn.Tanh(),
+                )
+                if self.profile_context_enabled
+                else None
+            )
+            profile_input_dim = 2 * c.identity_profile_dim
+            if c.profile_include_ally_context:
+                profile_input_dim += c.identity_profile_dim
+            profile_input_dim += self.profile_weighted_context_dim
+            profile_input_dim += self.profile_resistance_product_dim
+            if self.profile_context_enabled:
+                profile_input_dim += c.profile_context_rank
             self.profile_head = _mlp(
-                2 * c.identity_profile_dim, (16,), 1, dropout=0.0
+                profile_input_dim,
+                c.profile_head_hidden,
+                1,
+                dropout=0.0,
             )
             nn.init.zeros_(self.profile_head[-1].weight)
             nn.init.zeros_(self.profile_head[-1].bias)
+        else:
+            self.profile_context_enabled = False
+            self.profile_weighted_context_dim = 0
+            self.profile_resistance_product_dim = 0
+            self.profile_context_proj = None
         self.prior_shortcut = _mlp(
             15 + N_RELATIONSHIP_EDGES * 2,
             (),
@@ -552,24 +593,106 @@ class HGNNWinModel(nn.Module):
             logit = logit + self.s2vx_detail_lin(team_diff).squeeze(-1)
         return logit
 
-    def _profile_logit(self, identity_profile: torch.Tensor) -> torch.Tensor:
+    def _fit_feature_dim(self, values: torch.Tensor, dim: int) -> torch.Tensor:
+        if values.shape[-1] == dim:
+            return values
+        if values.shape[-1] > dim:
+            return values[..., :dim]
+        pad = values.new_zeros(*values.shape[:-1], dim - values.shape[-1])
+        return torch.cat([values, pad], dim=-1)
+
+    def _weighted_offense_context(self, team_profile: torch.Tensor) -> torch.Tensor:
+        dims = min(self.config.profile_offense_dims, team_profile.shape[-1])
+        if dims <= 0:
+            return team_profile.new_zeros(team_profile.shape[0], 1, 0)
+        offense = team_profile[..., :dims]
+        pressure_idx = self.config.profile_damage_pressure_index
+        if team_profile.shape[-1] > pressure_idx:
+            pressure = team_profile[..., pressure_idx : pressure_idx + 1].clamp_min(0.0)
+            denom = pressure.sum(dim=1, keepdim=True).clamp_min(1.0e-6)
+            return (offense * pressure).sum(dim=1, keepdim=True) / denom
+        return offense.mean(dim=1, keepdim=True)
+
+    def _resistance_products(
+        self,
+        players: torch.Tensor,
+        enemy_weighted: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.profile_resistance_product_dim <= 0:
+            return players.new_zeros(players.shape[0], players.shape[1], 0)
+        armor = players[..., 3:4]
+        magic_resist = players[..., 4:5]
+        phys = enemy_weighted[..., 0:1].expand(-1, players.shape[1], -1)
+        magic = enemy_weighted[..., 1:2].expand(-1, players.shape[1], -1)
+        return torch.cat(
+            [
+                armor * phys,
+                magic_resist * magic,
+                armor * (phys - magic),
+                magic_resist * (magic - phys),
+            ],
+            dim=-1,
+        )
+
+    def _profile_logit(
+        self,
+        identity_profile: torch.Tensor,
+        identity_semantic: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Antisymmetric cross-team profile interaction.
 
         Per-player so a single extreme identity (e.g. one armor-stacking champion)
-        is not washed out by a team mean: each player's own profile is crossed
-        against the *enemy* team-mean profile through a small nonlinear MLP h, and
-        summed per team. The contribution is
-        ``sum_blue h([p, red_mean]) - sum_red h([p, blue_mean])`` which flips sign
-        under team swap for any h (exactly antisymmetric). The nonlinearity lets
-        the profile match (blue armor vs red physical offense) ramp only where it
-        matters rather than linearly everywhere.
+        is not washed out by a team mean. The contribution is
+        ``sum_blue h(blue_player, red_context) - sum_red h(red_player, blue_context)``
+        which flips sign under team swap for any h. Optional profile-v2 context
+        uses a low-rank projection of the historical dense identity descriptor to
+        let different identities learn different profile sensitivities without
+        exposing current-match postgame fields.
         """
-        blue = identity_profile[:, :5]   # [B, 5, P]
+        identity_profile = self._fit_feature_dim(
+            identity_profile,
+            self.config.identity_profile_dim,
+        )
+        blue = identity_profile[:, :5]  # [B, 5, P]
         red = identity_profile[:, 5:]
-        blue_mean = blue.mean(dim=1, keepdim=True).expand_as(blue)
-        red_mean = red.mean(dim=1, keepdim=True).expand_as(red)
-        fwd = self.profile_head(torch.cat([blue, red_mean], dim=-1)).squeeze(-1).sum(dim=1)
-        rev = self.profile_head(torch.cat([red, blue_mean], dim=-1)).squeeze(-1).sum(dim=1)
+        blue_mean = blue.mean(dim=1, keepdim=True)
+        red_mean = red.mean(dim=1, keepdim=True)
+
+        blue_parts = [blue]
+        red_parts = [red]
+        if self.config.profile_include_ally_context:
+            blue_parts.append(blue_mean.expand_as(blue))
+            red_parts.append(red_mean.expand_as(red))
+        blue_parts.append(red_mean.expand_as(blue))
+        red_parts.append(blue_mean.expand_as(red))
+        weighted_needed = (
+            self.profile_weighted_context_dim > 0 or self.profile_resistance_product_dim > 0
+        )
+        if weighted_needed:
+            red_weighted = self._weighted_offense_context(red)
+            blue_weighted = self._weighted_offense_context(blue)
+        if self.profile_weighted_context_dim > 0:
+            blue_parts.append(red_weighted.expand(-1, blue.shape[1], -1))
+            red_parts.append(blue_weighted.expand(-1, red.shape[1], -1))
+        if self.profile_resistance_product_dim > 0:
+            blue_parts.append(self._resistance_products(blue, red_weighted))
+            red_parts.append(self._resistance_products(red, blue_weighted))
+
+        if self.profile_context_enabled:
+            if identity_semantic is None or self.profile_context_proj is None:
+                context = identity_profile.new_zeros(
+                    identity_profile.shape[0],
+                    identity_profile.shape[1],
+                    self.config.profile_context_rank,
+                )
+            else:
+                semantic = self._fit_feature_dim(identity_semantic, self.config.profile_context_dim)
+                context = self.profile_context_proj(semantic)
+            blue_parts.append(context[:, :5])
+            red_parts.append(context[:, 5:])
+
+        fwd = self.profile_head(torch.cat(blue_parts, dim=-1)).squeeze(-1).sum(dim=1)
+        rev = self.profile_head(torch.cat(red_parts, dim=-1)).squeeze(-1).sum(dim=1)
         return fwd - rev
 
     def _prior_shortcut_logit(
@@ -673,7 +796,7 @@ class HGNNWinModel(nn.Module):
         # Cross-team matchup-profile correction (ungated): moves the prediction
         # along the enemy-composition axis the win-rate prior is blind to.
         if self.profile_enabled and identity_profile is not None:
-            logit = logit + self._profile_logit(identity_profile)
+            logit = logit + self._profile_logit(identity_profile, identity_semantic)
         return {"final_logit": logit}
 
     def forward(
@@ -745,6 +868,7 @@ def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
         "node_init_hidden",
         "readout_hidden",
         "residual_head_hidden",
+        "profile_head_hidden",
     ):
         if key in config_dict:
             config_dict[key] = tuple(config_dict[key])

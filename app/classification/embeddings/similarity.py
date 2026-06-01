@@ -43,6 +43,20 @@ def _sample_mask(
     return weights >= min_sample_weight
 
 
+def _split_by_coherence(
+    sim: np.ndarray,
+    groups: list[list[int]],
+    min_median_sim: float,
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Partition groups into kept/dropped by within-group median similarity."""
+    kept: list[list[int]] = []
+    dropped: list[list[int]] = []
+    for group in groups:
+        median = median_pair_similarity(sim, group)
+        (kept if median >= min_median_sim else dropped).append(group)
+    return kept, dropped
+
+
 def _sort_groups(groups: list[list[int]]) -> list[list[int]]:
     return sorted((sorted(g) for g in groups), key=lambda g: (-len(g), g[0]))
 

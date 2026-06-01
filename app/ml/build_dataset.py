@@ -31,6 +31,7 @@ from app.ml.config import (
     POSITIONS,
     SYNERGY_2VX_LEVEL_TABLES,
 )
+from app.core.utils.common import TEAM_PAIRS, fit_last_dim
 from app.core.utils.smoothing import (
     build_group_sql,
     eb_strength_from_moments,
@@ -48,14 +49,6 @@ logger = logging.getLogger(__name__)
 # Per-team C(5,2) pair indices, 1-based for ClickHouse array element access.
 _TEAM_PAIRS_SQL = (
     "[(1,2),(1,3),(1,4),(1,5),(2,3),(2,4),(2,5),(3,4),(3,5),(4,5)]"
-)
-# Same pairs, 0-based, for building the per-side 2vx composite priors in Python.
-# Order matches the synergy_2vx feature layout (blue pairs, then red pairs).
-_TEAM_PAIRS: tuple[tuple[int, int], ...] = (
-    (0, 1), (0, 2), (0, 3), (0, 4),
-    (1, 2), (1, 3), (1, 4),
-    (2, 3), (2, 4),
-    (3, 4),
 )
 _KEY_BUILD_GROUP_EXPR = build_group_sql("{key_build_expr}", alias=None)
 
@@ -328,7 +321,7 @@ def _smoothed_features(
         level_strengths=level_strengths,
         m1v1_levels=_M1V1_LEVELS,
         s2vx_levels=_S2VX_LEVELS,
-        team_pairs=_TEAM_PAIRS,
+        team_pairs=TEAM_PAIRS,
         s2vx_ladder=("build", "build_group", "nobuild"),
     )
 
@@ -357,15 +350,6 @@ def _smoothed_features(
         "champion_id": raw["champion_id"].astype(DISK_DTYPES["champion_id"], copy=False),
         "build_id": raw["build_id"].astype(DISK_DTYPES["build_id"], copy=False),
     }
-
-
-def _fit_last_dim(values: np.ndarray, dim: int) -> np.ndarray:
-    if values.shape[-1] == dim:
-        return values.astype(np.float32, copy=False)
-    if values.shape[-1] > dim:
-        return values[..., :dim].astype(np.float32, copy=False)
-    pad = np.zeros((*values.shape[:-1], dim - values.shape[-1]), dtype=np.float32)
-    return np.concatenate([values.astype(np.float32, copy=False), pad], axis=-1)
 
 
 def _player_tuples(
@@ -402,10 +386,10 @@ def _classification_features(
         tuples = _player_tuples(champions[row], builds[row], build_vocab)
         blue = tuples[:5]
         red = tuples[5:]
-        identity[row] = _fit_last_dim(identity_lookup.lookup_players(tuples), IDENTITY_SEMANTIC_DIM)
-        profile[row] = _fit_last_dim(profile_lookup.lookup_players(tuples), IDENTITY_PROFILE_DIM)
-        m1v1[row] = _fit_last_dim(m1v1_detail_lookup.lookup_1v1_blue(blue, red), RELATIONSHIP_DETAIL_DIM)
-        s2vx[row] = _fit_last_dim(
+        identity[row] = fit_last_dim(identity_lookup.lookup_players(tuples), IDENTITY_SEMANTIC_DIM)
+        profile[row] = fit_last_dim(profile_lookup.lookup_players(tuples), IDENTITY_PROFILE_DIM)
+        m1v1[row] = fit_last_dim(m1v1_detail_lookup.lookup_1v1_blue(blue, red), RELATIONSHIP_DETAIL_DIM)
+        s2vx[row] = fit_last_dim(
             np.concatenate(
                 [
                     s2vx_detail_lookup.lookup_2vx_team(blue),
