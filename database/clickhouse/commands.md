@@ -21,8 +21,7 @@ game_data.participant_stats
   ├─► filter_result                                  (bitmask, one row per participant)
   │
   └─► game_data_filtered.valid_game_ids
-        ├─► game_data_filtered.participant_stats     (SEMI JOIN copy for ML feature builds)
-        └─► game_data_filtered.tl_participant_stats  (classification final-state features)
+        └─► game_data_filtered.participant_stats     (SEMI JOIN copy for ML feature builds)
 ```
 
 ## Files
@@ -31,41 +30,23 @@ game_data.participant_stats
 | --- | --- |
 | `3139_participant_stats_corrected_schema.sql` | DROP + CREATE for `game_data.participant_stats_corrected` |
 | `3139_participant_stats_corrected_build.sql` | Populate `participant_stats_corrected` (run before filter) |
-| `3140_migrate_raw_tables_to_replacing_merge_tree.sql` | One-shot migration for existing raw `3xxx` tables to `ReplacingMergeTree` natural keys |
 | `4000_filter_schema.sql` | DROP + CREATE for all `filter_stg_*` + `filter_result` tables |
 | `4000_filter_build.sql` | Populate all three stages, rollups, and `filter_result` |
 | `5000_create_filtered_db_schema.sql` | `game_data_filtered` database + cleanup of retired copies + DROP/CREATE for ML persistent tables |
 | `5001_valid_game_ids_schema.sql` | `game_data_filtered.valid_game_ids` (not dropped by 5000) |
 | `5001_valid_game_ids_build.sql` | Populate `valid_game_ids` from `filter_stg_game_flags` |
-| `5003_filtered_tables_build.sql` | Populate `participant_stats` and `tl_participant_stats` via `SEMI JOIN valid_game_ids` |
-| `5003_participant_stats_only_build.sql` | Fast iteration copy for the same two 5003 tables |
-| `5132` | Build labels in `game_data_filtered.participant_item_value_totals` |
-| `5133` | Temporal scaling weights in `game_data_filtered.participant_scaling_weights` |
+| `5003_filtered_tables_build.sql` | Populate `participant_stats` via `SEMI JOIN valid_game_ids` |
+| `5003_participant_stats_only_build.sql` | Fast iteration copy for `participant_stats` |
+| `5132_participant_item_value_totals_schema.sql` | DROP + CREATE for `game_data_filtered.participant_item_value_totals` |
+| `5132_participant_item_value_totals_build.sql` | Populate build labels in `participant_item_value_totals` |
 | `5900_ml_game_split_schema.sql` | Persistent chronological train/validation/test label table |
 | `5900_ml_game_split_build.sql` | Populate the 80/10/10 split labels used by 6000+ aggregate builds |
+| `6000`/`6003`/`6004` | Active build-conditioned 1v1, 1vx, and 2vx aggregate tables |
+| `6020`-`6024` | Active no-build, champion, and build-group backoff aggregate tables |
+| `6900_ml_game_player_pivot_schema.sql` | Persistent per-game player tuple table for aggregate and cache builds |
+| `6900_ml_game_player_pivot_build.sql` | Populate `ml_game_player_pivot` from filtered participant rows |
+| `7004`-`7006`, `7010`-`7014` | Active ML prior dictionary schemas and reload scripts |
 | `analytics_builds/8xxx_*.sql` | Human-facing inspection / reporting queries |
-
-## Raw table dedupe migration
-
-Raw `game_data` matchdata tables use `ReplacingMergeTree` with
-`ORDER BY` set to the row's natural identity. `run_id` stays as a normal
-column for rollback/delete operations, but it is no longer part of the
-dedupe key. Consumers that materialize clean snapshots from raw tables should
-read them with `FINAL`; the `3139` and `5003` builds do this explicitly.
-
-For an existing database created with the old `MergeTree`/`run_id` sort keys,
-stop the matchdata pipeline first, then run:
-
-```bash
-docker exec clickhouse clickhouse-client --multiquery \
-  --queries-file /docker-entrypoint-initdb.d/3140_migrate_raw_tables_to_replacing_merge_tree.sql
-```
-
-The migration creates `__rmt_new` tables, copies the old data, runs
-`OPTIMIZE ... FINAL`, atomically exchanges the rebuilt tables into place, and
-keeps the previous physical tables as `__pre_rmt` backups. Drop the
-`__pre_rmt` tables only after validating counts and rebuilding downstream
-filtered/analytics tables.
 
 ## Standard rebuild
 
@@ -94,12 +75,6 @@ docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/5132_participant_item_value_totals_build.sql
 
 docker exec clickhouse clickhouse-client --multiquery \
-  --queries-file /docker-entrypoint-initdb.d/5133_participant_scaling_weights_schema.sql
-
-docker exec clickhouse clickhouse-client --multiquery \
-  --queries-file /docker-entrypoint-initdb.d/5133_participant_scaling_weights_build.sql
-
-docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/5900_ml_game_split_schema.sql
 
 docker exec clickhouse clickhouse-client --multiquery \
@@ -112,9 +87,9 @@ docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/6900_ml_game_player_pivot_build.sql
 
 # Then rebuild the active ML priors:
-#   6003, 6000, 6004, 6020, 6021, 6022, 6023
+#   6003, 6000, 6004, 6020, 6021, 6024, 6022, 6023
 # and reload dictionaries:
-#   7004, 7005, 7006, 7010, 7011, 7012, 7013
+#   7004, 7005, 7006, 7010, 7011, 7014, 7012, 7013
 ```
 
 To rebuild from scratch (drops `game_data_filtered.*` first), run `5000`
@@ -127,18 +102,16 @@ After the SQL path finishes, rebuild the Python ML cache:
 uv run python -m app.ml.build_dataset
 ```
 
-Memory note: `5003` now copies only `participant_stats` and
-`tl_participant_stats`. The wider filtered timeline snapshots and non-ML
-matchdata copies were retired to keep `game_data_filtered` focused on active
-feature paths.
+Memory note: `5003` now copies only `participant_stats`. Filtered timeline
+snapshots and non-ML matchdata copies were retired to keep
+`game_data_filtered` focused on active feature paths.
 
 ## Fast Filter Iteration
 
 Use when validating filter changes and checks need `filter_stg_*`,
-`valid_game_ids`, `game_data_filtered.participant_stats`, and
-`game_data_filtered.tl_participant_stats`. Other timeline event tables are no
-longer mirrored into `game_data_filtered`; use raw `game_data` tables directly
-for one-off profiling.
+`valid_game_ids` and `game_data_filtered.participant_stats`. Timeline tables are
+no longer mirrored into `game_data_filtered`; use raw `game_data` tables
+directly for one-off profiling.
 
 ```bash
 docker exec clickhouse clickhouse-client --multiquery \
@@ -185,10 +158,10 @@ docker exec clickhouse clickhouse-client --multiquery \
 
 ## Named collection for dictionary reloads
 
-`SOURCE(CLICKHOUSE(...))` dictionaries that pull from this server (the ML
-priors in `7004`/`7005`/`7006`) need credentials because the `default`
-user no longer exists. Credentials live in the `ch_internal` named
-collection so they stay out of the schema files.
+`SOURCE(CLICKHOUSE(...))` dictionaries that pull from this server need
+credentials because the `default` user is not available in this deployment.
+Credentials live in the `ch_internal` named collection so they stay out of the
+schema files.
 
 Create it once per environment (and re-run if the password rotates):
 
@@ -208,8 +181,8 @@ the `QUERY` is per-dictionary.
 
 ## ML prior dictionary refresh
 
-After rebuilding the aggregations in `6003`/`6000`/`6004`, reload each
-matching prior dictionary so `build_dataset.py` sees fresh values:
+After rebuilding the build-conditioned aggregations in `6003`/`6000`/`6004`,
+reload each matching prior dictionary so `build_dataset.py` sees fresh values:
 
 ```bash
 docker exec clickhouse clickhouse-client --multiquery \
@@ -238,15 +211,19 @@ docker exec clickhouse clickhouse-client --multiquery \
 docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/6021_1v1_champ_aggregations_build.sql
 
-# 2vx backoff: no-build pair (6022) then champion pair (6023)
+# 2vx backoff: build-group sibling (6024), no-build pair (6022), and
+# champion pair (6023, kept for compatibility with existing cache metadata)
+docker exec clickhouse clickhouse-client --multiquery \
+  --queries-file /docker-entrypoint-initdb.d/6024_2vx_build_group_aggregations_build.sql
 docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/6022_2vx_nobuild_aggregations_build.sql
 docker exec clickhouse clickhouse-client --multiquery \
   --queries-file /docker-entrypoint-initdb.d/6023_2vx_champ_aggregations_build.sql
 
-# Reload the four backoff dictionaries
+# Reload the backoff dictionaries
 for d in 7010_matchup_1v1_nobuild 7011_matchup_1v1_champ \
-         7012_synergy_2vx_nobuild 7013_synergy_2vx_champ; do
+         7014_synergy_2vx_build_group 7012_synergy_2vx_nobuild \
+         7013_synergy_2vx_champ; do
   docker exec clickhouse clickhouse-client --multiquery \
     --queries-file /docker-entrypoint-initdb.d/${d}_dict_build.sql
 done

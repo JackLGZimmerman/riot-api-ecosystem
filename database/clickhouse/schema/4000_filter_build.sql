@@ -23,14 +23,23 @@
 --   f03 player_high_winrate     suspect (>40 games, lifetime WR > 70%) AND
 --                               suffix WR of collected games (current onwards,
 --                               ordered by gamecreation) >= 85%
---   f04 team_kills_to_deaths    team K/D < 0.50  (kills*2 < deaths)
+--   f04 team_kills_to_deaths    team K/D < 0.40  (kills*5 < deaths*2)
 --   f05 solo_carried            win=1 AND kills > 75% of team kills
 --   f06 too_little_damage       non-UTILITY dmg share < 2%  (dmg*50 < team_dmg)
 --   f07 low_minions_killed      non-UTILITY CS/min < 3.0  ((cs+ncs)*60 < time*3)
 --   f08 team_non_utility_avg_cs_per_min gap > 2.0 below enemy
 --   f09 team_non_utility_damage_to_champs ratio < 0.50  (team*2 < enemy)
---   f10 low_build_value         highest_value < 1.0 (stage-1-clean pool)
+--   f10 low_build_value         highest_value < 0.5 (stage-1-clean pool)
 --   f11 unknown_teamposition    game includes any participant with UNKNOWN teamposition
+--   f12 game_ruining_behavior   Riot-detected IGNB surrender / severe
+--                               transgressor metadata
+--   f13 was_severe_transgressor exact participant severe-transgressor flag
+--   f14 caused_ignb_surrender   exact participant caused-IGNB-surrender flag
+--   f15 team_ignb_surrendered   exact team-side IGNB surrender flag
+--   f16 premade_ignb_causer     exact premade-with-IGNB-game-end-causer flag
+--   f17 premade_severe          exact premade-with-severe-transgressor flag
+--   f18 zero_spell_casts_loss   losing participant cast no champion spells
+--   f20 zero_item_purchases_loss losing participant bought no items
 --
 -- Run with clickhouse-client --multiquery after 4000_filter_schema.sql.
 
@@ -146,8 +155,8 @@ SELECT
     tupleElement(team_stats, 1) AS teamid,
     tupleElement(team_stats, 2) AS team_kills,
     tupleElement(team_stats, 4) AS team_damage_to_champions,
-    -- Team K/D < 0.50: kills * 2 < deaths
-    tupleElement(team_stats, 2) * 2 < tupleElement(team_stats, 3)
+    -- Team K/D < 0.40: kills * 5 < deaths * 2
+    tupleElement(team_stats, 2) * 5 < tupleElement(team_stats, 3) * 2
         AS team_kills_to_deaths,
     -- CS/min gap > 2.0 below enemy
     tupleElement(team_stats, 7) - tupleElement(team_stats, 5) > 2.0
@@ -229,7 +238,15 @@ INSERT INTO game_data.filter_stg_participant_flags
     low_minions_killed,
     team_non_utility_avg_cs_per_min_gt_1_0_below_enemy,
     team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy,
-    unknown_teamposition
+    unknown_teamposition,
+    game_ruining_behavior,
+    was_severe_transgressor,
+    caused_game_end_from_ignb_surrender,
+    team_ignb_surrendered,
+    was_premade_with_ignb_game_end_causer,
+    was_premade_with_severe_transgressor,
+    zero_spell_casts_loss,
+    zero_item_purchases_loss
 )
 SELECT
     ps.matchid,
@@ -258,7 +275,28 @@ SELECT
         AS low_minions_killed,
     tf.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy,
     tf.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy,
-    ps.teamposition = 'UNKNOWN' AS unknown_teamposition
+    ps.teamposition = 'UNKNOWN' AS unknown_teamposition,
+    (
+        COALESCE(ps.gameendedinignbsurrender, toUInt8(0))
+        OR COALESCE(ps.causedgameendfromignbsurrender, toUInt8(0))
+        OR COALESCE(ps.teamignbsurrendered, toUInt8(0))
+        OR COALESCE(ps.waspremadewithignbgameendcauser, toUInt8(0))
+        OR COALESCE(ps.waspremadewithseveretransgressor, toUInt8(0))
+        OR COALESCE(ps.wasseveretransgressor, toUInt8(0))
+    ) AS game_ruining_behavior,
+    COALESCE(ps.wasseveretransgressor, toUInt8(0)) AS was_severe_transgressor,
+    COALESCE(ps.causedgameendfromignbsurrender, toUInt8(0))
+        AS caused_game_end_from_ignb_surrender,
+    COALESCE(ps.teamignbsurrendered, toUInt8(0)) AS team_ignb_surrendered,
+    COALESCE(ps.waspremadewithignbgameendcauser, toUInt8(0))
+        AS was_premade_with_ignb_game_end_causer,
+    COALESCE(ps.waspremadewithseveretransgressor, toUInt8(0))
+        AS was_premade_with_severe_transgressor,
+    ps.win = 0
+    AND toUInt32(ps.spell1casts) + toUInt32(ps.spell2casts)
+        + toUInt32(ps.spell3casts) + toUInt32(ps.spell4casts) = 0
+        AS zero_spell_casts_loss,
+    ps.win = 0 AND ps.itemspurchased = 0 AS zero_item_purchases_loss
 FROM game_data.participant_stats_corrected AS ps
 SEMI JOIN game_data.filter_stg_f14_long_games AS f14 ON ps.matchid = f14.matchid
 ANY LEFT JOIN game_data.filter_stg_team_flags AS tf
@@ -289,11 +327,19 @@ HAVING
     AND max(low_minions_killed) = 0
     AND max(team_non_utility_avg_cs_per_min_gt_1_0_below_enemy) = 0
     AND max(team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy) = 0
-    AND max(unknown_teamposition) = 0;
+    AND max(unknown_teamposition) = 0
+    AND max(game_ruining_behavior) = 0
+    AND max(was_severe_transgressor) = 0
+    AND max(caused_game_end_from_ignb_surrender) = 0
+    AND max(team_ignb_surrendered) = 0
+    AND max(was_premade_with_ignb_game_end_causer) = 0
+    AND max(was_premade_with_severe_transgressor) = 0
+    AND max(zero_spell_casts_loss) = 0
+    AND max(zero_item_purchases_loss) = 0;
 
 -- =============================================================================
 -- Stage 2: build labels + f10 low_build_value detection over stage-1-clean games.
--- Threshold for low_build_value: highest_value < 1.0.
+-- Threshold for low_build_value: highest_value < 0.5.
 -- =============================================================================
 
 TRUNCATE TABLE game_data.filter_stg_participant_labels;
@@ -428,7 +474,7 @@ SELECT
         ability_power = highest_value, 'ability_power',
         'attack_damage'
     ) AS highest_value_label,
-    toUInt8(highest_value < 1.0) AS low_build_value
+    toUInt8(highest_value < 0.5) AS low_build_value
 FROM item_stats;
 
 -- =============================================================================
@@ -451,6 +497,14 @@ INSERT INTO game_data.filter_stg_game_flags
     team_non_utility_avg_cs_per_min_gt_1_0_below_enemy,
     team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy,
     unknown_teamposition,
+    game_ruining_behavior,
+    was_severe_transgressor,
+    caused_game_end_from_ignb_surrender,
+    team_ignb_surrendered,
+    was_premade_with_ignb_game_end_causer,
+    was_premade_with_severe_transgressor,
+    zero_spell_casts_loss,
+    zero_item_purchases_loss,
     low_build_value,
     any_filter_triggered
 )
@@ -469,7 +523,18 @@ stage1_rollup AS (
             AS team_non_utility_avg_cs_per_min_gt_1_0_below_enemy,
         max(team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy)
             AS team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy,
-        max(unknown_teamposition) AS unknown_teamposition
+        max(unknown_teamposition) AS unknown_teamposition,
+        max(game_ruining_behavior) AS game_ruining_behavior,
+        max(was_severe_transgressor) AS was_severe_transgressor,
+        max(caused_game_end_from_ignb_surrender)
+            AS caused_game_end_from_ignb_surrender,
+        max(team_ignb_surrendered) AS team_ignb_surrendered,
+        max(was_premade_with_ignb_game_end_causer)
+            AS was_premade_with_ignb_game_end_causer,
+        max(was_premade_with_severe_transgressor)
+            AS was_premade_with_severe_transgressor,
+        max(zero_spell_casts_loss) AS zero_spell_casts_loss,
+        max(zero_item_purchases_loss) AS zero_item_purchases_loss
     FROM game_data.filter_stg_participant_flags
     GROUP BY matchid
 ),
@@ -494,6 +559,14 @@ SELECT
     s.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy,
     s.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy,
     s.unknown_teamposition,
+    s.game_ruining_behavior,
+    s.was_severe_transgressor,
+    s.caused_game_end_from_ignb_surrender,
+    s.team_ignb_surrendered,
+    s.was_premade_with_ignb_game_end_causer,
+    s.was_premade_with_severe_transgressor,
+    s.zero_spell_casts_loss,
+    s.zero_item_purchases_loss,
     COALESCE(lbv.low_build_value, toUInt8(0)) AS low_build_value,
     (
         s.player_low_kda
@@ -506,6 +579,14 @@ SELECT
         OR s.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy
         OR s.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy
         OR s.unknown_teamposition
+        OR s.game_ruining_behavior
+        OR s.was_severe_transgressor
+        OR s.caused_game_end_from_ignb_surrender
+        OR s.team_ignb_surrendered
+        OR s.was_premade_with_ignb_game_end_causer
+        OR s.was_premade_with_severe_transgressor
+        OR s.zero_spell_casts_loss
+        OR s.zero_item_purchases_loss
         OR COALESCE(lbv.low_build_value, toUInt8(0))
     ) AS any_filter_triggered
 FROM stage1_rollup AS s
@@ -513,16 +594,21 @@ LEFT JOIN low_build_value_rollup AS lbv ON s.matchid = lbv.matchid;
 
 -- =============================================================================
 -- Stage 3: bitmask result (one row per matchid+teamid+participantid).
--- Bit assignments (sequential, matching the f01..f11 numbering used in
+-- Bit assignments (matching the f01..f20 hard-rule numbering used in
 -- filter_evidence.md):
 --   Player:  0=f01 player_low_kda            1=f02 player_gold_spent
 --            2=f03 player_high_winrate       4=f05 solo_carried
 --            5=f06 too_little_damage         6=f07 low_minions_killed
---            9=f10 low_build_value
+--            9=f10 low_build_value          17=f18 zero_spell_casts_loss
+--           19=f20 zero_item_purchases_loss
 --   Team:    3=f04 team_kills_to_deaths
 --            7=f08 team_non_utility_avg_cs_per_min_gt_2_0_below_enemy
 --            8=f09 team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy
---   Game:   10=f11 unknown_teamposition
+--   Game:   10=f11 unknown_teamposition    11=f12 game_ruining_behavior
+--           12=f13 was_severe_transgressor
+--           13=f14 caused_game_end_from_ignb_surrender
+--           14=f15 team_ignb_surrendered   15=f16 premade_ignb_causer
+--           16=f17 premade_severe
 -- =============================================================================
 
 TRUNCATE TABLE game_data.filter_result;
@@ -548,12 +634,20 @@ SELECT
     + pf.solo_carried * 16
     + pf.too_little_damage * 32
     + pf.low_minions_killed * 64
-    + COALESCE(pl.low_build_value, toUInt8(0)) * 512 AS player_rule_mask,
+    + COALESCE(pl.low_build_value, toUInt8(0)) * 512
+    + pf.zero_spell_casts_loss * 131072
+    + pf.zero_item_purchases_loss * 524288 AS player_rule_mask,
     pf.team_kills_to_deaths * 8
     + pf.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy * 128
     + pf.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy * 256
         AS team_rule_mask,
-    gf.unknown_teamposition * 1024 AS game_rule_mask,
+    gf.unknown_teamposition * 1024
+    + gf.game_ruining_behavior * 2048
+    + gf.was_severe_transgressor * 4096
+    + gf.caused_game_end_from_ignb_surrender * 8192
+    + gf.team_ignb_surrendered * 16384
+    + gf.was_premade_with_ignb_game_end_causer * 32768
+    + gf.was_premade_with_severe_transgressor * 65536 AS game_rule_mask,
     gf.player_low_kda * 1
     + gf.player_gold_spent * 2
     + gf.player_high_winrate * 4
@@ -564,7 +658,15 @@ SELECT
     + gf.team_non_utility_avg_cs_per_min_gt_1_0_below_enemy * 128
     + gf.team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy * 256
     + gf.low_build_value * 512
-    + gf.unknown_teamposition * 1024 AS rule_mask,
+    + gf.unknown_teamposition * 1024
+    + gf.game_ruining_behavior * 2048
+    + gf.was_severe_transgressor * 4096
+    + gf.caused_game_end_from_ignb_surrender * 8192
+    + gf.team_ignb_surrendered * 16384
+    + gf.was_premade_with_ignb_game_end_causer * 32768
+    + gf.was_premade_with_severe_transgressor * 65536
+    + gf.zero_spell_casts_loss * 131072
+    + gf.zero_item_purchases_loss * 524288 AS rule_mask,
     gf.any_filter_triggered = 0 AS is_valid
 FROM game_data.filter_stg_participant_flags AS pf
 INNER JOIN game_data.filter_stg_game_flags AS gf ON pf.matchid = gf.matchid

@@ -15,7 +15,6 @@ import numpy as np
 
 from app.classification.embeddings.config import (
     EmbeddingConfig,
-    PHASES,
     SPECIALIST_CACHE_DIR,
     SPECIALISTS,
     SpecialistSpec,
@@ -27,6 +26,8 @@ logger = logging.getLogger(__name__)
 CHAMPION_NAMES_PATH = (
     PROJECT_ROOT / "database" / "clickhouse" / "support" / "championid_name_map.jsonl"
 )
+
+
 @dataclass(frozen=True)
 class SpecialistGroup:
     rank: int
@@ -38,51 +39,32 @@ class SpecialistGroup:
 
 
 @dataclass(frozen=True)
-class SpecialistPhaseReport:
-    name: str
-    groups: list[SpecialistGroup]
-    unlabelled: list[int]
-
-    @property
-    def coverage(self) -> float:
-        total = sum(len(group.members) for group in self.groups) + len(self.unlabelled)
-        return (
-            sum(len(group.members) for group in self.groups) / total
-            if total
-            else float("nan")
-        )
-
-    @property
-    def largest_group(self) -> int:
-        return max((len(group.members) for group in self.groups), default=0)
-
-
-@dataclass(frozen=True)
 class SpecialistReport:
     name: str
     display_name: str
     feature_set: tuple[str, ...]
-    phases: list[SpecialistPhaseReport]
+    groups: list[SpecialistGroup]
+    unlabelled: list[int]
     keys: list[tuple]
     columns: dict[str, int]
     updated_at: datetime
 
     @property
     def n_groups(self) -> int:
-        return sum(len(phase.groups) for phase in self.phases)
+        return len(self.groups)
 
     @property
     def unlabelled_count(self) -> int:
-        return sum(len(phase.unlabelled) for phase in self.phases)
+        return len(self.unlabelled)
 
     @property
     def coverage(self) -> float:
-        total = len(self.keys) * len(self.phases)
+        total = len(self.keys)
         return (total - self.unlabelled_count) / total if total else float("nan")
 
     @property
     def largest_group(self) -> int:
-        return max((phase.largest_group for phase in self.phases), default=0)
+        return max((len(group.members) for group in self.groups), default=0)
 
 
 def _html(value: object) -> str:
@@ -230,35 +212,17 @@ def _load_specialist_report(path: Path, spec: SpecialistSpec | None) -> Speciali
             f"{path.name}",
         )
         labels = data["labels"].astype(np.int32)
-        if labels.ndim == 1:
-            phase_names = ("all",)
-            labels_by_phase = labels[:, None]
-        elif labels.ndim == 2:
-            if "phases" in data:
-                phase_names = tuple(str(phase) for phase in data["phases"].tolist())
-            else:
-                phase_names = PHASES[: labels.shape[1]]
-            if len(phase_names) != labels.shape[1]:
-                phase_names = tuple(f"phase_{i}" for i in range(labels.shape[1]))
-            labels_by_phase = labels
-        else:
-            raise ValueError(f"{path.name} labels must be 1-D or 2-D, got {labels.shape}")
-
-    phases: list[SpecialistPhaseReport] = []
-    for phase_index, phase_name in enumerate(phase_names):
-        phase_labels = labels_by_phase[:, phase_index]
-        phases.append(
-            SpecialistPhaseReport(
-                name=phase_name,
-                groups=_groups_from_labels(phase_labels, keys, columns),
-                unlabelled=np.flatnonzero(phase_labels < 0).astype(int).tolist(),
+        if labels.ndim != 1:
+            raise ValueError(
+                f"{path.name} labels must be 1-D for non-temporal classification, "
+                f"got {labels.shape}"
             )
-        )
     return SpecialistReport(
         name=path.stem,
         display_name=_display_name(path.stem),
         feature_set=spec.feature_set if spec else (),
-        phases=phases,
+        groups=_groups_from_labels(labels, keys, columns),
+        unlabelled=np.flatnonzero(labels < 0).astype(int).tolist(),
         keys=keys,
         columns=columns,
         updated_at=datetime.fromtimestamp(path.stat().st_mtime),
@@ -304,7 +268,6 @@ body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-
 main { max-width:1180px; margin:0 auto; padding:28px 22px 54px; }
 h1 { margin:0 0 6px; font-size:28px; }
 h2 { margin:28px 0 10px; font-size:20px; }
-h3 { margin:18px 0 8px; font-size:16px; }
 p { margin:0 0 14px; color:var(--muted); }
 a { color:#175cd3; text-decoration:none; }
 nav, .kpis, .meta, .members, .feature-list { display:flex; flex-wrap:wrap; gap:8px; }
@@ -320,7 +283,6 @@ th, td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left;
 th { background:#eef1f5; color:#475467; font-size:12px; text-transform:uppercase; }
 tr:last-child td { border-bottom:0; }
 .section { margin-top:28px; padding-top:8px; border-top:2px solid var(--line); }
-.phase-block { margin-top:18px; }
 .group-list { display:grid; gap:9px; margin-top:10px; }
 details.group { overflow:hidden; }
 summary { cursor:pointer; display:flex; justify-content:space-between; gap:12px; padding:10px 12px; background:#fbfcfe; }
@@ -391,21 +353,20 @@ def _specialist_table(reports: list[SpecialistReport]) -> str:
         "<tr>"
         f'<td><a href="#specialist-{_anchor(report.name)}">{_html(report.display_name)}</a>'
         f'<div class="small">{_html(report.name)}</div></td>'
-        f"<td>{len(report.phases)}</td><td>{report.n_groups}</td>"
+        f"<td>{report.n_groups}</td>"
         f"<td>{report.unlabelled_count}</td>"
         f"<td>{report.largest_group}</td><td>{_pct(report.coverage)}</td></tr>"
         for report in reports
     )
     return (
-        "<table><thead><tr><th>Specialist</th><th>Bins</th><th>Groups</th>"
+        "<table><thead><tr><th>Specialist</th><th>Groups</th>"
         "<th>Unlabelled</th><th>Largest</th><th>Coverage</th></tr></thead>"
         f"<tbody>{rows}</tbody></table>"
     )
 
 
-def _phase_section(
+def _group_list(
     report: SpecialistReport,
-    phase: SpecialistPhaseReport,
     champion_names: dict[int, str],
     *,
     open_groups: bool,
@@ -414,7 +375,7 @@ def _phase_section(
         _group_html(
             rank=group.rank,
             badge=f"G{group.label_id}",
-            badge_style=_style(f"{report.name}{phase.name}{group.label_id}"),
+            badge_style=_style(f"{report.name}{group.label_id}"),
             count=len(group.members),
             champions=group.champions,
             builds=group.builds,
@@ -423,40 +384,27 @@ def _phase_section(
             champion_names=champion_names,
             open_group=open_groups,
         )
-        for group in phase.groups
+        for group in report.groups
     ]
-    if phase.unlabelled:
+    if report.unlabelled:
         groups.append(
             _group_html(
-                rank=len(phase.groups) + 1,
+                rank=len(report.groups) + 1,
                 badge="-1",
                 badge_style="",
-                count=len(phase.unlabelled),
-                champions=_champion_counter(report.keys, phase.unlabelled, report.columns),
-                builds=_counter(report.keys, phase.unlabelled, report.columns, "build"),
-                roles=_counter(report.keys, phase.unlabelled, report.columns, "teamposition"),
+                count=len(report.unlabelled),
+                champions=_champion_counter(report.keys, report.unlabelled, report.columns),
+                builds=_counter(report.keys, report.unlabelled, report.columns, "build"),
+                roles=_counter(report.keys, report.unlabelled, report.columns, "teamposition"),
                 members=_members_html(
-                    report.keys, phase.unlabelled, report.columns, champion_names
+                    report.keys, report.unlabelled, report.columns, champion_names
                 ),
                 champion_names=champion_names,
                 stats=f"no coherent {report.display_name} read",
                 open_group=open_groups,
             )
         )
-
-    return (
-        '<section class="phase-block">'
-        f"<h3>{_html(_fmt_label(phase.name).title())}</h3>"
-        + _kpis(
-            [
-                (str(len(phase.groups)), "groups"),
-                (str(len(phase.unlabelled)), "unlabelled"),
-                (_pct(phase.coverage), "coverage"),
-                (str(phase.largest_group), "largest"),
-            ]
-        )
-        + f'<div class="group-list">{"".join(groups)}</div></section>'
-    )
+    return f'<div class="group-list">{"".join(groups)}</div>'
 
 
 def _specialist_section(
@@ -472,18 +420,14 @@ def _specialist_section(
         f"{report.updated_at.strftime('%Y-%m-%d %H:%M')}</p>"
         + _kpis(
             [
-                (str(len(report.phases)), "time bins"),
-                (str(report.n_groups), "phase groups"),
+                (str(report.n_groups), "groups"),
                 (str(report.unlabelled_count), "unlabelled"),
                 (_pct(report.coverage), "coverage"),
                 (str(report.largest_group), "largest"),
             ]
         )
         + f'<div class="feature-list">{"".join(_chip(feature) for feature in report.feature_set)}</div>'
-        + "".join(
-            _phase_section(report, phase, champion_names, open_groups=open_groups)
-            for phase in report.phases
-        )
+        + _group_list(report, champion_names, open_groups=open_groups)
         + "</section>"
     )
 
@@ -540,9 +484,8 @@ def write_specialist_report(
             title,
             (
                 "<p>Each section asks one narrow behavioural question over the "
-                "same <b>(championid, teamposition, build)</b> identities, with "
-                "groups generated independently for each time bin. Generated "
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M')}.</p>"
+                "same <b>(championid, teamposition, build)</b> identities. "
+                f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}.</p>"
             ),
             nav,
             _specialist_body(reports, champion_names, focus=focus),

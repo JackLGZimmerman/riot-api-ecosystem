@@ -256,6 +256,8 @@ class TabulatedParticipantStats(MatchIdRow):
     champExperience: NonNegativeInt
 
     teamPosition: str
+    positionAssignedByMatchmaking: str | None
+    selectedRolePreferences: str | None
 
     win: bool
     gameEndedInEarlySurrender: bool

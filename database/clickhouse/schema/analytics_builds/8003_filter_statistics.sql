@@ -25,7 +25,7 @@ rules AS (
                 ),
                 tuple(
                     4,
-                    '04-team-kd-ratio-lt-0.50-vs-enemy',
+                    '04-team-kd-ratio-lt-0.40-vs-enemy',
                     countIf(team_kills_to_deaths)
                 ),
                 tuple(
@@ -49,11 +49,51 @@ rules AS (
                     '09-team-non-utility-dmg-to-champs-ratio-lt-1/2-vs-enemy',
                     countIf(team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy)
                 ),
-                tuple(10, '10-low-build-value-lt-1.0', countIf(low_build_value)),
+                tuple(10, '10-low-build-value-lt-0.5', countIf(low_build_value)),
                 tuple(
                     11,
                     '11-unknown-teamposition',
                     countIf(unknown_teamposition)
+                ),
+                tuple(
+                    12,
+                    '12-game-ruining-behavior',
+                    countIf(game_ruining_behavior)
+                ),
+                tuple(
+                    13,
+                    '13-was-severe-transgressor',
+                    countIf(was_severe_transgressor)
+                ),
+                tuple(
+                    14,
+                    '14-caused-game-end-from-ignb-surrender',
+                    countIf(caused_game_end_from_ignb_surrender)
+                ),
+                tuple(
+                    15,
+                    '15-team-ignb-surrendered',
+                    countIf(team_ignb_surrendered)
+                ),
+                tuple(
+                    16,
+                    '16-was-premade-with-ignb-game-end-causer',
+                    countIf(was_premade_with_ignb_game_end_causer)
+                ),
+                tuple(
+                    17,
+                    '17-was-premade-with-severe-transgressor',
+                    countIf(was_premade_with_severe_transgressor)
+                ),
+                tuple(
+                    18,
+                    '18-zero-spell-casts-loss',
+                    countIf(zero_spell_casts_loss)
+                ),
+                tuple(
+                    20,
+                    '20-zero-item-purchases-loss',
+                    countIf(zero_item_purchases_loss)
                 )
             ]) AS rule
         FROM game_data.filter_stg_game_flags

@@ -23,6 +23,7 @@ from typing import Iterable
 
 import numpy as np
 
+from app.core.utils.smoothing import build_group_for
 from database.clickhouse.client import get_client
 
 DEFAULT_WIN_RATE = 0.5
@@ -46,6 +47,7 @@ class PriorTables:
     m1v1_nb: dict[tuple[int, str, int, str], tuple[float, int]]
     m1v1_champ: dict[tuple[int, int], tuple[float, int]]
     s2vx_nb: dict[tuple[int, str, int, str], tuple[float, int]]
+    s2vx_bg: dict[tuple[int, str, str, int, str, str], tuple[float, int]]
     s2vx_champ: dict[tuple[int, int], tuple[float, int]]
 
     def lookup_player(
@@ -134,6 +136,14 @@ class PriorTables:
     ) -> tuple[np.ndarray, np.ndarray]:
         """No-build 2vx backoff: rate/count for C(5, 2) = 10 (champ, role) pairs."""
         return self._lookup_2vx_team(team_tuples, self.s2vx_nb, lambda t: (t[0], t[1]))
+
+    def lookup_2vx_team_build_group(
+        self, team_tuples: list[tuple[int, str, str]]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Build-sibling 2vx backoff keyed by configured build groups."""
+        return self._lookup_2vx_team(
+            team_tuples, self.s2vx_bg, lambda t: (t[0], t[1], build_group_for(t[2]))
+        )
 
     def lookup_2vx_team_champ(
         self, team_tuples: list[tuple[int, str, str]]
@@ -242,6 +252,20 @@ def load_priors() -> PriorTables:
         for c1, p1k, c2, p2k, w, m in s2vx_nb_rows
     }
 
+    s2vx_bg_rows = client.query(
+        """
+        SELECT
+            championid_1, teamposition_1, build_group_1,
+            championid_2, teamposition_2, build_group_2,
+            win_rate, matchups
+        FROM game_data_filtered.synergy_2vx_build_group WHERE split = 'train'
+        """
+    ).result_rows
+    s2vx_bg = {
+        (int(c1), str(p1k), str(g1), int(c2), str(p2k), str(g2)): (float(w), int(m))
+        for c1, p1k, g1, c2, p2k, g2, w, m in s2vx_bg_rows
+    }
+
     s2vx_champ_rows = client.query(
         """
         SELECT championid_1, championid_2, win_rate, matchups
@@ -255,7 +279,7 @@ def load_priors() -> PriorTables:
     return PriorTables(
         p1=p1, m1v1=m1v1, s2vx=s2vx,
         m1v1_nb=m1v1_nb, m1v1_champ=m1v1_champ,
-        s2vx_nb=s2vx_nb, s2vx_champ=s2vx_champ,
+        s2vx_nb=s2vx_nb, s2vx_bg=s2vx_bg, s2vx_champ=s2vx_champ,
     )
 
 

@@ -17,6 +17,7 @@ from typing import Any, cast
 import torch
 from torch import nn
 
+N_PLAYERS = 10
 N_RELATIONSHIP_EDGES = 45
 TEAM_PAIRS: tuple[tuple[int, int], ...] = (
     (0, 1),
@@ -47,6 +48,25 @@ class HGNNConfig:
     residual_head_hidden: tuple[int, ...] = (128,)
     dropout: float = 0.1
     logit_clip: float | None = 5.0
+    identity_semantic_dim: int = 64
+    identity_profile_dim: int = 5
+    m1v1_detail_dim: int = 16
+    s2vx_detail_dim: int = 16
+    # Classification-feature integration (semantic identity + relationship
+    # detail). Game-level analysis showed: the 1v1 matchup detail is redundant
+    # with the matchup win-rate prior (zero residual signal, even in the central
+    # band), while the 2vX team-synergy detail carries a small signal
+    # concentrated where the prior is a coin-flip. The signal is tiny (~+0.001
+    # AUC overall), so any flexible head fits more spurious train correlation
+    # than real signal and overfits. The detail term is therefore a *minimal*
+    # extractor: an antisymmetric blue-minus-red team-difference of the detail
+    # vector mapped to one scalar logit by a single linear layer, gated by prior
+    # uncertainty (`detail_prior_gated`) so it only nudges central-band
+    # predictions, and scaled by a zero-init scalar so it is opt-in on top of
+    # the stable win-rate model. Default config disables the redundant 1v1
+    # detail (m1v1_detail_dim=0). The semantic identity descriptor enters node
+    # init via its own zero-init gate.
+    detail_prior_gated: bool = True
 
 
 def resolve_device(device: str) -> str:
@@ -79,7 +99,7 @@ def relationship_logit_features(
 
     The structured model previously handed the network the important residual:
     joint relationship logit minus the logit of the same generic 1vX baseline
-    used by cache smoothing (`build_dataset._composite_interaction_priors`).
+    used by cache smoothing (`smoothing.composite_interaction_priors`).
     Keep the same idea in the HGNN tensor contract.
     """
     blue = mu_1vx[:, :5]
@@ -149,6 +169,10 @@ def build_hgnn_inputs(
     m1v1_cnt: Any,
     s2vx_cnt: Any,
     strength: float,
+    identity_semantic: Any | None = None,
+    identity_profile: Any | None = None,
+    m1v1_detail: Any | None = None,
+    s2vx_detail: Any | None = None,
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
     """Turn raw cache/prior arrays into the model's node/edge tensors.
@@ -157,8 +181,9 @@ def build_hgnn_inputs(
     numpy arrays or tensors. mu values stay in probability space (the model maps
     them to logits internally); champion/build ids become long embedding indices.
 
-    The direct relationship path uses raw build-level confidence/missing flags.
-    Nested pooling is already reflected in the cached relationship means.
+    Relationship means already include nested-pooling backoff. Direct
+    confidence/log-count/missing features use raw build-level support so the
+    model knows when an exact relationship cell was sparse or absent.
     """
 
     def to_tensor(arr: Any) -> torch.Tensor:
@@ -174,8 +199,8 @@ def build_hgnn_inputs(
     mu_2vx = to_tensor(synergy_2vx).clamp(0.0, 1.0)
     mu_1v1 = to_tensor(matchup_1v1).clamp(0.0, 1.0)
     conf_1vx, log_count_1vx, missing_1vx = support_features(count_1vx, strength)
-    conf_2vx, _, missing_2vx = support_features(count_2vx, strength)
-    conf_1v1, _, missing_1v1 = support_features(count_1v1, strength)
+    conf_2vx, log_count_2vx, missing_2vx = support_features(count_2vx, strength)
+    conf_1v1, log_count_1v1, missing_1v1 = support_features(count_1v1, strength)
     inputs = {
         "champion_id": to_long(champion_id),
         "build_id": to_long(build_id),
@@ -186,11 +211,21 @@ def build_hgnn_inputs(
         "missing_1vx": missing_1vx,
         "mu_2vx": mu_2vx,
         "conf_2vx": conf_2vx,
+        "log_count_2vx": log_count_2vx,
         "missing_2vx": missing_2vx,
         "mu_1v1": mu_1v1,
         "conf_1v1": conf_1v1,
+        "log_count_1v1": log_count_1v1,
         "missing_1v1": missing_1v1,
     }
+    if identity_semantic is not None:
+        inputs["identity_semantic"] = to_tensor(identity_semantic)
+    if identity_profile is not None:
+        inputs["identity_profile"] = to_tensor(identity_profile)
+    if m1v1_detail is not None:
+        inputs["m1v1_detail"] = to_tensor(m1v1_detail)
+    if s2vx_detail is not None:
+        inputs["s2vx_detail"] = to_tensor(s2vx_detail)
     inputs.update(relationship_logit_features(mu_1vx=mu_1vx, mu_2vx=mu_2vx, mu_1v1=mu_1v1))
     return inputs
 
@@ -215,6 +250,9 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
     def swap_1v1_signed(x: torch.Tensor) -> torch.Tensor:
         return -x.reshape(-1, 5, 5).transpose(1, 2).reshape(-1, 25)
 
+    def swap_1v1_detail(x: torch.Tensor) -> torch.Tensor:
+        return -x.reshape(x.shape[0], 5, 5, x.shape[-1]).transpose(1, 2).reshape(x.shape[0], 25, x.shape[-1])
+
     swapped = {
         "champion_id": swap_halves(inputs["champion_id"], 5),
         "build_id": swap_halves(inputs["build_id"], 5),
@@ -223,15 +261,27 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
         "mu_2vx": swap_halves(inputs["mu_2vx"], 10),
         "mu_1v1": swap_1v1_mu(inputs["mu_1v1"]),
     }
+    if "identity_semantic" in inputs:
+        swapped["identity_semantic"] = swap_halves(inputs["identity_semantic"], 5)
+    if "identity_profile" in inputs:
+        swapped["identity_profile"] = swap_halves(inputs["identity_profile"], 5)
+    if "s2vx_detail" in inputs:
+        swapped["s2vx_detail"] = swap_halves(inputs["s2vx_detail"], 10)
+    if "m1v1_detail" in inputs:
+        swapped["m1v1_detail"] = swap_1v1_detail(inputs["m1v1_detail"])
+    if "var_2vx" in inputs:
+        swapped["var_2vx"] = swap_halves(inputs["var_2vx"], 10)
+    if "var_1v1" in inputs:
+        swapped["var_1v1"] = swap_1v1_matrix(inputs["var_1v1"])
     for suffix, half, prefixes in (
         ("1vx", 5, ("conf", "log_count", "missing")),
-        ("2vx", 10, ("conf", "missing")),
+        ("2vx", 10, ("conf", "log_count", "missing")),
     ):
         for prefix in prefixes:
             key = f"{prefix}_{suffix}"
             if key in inputs:
                 swapped[key] = swap_halves(inputs[key], half)
-    for prefix in ("conf", "missing"):
+    for prefix in ("conf", "log_count", "missing"):
         key = f"{prefix}_1v1"
         if key in inputs:
             swapped[key] = swap_1v1_matrix(inputs[key])
@@ -334,6 +384,17 @@ class HGNNWinModel(nn.Module):
 
         self.phi = nn.ModuleDict({"1vx": PhiEncoder(c)})
         self.identity = IdentityEncoder(c.n_champions, c.n_builds, c.node_dim)
+        self.identity_semantic_proj = (
+            nn.Linear(c.identity_semantic_dim, c.node_dim)
+            if c.identity_semantic_dim > 0
+            else None
+        )
+        # Zero-init scalar gate: the semantic descriptor enters as an opt-in
+        # residual on the learned identity embedding, starting at exactly the
+        # no-feature model and only opening if it lowers loss.
+        self.identity_semantic_gate = (
+            nn.Parameter(torch.zeros(1)) if c.identity_semantic_dim > 0 else None
+        )
         # Node init fuses the multiplicative identity with the 1vX posterior (§3).
         self.node_init = _mlp(
             c.node_dim + c.edge_hidden, c.node_init_hidden, c.node_dim, dropout=c.dropout
@@ -348,6 +409,42 @@ class HGNNWinModel(nn.Module):
             c.node_dim,
             dropout=c.dropout,
         )
+        # Relationship-detail signal: a single antisymmetric linear map from the
+        # blue-minus-red team-difference of each enabled detail vector to a
+        # scalar logit (see HGNNConfig). Each type is independent so the
+        # redundant 1v1 detail can be dropped while keeping the 2vX synergy one.
+        self.m1v1_detail_enabled = c.m1v1_detail_dim > 0
+        self.s2vx_detail_enabled = c.s2vx_detail_dim > 0
+        self.detail_enabled = self.m1v1_detail_enabled or self.s2vx_detail_enabled
+        if self.m1v1_detail_enabled:
+            self.m1v1_detail_lin = nn.Linear(c.m1v1_detail_dim, 1, bias=False)
+        if self.s2vx_detail_enabled:
+            self.s2vx_detail_lin = nn.Linear(c.s2vx_detail_dim, 1, bias=False)
+        if self.detail_enabled:
+            self.detail_gate = nn.Parameter(torch.zeros(1))
+        # Cross-team matchup-profile interaction: each identity carries an
+        # interpretable profile (offense damage-type mix + resistance fractions).
+        # The win-rate prior marginalises over enemy compositions, so it cannot
+        # express "armor-stacking identity vs a physical-damage enemy team". This
+        # term crosses one team's mean profile against the other's via a single
+        # learned matrix M, antisymmetrised as a blue<->red difference. M is
+        # zero-init, so the model starts identical to the no-profile model and
+        # only the antisymmetric part of M receives gradient (the symmetric part
+        # never contributes to the team difference). Each learned M[i, j] is one
+        # named relationship, e.g. M[armor_resist_frac(self), phys_offense(enemy)].
+        # The win effect of a profile match (e.g. armor vs a physical enemy team)
+        # is a threshold/tail nonlinearity, not linear in the enemy damage share,
+        # so the term is `h(self, enemy) - h(enemy, self)` with a tiny MLP h over
+        # the two team-mean profiles. The antisymmetric difference makes it exact
+        # under team swap for any h; the final layer is zero-init so it starts as
+        # the no-profile model and only opens if it lowers loss.
+        self.profile_enabled = c.identity_profile_dim > 0
+        if self.profile_enabled:
+            self.profile_head = _mlp(
+                2 * c.identity_profile_dim, (16,), 1, dropout=0.0
+            )
+            nn.init.zeros_(self.profile_head[-1].weight)
+            nn.init.zeros_(self.profile_head[-1].bias)
         self.prior_shortcut = _mlp(
             15 + N_RELATIONSHIP_EDGES * 2,
             (),
@@ -433,12 +530,54 @@ class HGNNWinModel(nn.Module):
         )
         return self.residual_head(residual_input)
 
+    def _detail_logit(
+        self,
+        m1v1_detail: torch.Tensor | None,
+        s2vx_detail: torch.Tensor | None,
+        like: torch.Tensor,
+    ) -> torch.Tensor:
+        """Antisymmetric scalar logit from the blue-minus-red detail difference.
+
+        1v1 detail is already blue-perspective signed, so the mean over the 25
+        edges is the net blue advantage. 2vX detail is symmetric pair averages,
+        so blue is mean(blue pairs) - mean(red pairs). Both flip sign under team
+        swap, making this term exactly antisymmetric (no capacity spent learning
+        it). A missing/disabled type contributes zero.
+        """
+        logit = like.new_zeros(like.shape[0])
+        if self.m1v1_detail_enabled and m1v1_detail is not None:
+            logit = logit + self.m1v1_detail_lin(m1v1_detail.mean(dim=1)).squeeze(-1)
+        if self.s2vx_detail_enabled and s2vx_detail is not None:
+            team_diff = s2vx_detail[:, :10].mean(dim=1) - s2vx_detail[:, 10:].mean(dim=1)
+            logit = logit + self.s2vx_detail_lin(team_diff).squeeze(-1)
+        return logit
+
+    def _profile_logit(self, identity_profile: torch.Tensor) -> torch.Tensor:
+        """Antisymmetric cross-team profile interaction.
+
+        Per-player so a single extreme identity (e.g. one armor-stacking champion)
+        is not washed out by a team mean: each player's own profile is crossed
+        against the *enemy* team-mean profile through a small nonlinear MLP h, and
+        summed per team. The contribution is
+        ``sum_blue h([p, red_mean]) - sum_red h([p, blue_mean])`` which flips sign
+        under team swap for any h (exactly antisymmetric). The nonlinearity lets
+        the profile match (blue armor vs red physical offense) ramp only where it
+        matters rather than linearly everywhere.
+        """
+        blue = identity_profile[:, :5]   # [B, 5, P]
+        red = identity_profile[:, 5:]
+        blue_mean = blue.mean(dim=1, keepdim=True).expand_as(blue)
+        red_mean = red.mean(dim=1, keepdim=True).expand_as(red)
+        fwd = self.profile_head(torch.cat([blue, red_mean], dim=-1)).squeeze(-1).sum(dim=1)
+        rev = self.profile_head(torch.cat([red, blue_mean], dim=-1)).squeeze(-1).sum(dim=1)
+        return fwd - rev
+
     def _prior_shortcut_logit(
         self,
         *,
         mu_1vx: torch.Tensor,
-        delta_logit_2vx: torch.Tensor,
-        delta_logit_1v1: torch.Tensor,
+        delta_logit_2vx: torch.Tensor | None,
+        delta_logit_1v1: torch.Tensor | None,
         conf_2vx: torch.Tensor | None,
         conf_1v1: torch.Tensor | None,
     ) -> torch.Tensor:
@@ -446,6 +585,8 @@ class HGNNWinModel(nn.Module):
         blue = identity[:, :5]
         red = identity[:, 5:]
         base = torch.cat([blue, red, blue - red], dim=1)
+        if delta_logit_2vx is None or delta_logit_1v1 is None:
+            raise ValueError("Direct prior shortcut requires relationship delta logits")
         relationship_input = self._shortcut_relationship_features(
             delta_logit_2vx=delta_logit_2vx,
             delta_logit_1v1=delta_logit_1v1,
@@ -465,14 +606,20 @@ class HGNNWinModel(nn.Module):
         var_1vx: torch.Tensor,
         mu_2vx: torch.Tensor,
         mu_1v1: torch.Tensor,
+        identity_semantic: torch.Tensor | None = None,
+        identity_profile: torch.Tensor | None = None,
+        m1v1_detail: torch.Tensor | None = None,
+        s2vx_detail: torch.Tensor | None = None,
         delta_logit_2vx: torch.Tensor | None = None,
         delta_logit_1v1: torch.Tensor | None = None,
         conf_1vx: torch.Tensor | None = None,
         log_count_1vx: torch.Tensor | None = None,
         missing_1vx: torch.Tensor | None = None,
         conf_2vx: torch.Tensor | None = None,
+        log_count_2vx: torch.Tensor | None = None,
         missing_2vx: torch.Tensor | None = None,
         conf_1v1: torch.Tensor | None = None,
+        log_count_1v1: torch.Tensor | None = None,
         missing_1v1: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if delta_logit_2vx is None or delta_logit_1v1 is None:
@@ -482,6 +629,8 @@ class HGNNWinModel(nn.Module):
 
         # Node init: multiplicative identity (§3) fused with the 1vX posterior.
         h0 = self.identity(champion_id, build_id)
+        if identity_semantic is not None and self.identity_semantic_proj is not None:
+            h0 = h0 + self.identity_semantic_gate * self.identity_semantic_proj(identity_semantic)
         phi_node = self.phi["1vx"](
             _logit(mu_1vx, self.config.logit_clip),
             var_1vx,
@@ -512,6 +661,19 @@ class HGNNWinModel(nn.Module):
             conf_2vx=conf_2vx,
             conf_1v1=conf_1v1,
         )
+        # Relationship-detail correction: a small scalar logit, gated by prior
+        # uncertainty so it only nudges central-band (coin-flip) predictions
+        # where the synergy detail actually carries residual signal.
+        if self.detail_enabled:
+            detail_logit = self._detail_logit(m1v1_detail, s2vx_detail, like=logit)
+            if self.config.detail_prior_gated:
+                prob = torch.sigmoid(logit).detach()
+                detail_logit = (4.0 * prob * (1.0 - prob)) * detail_logit
+            logit = logit + self.detail_gate * detail_logit
+        # Cross-team matchup-profile correction (ungated): moves the prediction
+        # along the enemy-composition axis the win-rate prior is blind to.
+        if self.profile_enabled and identity_profile is not None:
+            logit = logit + self._profile_logit(identity_profile)
         return {"final_logit": logit}
 
     def forward(
@@ -523,23 +685,33 @@ class HGNNWinModel(nn.Module):
         var_1vx: torch.Tensor,
         mu_2vx: torch.Tensor,
         mu_1v1: torch.Tensor,
+        identity_semantic: torch.Tensor | None = None,
+        identity_profile: torch.Tensor | None = None,
+        m1v1_detail: torch.Tensor | None = None,
+        s2vx_detail: torch.Tensor | None = None,
         delta_logit_2vx: torch.Tensor | None = None,
         delta_logit_1v1: torch.Tensor | None = None,
         conf_1vx: torch.Tensor | None = None,
         log_count_1vx: torch.Tensor | None = None,
         missing_1vx: torch.Tensor | None = None,
         conf_2vx: torch.Tensor | None = None,
+        log_count_2vx: torch.Tensor | None = None,
         missing_2vx: torch.Tensor | None = None,
         conf_1v1: torch.Tensor | None = None,
+        log_count_1v1: torch.Tensor | None = None,
         missing_1v1: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         inputs = {
             "champion_id": champion_id,
             "build_id": build_id,
+            "identity_semantic": identity_semantic,
+            "identity_profile": identity_profile,
             "mu_1vx": mu_1vx,
             "var_1vx": var_1vx,
             "mu_2vx": mu_2vx,
             "mu_1v1": mu_1v1,
+            "m1v1_detail": m1v1_detail,
+            "s2vx_detail": s2vx_detail,
         }
         optional = {
             "delta_logit_2vx": delta_logit_2vx,
@@ -548,8 +720,10 @@ class HGNNWinModel(nn.Module):
             "log_count_1vx": log_count_1vx,
             "missing_1vx": missing_1vx,
             "conf_2vx": conf_2vx,
+            "log_count_2vx": log_count_2vx,
             "missing_2vx": missing_2vx,
             "conf_1v1": conf_1v1,
+            "log_count_1v1": log_count_1v1,
             "missing_1v1": missing_1v1,
         }
         inputs.update({key: value for key, value in optional.items() if value is not None})
@@ -557,10 +731,11 @@ class HGNNWinModel(nn.Module):
 
 
 def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
+    raw_config = dict(payload.get("model_config", {}))
     allowed = {field.name for field in fields(HGNNConfig)}
     config_dict = {
         key: value
-        for key, value in dict(payload.get("model_config", {})).items()
+        for key, value in raw_config.items()
         if key in allowed
     }
     for key in (

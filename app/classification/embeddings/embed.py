@@ -1,9 +1,4 @@
-"""PCA-truncate temporal feature matrices then L2-normalise.
-
-Temporal matrices stay shaped as `(identity, phase, feature)`. PCA is fit once
-over all identity-phase rows, giving every phase a shared latent space without
-pooling phase rows into a single identity embedding.
-"""
+"""PCA-truncate identity feature matrices then L2-normalise."""
 
 from __future__ import annotations
 
@@ -28,7 +23,7 @@ class LevelEmbeddings:
     level: IdentityType
     keys: list[tuple]
     key_columns: tuple[str, ...]
-    embeddings: np.ndarray  # (n, phases, D) float32, L2-normalised
+    embeddings: np.ndarray  # (n, D) float32, L2-normalised
     feature_names: tuple[str, ...]
     matchups: np.ndarray
 
@@ -68,10 +63,10 @@ def embed_level(
 ) -> LevelEmbeddings:
     cfg = cfg or EmbeddingConfig()
     if matrix.matrix.ndim == 3:
-        n_identities, n_phases, n_features = matrix.matrix.shape
-        stacked = matrix.matrix.reshape(n_identities * n_phases, n_features)
+        n_identities, n_slices, n_features = matrix.matrix.shape
+        stacked = matrix.matrix.reshape(n_identities * n_slices, n_features)
         projected = _pca_truncate(stacked, cfg.projection_keep_variance)
-        z = _l2_normalise(projected).reshape(n_identities, n_phases, -1)
+        z = _l2_normalise(projected).reshape(n_identities, n_slices, -1)
     elif matrix.matrix.ndim == 2:
         projected = _pca_truncate(matrix.matrix, cfg.projection_keep_variance)
         z = _l2_normalise(projected)
@@ -96,7 +91,7 @@ def embed_all(
     for level, e in out.items():
         if e.embeddings.ndim == 3:
             logger.info(
-                "Embedded %s: n=%d, phases=%d, D=%d",
+                "Embedded %s: n=%d, slices=%d, D=%d",
                 level.value,
                 *e.embeddings.shape,
             )

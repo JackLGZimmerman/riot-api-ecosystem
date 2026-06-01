@@ -12,20 +12,19 @@ import numpy as np
 
 from app.classification.embeddings import embed
 from app.classification.embeddings.config import (
-    PHASES,
     SINGULAR_METRICS,
     SPECIALISTS,
     EmbeddingConfig,
     IdentityType,
 )
 from app.classification.embeddings.matrices import build_all_matrices
-from app.classification.embeddings.posteriors import apply_hierarchical_shrinkage
 from app.classification.embeddings.report import _load_champion_names
 from app.classification.embeddings.similarity import median_pair_similarity
 from app.classification.embeddings.singular_metrics import _normalised_ordering
-from app.classification.embeddings.specialists import group_specialist_by_phase
+from app.classification.embeddings.specialists import group_specialist
 from app.classification.embeddings.tune import load_raw_cached
 from app.core.config.settings import PROJECT_ROOT
+from app.core.utils.smoothing import apply_hierarchical_shrinkage
 
 DEFAULT_OUTPUT = PROJECT_ROOT / "app" / "classification" / "SPECIALISATIONS.md"
 
@@ -185,7 +184,7 @@ def _context(
 
 def _quality(
     *,
-    phase_count: int,
+    group_count: int,
     budget: int,
     size: int,
     n_identities: int,
@@ -196,10 +195,10 @@ def _quality(
     max_abs_z = float(abs_z[0]) if abs_z.size else 0.0
     second_abs_z = float(abs_z[1]) if abs_z.size > 1 else 0.0
     share = size / max(n_identities, 1)
-    if phase_count > budget:
+    if group_count > budget:
         return (
             "Watch: over the crude budget, so this group needs a distinct "
-            f"semantic reason to survive ({phase_count}>{budget})."
+            f"semantic reason to survive ({group_count}>{budget})."
         )
     if max_abs_z < 0.35:
         return "Weak: metric separation is shallow; prefer merging if this reappears."
@@ -257,20 +256,17 @@ def _pca_summary(flat: np.ndarray, feature_names: tuple[str, ...], keep: float) 
 
 def _specialist_markdown(
     spec, smoothed, champion_names: dict[int, str]
-) -> tuple[list[str], tuple[int, ...], tuple[float, ...], tuple[int, ...]]:
+) -> tuple[list[str], int, float, int]:
     cfg = EmbeddingConfig(
         feature_set=spec.feature_set,
         projection_keep_variance=spec.projection_keep_variance,
     )
     matrix = build_all_matrices(smoothed, cfg)[IdentityType.BASELINE]
     baseline = embed.embed_level(matrix, cfg)
-    groupings = group_specialist_by_phase(baseline, spec)
-    phase_counts = tuple(len(grouping.kept) for grouping in groupings)
-    phase_coverage = tuple(
-        sum(len(group) for group in grouping.kept) / max(baseline.embeddings.shape[0], 1)
-        for grouping in groupings
-    )
-    dropped_counts = tuple(len(grouping.dropped) for grouping in groupings)
+    grouping = group_specialist(baseline, spec)
+    group_count = len(grouping.kept)
+    coverage = sum(len(group) for group in grouping.kept) / max(baseline.embeddings.shape[0], 1)
+    dropped_count = len(grouping.dropped)
     budget = math.ceil(len(spec.feature_set) * 1.5)
     n_identities = baseline.embeddings.shape[0]
     columns = {column: index for index, column in enumerate(baseline.key_columns)}
@@ -280,63 +276,61 @@ def _specialist_markdown(
         "| Field | Value |",
         "| --- | --- |",
         f"| Metrics Used | {', '.join(_metric_label(feature) for feature in spec.feature_set)} |",
-        f"| Budget | <= {budget} groups per phase |",
+        f"| Budget | <= {budget} groups |",
         f"| Config | kv={spec.projection_keep_variance:.2f}, t={spec.similarity_threshold:.2f}, min_median={spec.min_median_sim:.2f} |",
-        f"| Phase Groups | {', '.join(f'{phase}:{count}' for phase, count in zip(PHASES, phase_counts, strict=True))} |",
-        f"| Coverage | {', '.join(f'{phase}:{coverage:.2f}' for phase, coverage in zip(PHASES, phase_coverage, strict=True))} |",
-        f"| Dropped Groups | {', '.join(f'{phase}:{count}' for phase, count in zip(PHASES, dropped_counts, strict=True))} |",
-        f"| PCA | {_pca_summary(matrix.matrix.reshape(-1, matrix.matrix.shape[-1]), matrix.feature_names, spec.projection_keep_variance)} |",
+        f"| Groups | {group_count} |",
+        f"| Coverage | {coverage:.2f} |",
+        f"| Dropped Groups | {dropped_count} |",
+        f"| PCA | {_pca_summary(matrix.matrix, matrix.feature_names, spec.projection_keep_variance)} |",
         "",
-        "| Phase | Group | Size | Read | Context | Quality |",
-        "| --- | ---: | ---: | --- | --- | --- |",
+        "| Group | Size | Read | Context | Quality |",
+        "| ---: | ---: | --- | --- | --- |",
     ]
-    for grouping in groupings:
-        x = matrix.matrix[:, grouping.phase_index, :]
-        mu = x.mean(axis=0)
-        sd = np.where(x.std(axis=0) > 1e-8, x.std(axis=0), 1.0)
-        for gid, group in enumerate(sorted(grouping.kept, key=len, reverse=True), start=1):
-            arr = np.asarray(group, dtype=np.int64)
-            z = (x[arr].mean(axis=0) - mu) / sd
-            roles = Counter(str(baseline.keys[i][columns["teamposition"]]) for i in group)
-            builds = Counter(str(baseline.keys[i][columns["build"]]) for i in group)
-            champions = Counter(
-                champion_names.get(
-                    int(baseline.keys[i][columns["championid"]]),
-                    str(baseline.keys[i][columns["championid"]]),
-                )
-                for i in group
+    x = matrix.matrix
+    mu = x.mean(axis=0)
+    sd = np.where(x.std(axis=0) > 1e-8, x.std(axis=0), 1.0)
+    for gid, group in enumerate(sorted(grouping.kept, key=len, reverse=True), start=1):
+        arr = np.asarray(group, dtype=np.int64)
+        z = (x[arr].mean(axis=0) - mu) / sd
+        roles = Counter(str(baseline.keys[i][columns["teamposition"]]) for i in group)
+        builds = Counter(str(baseline.keys[i][columns["build"]]) for i in group)
+        champions = Counter(
+            champion_names.get(
+                int(baseline.keys[i][columns["championid"]]),
+                str(baseline.keys[i][columns["championid"]]),
             )
-            median = median_pair_similarity(grouping.sim, group)
-            lines.append(
-                "| "
-                + " | ".join(
-                    (
-                        grouping.phase,
-                        f"G{gid:02d}",
-                        str(len(group)),
-                        _read_name(matrix.feature_names, z),
-                        _context(
-                            features=matrix.feature_names,
-                            z=z,
-                            roles=roles,
-                            builds=builds,
-                            champions=champions,
-                            size=len(group),
-                        ),
-                        _quality(
-                            phase_count=len(grouping.kept),
-                            budget=budget,
-                            size=len(group),
-                            n_identities=n_identities,
-                            median=median,
-                            z=z,
-                        ),
-                    )
+            for i in group
+        )
+        median = median_pair_similarity(grouping.sim, group)
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    f"G{gid:02d}",
+                    str(len(group)),
+                    _read_name(matrix.feature_names, z),
+                    _context(
+                        features=matrix.feature_names,
+                        z=z,
+                        roles=roles,
+                        builds=builds,
+                        champions=champions,
+                        size=len(group),
+                    ),
+                    _quality(
+                        group_count=group_count,
+                        budget=budget,
+                        size=len(group),
+                        n_identities=n_identities,
+                        median=median,
+                        z=z,
+                    ),
                 )
-                + " |"
             )
+            + " |"
+        )
     lines.append("")
-    return lines, phase_counts, phase_coverage, dropped_counts
+    return lines, group_count, coverage, dropped_count
 
 
 def _tail_context(
@@ -360,16 +354,32 @@ def _tail_context(
     )
 
 
-def _singular_markdown(spec, smoothed, champion_names: dict[int, str]) -> tuple[list[str], tuple[int, ...]]:
+def _singular_markdown(spec, smoothed, champion_names: dict[int, str]) -> tuple[list[str], int]:
     cfg = EmbeddingConfig(feature_set=(spec.feature,))
     matrix = build_all_matrices(smoothed, cfg)[IdentityType.BASELINE]
-    values = matrix.matrix[:, :, 0]
-    unique_counts = tuple(
-        int(np.unique(values[:, phase_index]).size)
-        for phase_index in range(values.shape[1])
-    )
+    values = matrix.matrix[:, 0]
+    unique_count = int(np.unique(values).size)
     columns = {column: index for index, column in enumerate(matrix.key_columns)}
     direction = "higher is stronger" if spec.higher_is_more else "lower is stronger"
+    _, _, scores = _normalised_ordering(
+        values,
+        higher_is_more=spec.higher_is_more,
+    )
+    order = np.argsort(-scores, kind="mergesort")
+    top = order[:50]
+    bottom = order[-50:][::-1]
+    top_context = _tail_context(matrix, champion_names, top, columns)
+    bottom_context = _tail_context(matrix, champion_names, bottom, columns)
+    if unique_count < 100:
+        quality = (
+            "Watch: many ties; this is a coarse ordering rather than a "
+            "fine-grained scalar signal."
+        )
+    else:
+        quality = (
+            "Excellent: dense identity ordering with distinct "
+            f"tails ({unique_count} unique values)."
+        )
     lines = [
         f"### {spec.name}",
         "",
@@ -377,40 +387,15 @@ def _singular_markdown(spec, smoothed, champion_names: dict[int, str]) -> tuple[
         "| --- | --- |",
         f"| Metric | {_metric_label(spec.feature)} |",
         f"| Direction | {direction} |",
-        f"| Description | {spec.description or 'Phase-relative ordering.'} |",
-        f"| Unique Values | {', '.join(f'{phase}:{count}' for phase, count in zip(PHASES, unique_counts, strict=True))} |",
+        f"| Description | {spec.description or 'Identity ordering.'} |",
+        f"| Unique Values | {unique_count} |",
         "",
-        "| Phase | Top Tail Context | Bottom Tail Context | Quality |",
-        "| --- | --- | --- | --- |",
+        "| Top Tail Context | Bottom Tail Context | Quality |",
+        "| --- | --- | --- |",
+        "| " + " | ".join((top_context, bottom_context, quality)) + " |",
+        "",
     ]
-    for phase_index, phase in enumerate(PHASES):
-        phase_values = values[:, phase_index]
-        _, _, scores = _normalised_ordering(
-            phase_values,
-            higher_is_more=spec.higher_is_more,
-        )
-        order = np.argsort(-scores, kind="mergesort")
-        top = order[:50]
-        bottom = order[-50:][::-1]
-        top_context = _tail_context(matrix, champion_names, top, columns)
-        bottom_context = _tail_context(matrix, champion_names, bottom, columns)
-        if unique_counts[phase_index] < 100:
-            quality = (
-                "Watch: many ties; this is a coarse ordering rather than a "
-                "fine-grained scalar signal."
-            )
-        else:
-            quality = (
-                "Excellent: dense phase-relative ordering with distinct "
-                f"identity tails ({unique_counts[phase_index]} unique values)."
-            )
-        lines.append(
-            "| "
-            + " | ".join((phase, top_context, bottom_context, quality))
-            + " |"
-        )
-    lines.append("")
-    return lines, unique_counts
+    return lines, unique_count
 
 
 def generate_markdown() -> str:
@@ -419,11 +404,11 @@ def generate_markdown() -> str:
     sections: list[str] = []
     summary_rows: list[str] = []
     for spec in SPECIALISTS:
-        section, phase_counts, phase_coverage, dropped_counts = _specialist_markdown(
+        section, group_count, coverage, dropped_count = _specialist_markdown(
             spec, smoothed, champion_names
         )
         budget = math.ceil(len(spec.feature_set) * 1.5)
-        status = "OK" if all(count <= budget for count in phase_counts) else "OVER"
+        status = "OK" if group_count <= budget else "OVER"
         summary_rows.append(
             "| "
             + " | ".join(
@@ -432,9 +417,9 @@ def generate_markdown() -> str:
                     str(len(spec.feature_set)),
                     str(budget),
                     f"kv={spec.projection_keep_variance:.2f}, t={spec.similarity_threshold:.2f}",
-                    "[" + ", ".join(str(count) for count in phase_counts) + "]",
-                    "[" + ", ".join(f"{coverage:.2f}" for coverage in phase_coverage) + "]",
-                    "[" + ", ".join(str(count) for count in dropped_counts) + "]",
+                    str(group_count),
+                    f"{coverage:.2f}",
+                    str(dropped_count),
                     status,
                 )
             )
@@ -445,7 +430,7 @@ def generate_markdown() -> str:
     singular_sections: list[str] = []
     singular_rows: list[str] = []
     for spec in SINGULAR_METRICS:
-        section, unique_counts = _singular_markdown(spec, smoothed, champion_names)
+        section, unique_count = _singular_markdown(spec, smoothed, champion_names)
         singular_rows.append(
             "| "
             + " | ".join(
@@ -453,7 +438,7 @@ def generate_markdown() -> str:
                     f"`{spec.name}`",
                     _metric_label(spec.feature),
                     "higher" if spec.higher_is_more else "lower",
-                    "[" + ", ".join(str(count) for count in unique_counts) + "]",
+                    str(unique_count),
                     "OK",
                 )
             )
@@ -464,13 +449,13 @@ def generate_markdown() -> str:
     header = [
         "# Specialisation Audit",
         "",
-        "Generated from the active `SpecialistSpec` and `SingularMetricSpec` registries in `embeddings/config.py` using the training split cached at `/tmp/embed_exp/raw_levels.pkl`.",
-        "The per-phase budget is `ceil(1.5 * metrics_used)`. Group context is written per retained group from z-scores, role/build composition, champion concentration, size, and within-group cosine.",
+        "Generated from the active `SpecialistSpec` and `SingularMetricSpec` registries in `embeddings/config.py` using the training split cached at `/tmp/embed_exp/raw_levels_non_temporal.pkl`.",
+        "The group budget is `ceil(1.5 * metrics_used)`. Group context is written per retained group from z-scores, role/build composition, champion concentration, size, and within-group cosine.",
         "",
         "## Specialist Summary",
         "",
-        "| Specialist | Metrics | Budget | Config | Phase Groups | Coverage | Dropped | Status |",
-        "| --- | ---: | ---: | --- | --- | --- | --- | --- |",
+        "| Specialist | Metrics | Budget | Config | Groups | Coverage | Dropped | Status |",
+        "| --- | ---: | ---: | --- | ---: | ---: | ---: | --- |",
         *summary_rows,
         "",
         "## Specialist Context",
@@ -481,13 +466,13 @@ def generate_markdown() -> str:
     singular_header = [
         "## Singular Metric Summary",
         "",
-        "| Singular Metric | Feature | Strong Direction | Unique Values By Phase | Status |",
-        "| --- | --- | --- | --- | --- |",
+        "| Singular Metric | Feature | Strong Direction | Unique Values | Status |",
+        "| --- | --- | --- | ---: | --- |",
         *singular_rows,
         "",
         "## Singular Metric Context",
         "",
-        "Singular metrics are not clustered. They keep a phase-relative ordering and are inspected through top and bottom identity tails.",
+        "Singular metrics are not clustered. They keep an identity ordering and are inspected through top and bottom tails.",
         "",
     ]
     return "\n".join(header + sections + singular_header + singular_sections).rstrip() + "\n"

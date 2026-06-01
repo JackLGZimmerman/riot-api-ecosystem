@@ -1,9 +1,8 @@
-"""Phase-relative ordered features for one-dimensional metrics.
+"""Ordered features for one-dimensional metrics.
 
 Singular metrics complement specialists. A specialist clusters a compact
 feature set into semantic groups; a singular metric keeps one meaningful axis as
-a continuous ordering so downstream models can compare identities within the
-same phase.
+a continuous ordering so downstream models can compare identities.
 
 Run:
     uv run python -m app.classification.embeddings.singular_metrics
@@ -18,7 +17,6 @@ from pathlib import Path
 import numpy as np
 
 from app.classification.embeddings.config import (
-    PHASES,
     SINGULAR_METRIC_CACHE_DIR,
     SINGULAR_METRICS,
     EmbeddingConfig,
@@ -27,17 +25,10 @@ from app.classification.embeddings.config import (
 )
 from app.classification.embeddings.load import LevelRows, load_all
 from app.classification.embeddings.matrices import LevelMatrix, build_all_matrices
-from app.classification.embeddings.posteriors import apply_hierarchical_shrinkage
 from app.core.logging.logger import setup_logging_config
+from app.core.utils.smoothing import apply_hierarchical_shrinkage
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class SingularMetricPhaseResult:
-    phase: str
-    top: list[tuple[float, tuple]]
-    bottom: list[tuple[float, tuple]]
 
 
 @dataclass(frozen=True)
@@ -45,7 +36,8 @@ class SingularMetricResult:
     name: str
     feature: str
     n_identities: int
-    phase_results: tuple[SingularMetricPhaseResult, ...]
+    top: list[tuple[float, tuple]]
+    bottom: list[tuple[float, tuple]]
 
 
 def _average_descending_ranks(values: np.ndarray) -> np.ndarray:
@@ -81,13 +73,6 @@ def _normalised_ordering(
     return ranks.astype(np.float32), percentiles, scores
 
 
-def _phase_names(n_phases: int) -> tuple[str, ...]:
-    phase_names = PHASES[:n_phases]
-    if len(phase_names) != n_phases:
-        return tuple(f"phase_{i}" for i in range(n_phases))
-    return phase_names
-
-
 def _save_ordering(
     spec: SingularMetricSpec,
     baseline: LevelMatrix,
@@ -102,11 +87,10 @@ def _save_ordering(
         output_dir / f"{spec.name}.npz",
         keys=np.array(baseline.keys, dtype=object),
         key_columns=np.array(baseline.key_columns, dtype=object),
-        phases=np.array(_phase_names(standardised_values.shape[1]), dtype=object),
         metric=np.array(spec.feature, dtype=object),
         description=np.array(spec.description, dtype=object),
         higher_is_more=np.array(spec.higher_is_more, dtype=np.bool_),
-        score_axes=np.array(("identity", "phase"), dtype=object),
+        score_axes=np.array(("identity",), dtype=object),
         standardised_values=standardised_values.astype(np.float32),
         ranks=ranks.astype(np.float32),
         percentiles=percentiles.astype(np.float32),
@@ -121,44 +105,23 @@ def run_singular_metric(
     *,
     output_dir: Path = SINGULAR_METRIC_CACHE_DIR,
 ) -> SingularMetricResult:
-    if baseline.matrix.ndim != 3:
+    if baseline.matrix.ndim != 2:
         raise ValueError(
-            f"singular metric ordering requires 3-D matrices, got {baseline.matrix.shape}"
+            f"singular metric ordering requires 2-D matrices, got {baseline.matrix.shape}"
         )
     if spec.feature not in feature_index:
         available = ", ".join(feature_index)
         raise KeyError(f"Unknown singular metric feature {spec.feature!r}; loaded {available}")
 
-    values = baseline.matrix[:, :, feature_index[spec.feature]].astype(np.float32)
-    n_identities, n_phases = values.shape
-    ranks = np.empty_like(values, dtype=np.float32)
-    percentiles = np.empty_like(values, dtype=np.float32)
-    scores = np.empty_like(values, dtype=np.float32)
+    values = baseline.matrix[:, feature_index[spec.feature]].astype(np.float32)
+    ranks, percentiles, scores = _normalised_ordering(
+        values,
+        higher_is_more=spec.higher_is_more,
+    )
 
-    phase_results: list[SingularMetricPhaseResult] = []
-    phases = _phase_names(n_phases)
-    for phase_index, phase in enumerate(phases):
-        phase_values = values[:, phase_index]
-        phase_ranks, phase_percentiles, phase_scores = _normalised_ordering(
-            phase_values,
-            higher_is_more=spec.higher_is_more,
-        )
-        ranks[:, phase_index] = phase_ranks
-        percentiles[:, phase_index] = phase_percentiles
-        scores[:, phase_index] = phase_scores
-
-        ordered = np.argsort(phase_ranks, kind="mergesort")
-        top_idx = ordered[:5].astype(int).tolist()
-        bottom_idx = ordered[-5:][::-1].astype(int).tolist()
-        phase_results.append(
-            SingularMetricPhaseResult(
-                phase=phase,
-                top=[(float(phase_scores[i]), baseline.keys[i]) for i in top_idx],
-                bottom=[
-                    (float(phase_scores[i]), baseline.keys[i]) for i in bottom_idx
-                ],
-            )
-        )
+    ordered = np.argsort(ranks, kind="mergesort")
+    top_idx = ordered[:5].astype(int).tolist()
+    bottom_idx = ordered[-5:][::-1].astype(int).tolist()
 
     _save_ordering(
         spec,
@@ -172,8 +135,9 @@ def run_singular_metric(
     return SingularMetricResult(
         name=spec.name,
         feature=spec.feature,
-        n_identities=n_identities,
-        phase_results=tuple(phase_results),
+        n_identities=values.shape[0],
+        top=[(float(scores[i]), baseline.keys[i]) for i in top_idx],
+        bottom=[(float(scores[i]), baseline.keys[i]) for i in bottom_idx],
     )
 
 
@@ -210,18 +174,13 @@ def run_all_singular_metrics(
 def log_singular_metric_results(results: list[SingularMetricResult]) -> None:
     for result in results:
         logger.info(
-            "[%s] feature=%s identities=%d",
+            "[%s] feature=%s identities=%d top=%s bottom=%s",
             result.name,
             result.feature,
             result.n_identities,
+            result.top[:3],
+            result.bottom[:3],
         )
-        for phase in result.phase_results:
-            logger.info(
-                "    %s top=%s bottom=%s",
-                phase.phase,
-                phase.top[:3],
-                phase.bottom[:3],
-            )
 
 
 def main() -> None:

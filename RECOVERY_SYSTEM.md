@@ -48,7 +48,7 @@ Flow:
 ## Simplifications Applied (2026-03-09)
 
 - Removed obsolete pending-batch subsystem code from `work_state.py`.
-- Removed obsolete schema file `database/clickhouse/schema/3001_orchestrator_work_state_schema.sql` (no active callers).
+- Removed the old orchestrator work-state schema file (no active callers).
 - Recovery docs now describe only the active queue model.
 - Matchdata seeding remains one-time per orchestrator run (`MatchDataLoader._initialized`), avoiding reseed query per batch.
 

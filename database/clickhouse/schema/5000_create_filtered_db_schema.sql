@@ -1,11 +1,10 @@
 -- noqa: disable=PRS
 CREATE DATABASE IF NOT EXISTS game_data_filtered;
 
--- The filtered database now keeps only tables used by the production ML and
--- classification feature paths. Raw match snapshots, metadata, most timeline
--- event copies, temporal classification artifacts, and retired experiment
--- aggregations are derived or obsolete and should be dropped rather than
--- recreated here.
+-- The filtered database now keeps only tables used by the production ML path.
+-- Raw match snapshots, metadata, timeline copies, old classification artifacts,
+-- and retired experiment aggregations are derived or obsolete and should be
+-- dropped rather than recreated here.
 DROP TABLE IF EXISTS game_data_filtered.metadata;
 DROP TABLE IF EXISTS game_data_filtered.info;
 DROP TABLE IF EXISTS game_data_filtered.bans;
@@ -36,6 +35,8 @@ DROP TABLE IF EXISTS game_data_filtered.tl_elite_monster_kill;
 DROP TABLE IF EXISTS game_data_filtered.tl_turret_plate_destroyed;
 DROP TABLE IF EXISTS game_data_filtered.tl_ck_victim_damage_dealt;
 DROP TABLE IF EXISTS game_data_filtered.tl_ck_victim_damage_received;
+DROP TABLE IF EXISTS game_data_filtered.tl_participant_stats;
+DROP TABLE IF EXISTS game_data_filtered.participant_scaling_weights;
 DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal;
 DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal_prior_sibling;
 DROP TABLE IF EXISTS game_data_filtered.synergy_1vx_temporal_prior_champion_role;
@@ -76,13 +77,6 @@ CREATE TABLE IF NOT EXISTS game_data_filtered.participant_stats
 AS game_data.participant_stats
 ENGINE = MergeTree
 ORDER BY (matchid, participantid, puuid, run_id);
-
--- Classification embeddings still consume final participant timeline states.
-DROP TABLE IF EXISTS game_data_filtered.tl_participant_stats;
-CREATE TABLE IF NOT EXISTS game_data_filtered.tl_participant_stats
-AS game_data.tl_participant_stats
-ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, participantid, run_id);
 
 DROP TABLE IF EXISTS game_data_filtered.participant_item_value_totals;
 CREATE TABLE IF NOT EXISTS game_data_filtered.participant_item_value_totals

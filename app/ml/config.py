@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config.settings import PROJECT_ROOT
+from app.core.utils.smoothing import (
+    BUILD_GROUPS as BUILD_GROUPS,
+    BUILD_TO_GROUP as BUILD_TO_GROUP,
+    build_group_for as build_group_for,
+)
 
 ML_DATA_DIR = PROJECT_ROOT / "app" / "ml" / "data"
 CACHE_DIR = ML_DATA_DIR / "cache"
@@ -13,11 +18,14 @@ SOLO_PRIOR_TABLE = "game_data_filtered.synergy_1vx"
 SOLO_PRIOR_DICT = "game_data_filtered.synergy_1vx_dict"
 MATCHUP_1V1_DICT = "game_data_filtered.matchup_1v1_dict"
 SYNERGY_2VX_DICT = "game_data_filtered.synergy_2vx_dict"
-# Backoff levels for nested empirical-Bayes pooling of the interaction priors:
-# a sparse build-conditioned cell shrinks toward its no-build pair, then its
-# champion-only pair, then the per-side composite floor.
+
+
+# Backoff levels for nested empirical-Bayes pooling of the interaction priors.
+# 1v1 keeps the existing build -> no-build -> champion-pair -> composite floor
+# ladder. 2vx uses build -> build-sibling group -> no-build -> neutral floor.
 MATCHUP_1V1_NOBUILD_DICT = "game_data_filtered.matchup_1v1_nobuild_dict"
 MATCHUP_1V1_CHAMP_DICT = "game_data_filtered.matchup_1v1_champ_dict"
+SYNERGY_2VX_BUILD_GROUP_DICT = "game_data_filtered.synergy_2vx_build_group_dict"
 SYNERGY_2VX_NOBUILD_DICT = "game_data_filtered.synergy_2vx_nobuild_dict"
 SYNERGY_2VX_CHAMP_DICT = "game_data_filtered.synergy_2vx_champ_dict"
 # Source tables (finest -> coarsest) for the empirical-Bayes per-level strength
@@ -29,8 +37,8 @@ MATCHUP_1V1_LEVEL_TABLES: tuple[tuple[str, str], ...] = (
 )
 SYNERGY_2VX_LEVEL_TABLES: tuple[tuple[str, str], ...] = (
     ("game_data_filtered.synergy_2vx", "win_rate"),
+    ("game_data_filtered.synergy_2vx_build_group", "win_rate"),
     ("game_data_filtered.synergy_2vx_nobuild", "win_rate"),
-    ("game_data_filtered.synergy_2vx_champ", "win_rate"),
 )
 
 POSITIONS: tuple[str, ...] = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
@@ -47,6 +55,7 @@ class DatasetConfig:
     synergy_2vx_dict: str = SYNERGY_2VX_DICT
     matchup_1v1_nobuild_dict: str = MATCHUP_1V1_NOBUILD_DICT
     matchup_1v1_champ_dict: str = MATCHUP_1V1_CHAMP_DICT
+    synergy_2vx_build_group_dict: str = SYNERGY_2VX_BUILD_GROUP_DICT
     synergy_2vx_nobuild_dict: str = SYNERGY_2VX_NOBUILD_DICT
     synergy_2vx_champ_dict: str = SYNERGY_2VX_CHAMP_DICT
     val_fraction: float = 0.1

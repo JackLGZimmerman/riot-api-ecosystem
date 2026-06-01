@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS game_data.participant_stats
         'BOTTOM' = 4,
         'UTILITY' = 5
     ),
+    positionassignedbymatchmaking Nullable (String),
+    selectedrolepreferences Nullable (String),
     win UInt8,
     gameendedinearlysurrender UInt8,
     gameendedinignbsurrender Nullable (UInt8),

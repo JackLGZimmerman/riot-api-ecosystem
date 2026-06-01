@@ -1,8 +1,8 @@
 """Audit active specialist and singular metric specs.
 
 This is a heavier companion to ``tune.py``. It scores each specialist against
-its own per-phase group budget and prints enough semantic diagnostics to decide
-whether a candidate is extracting useful context or just fragmenting.
+its group budget and prints enough semantic diagnostics to decide whether a
+candidate is extracting useful context or just fragmenting.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import numpy as np
 
 from app.classification.embeddings import embed
 from app.classification.embeddings.config import (
-    PHASES,
     SINGULAR_METRICS,
     SPECIALISTS,
     EmbeddingConfig,
@@ -28,17 +27,17 @@ from app.classification.embeddings.config import (
     SpecialistSpec,
 )
 from app.classification.embeddings.matrices import LevelMatrix, build_all_matrices
-from app.classification.embeddings.posteriors import apply_hierarchical_shrinkage
 from app.classification.embeddings.report import _load_champion_names
 from app.classification.embeddings.similarity import median_pair_similarity
 from app.classification.embeddings.singular_metrics import _normalised_ordering
-from app.classification.embeddings.specialists import group_specialist_by_phase
+from app.classification.embeddings.specialists import group_specialist
 from app.classification.embeddings.tune import (
     _groups_for_threshold,
-    _phase_sweep_context,
     _split_by_coherence,
+    _sweep_context,
     load_raw_cached,
 )
+from app.core.utils.smoothing import apply_hierarchical_shrinkage
 
 
 @dataclass(frozen=True)
@@ -48,7 +47,7 @@ class CandidateAudit:
     threshold: float
     budget: int
     axes: int
-    counts: tuple[int, ...]
+    count: int
     coverage: float
     largest_share: float
     median_within: float
@@ -65,7 +64,7 @@ class CurrentAudit:
     metrics: int
     budget: int | None
     config: str
-    counts: tuple[int, ...] | None
+    count: int | None
     status: str
     note: str
 
@@ -115,17 +114,17 @@ def _current_specialist_audit(spec: SpecialistSpec, smoothed) -> CurrentAudit:
     )
     matrix = build_all_matrices(smoothed, cfg)[IdentityType.BASELINE]
     baseline = embed.embed_level(matrix, cfg)
-    groupings = group_specialist_by_phase(baseline, spec)
-    counts = tuple(len(grouping.kept) for grouping in groupings)
+    grouping = group_specialist(baseline, spec)
+    count = len(grouping.kept)
     budget = _budget(spec)
-    status = "OK" if all(count <= budget for count in counts) else "OVER"
+    status = "OK" if count <= budget else "OVER"
     return CurrentAudit(
         name=spec.name,
         kind="specialist",
         metrics=len(spec.feature_set),
         budget=budget,
         config=f"kv={spec.projection_keep_variance:.2f},t={spec.similarity_threshold:.2f}",
-        counts=counts,
+        count=count,
         status=status,
         note="",
     )
@@ -133,43 +132,43 @@ def _current_specialist_audit(spec: SpecialistSpec, smoothed) -> CurrentAudit:
 
 def _current_singular_audit(spec: SingularMetricSpec, smoothed) -> CurrentAudit:
     matrix = _matrix_for(smoothed, (spec.feature,))
-    values = matrix.matrix[:, :, 0]
-    unique_counts = tuple(int(np.unique(values[:, phase]).size) for phase in range(values.shape[1]))
-    tie_note = f"unique={list(unique_counts)}"
+    values = matrix.matrix[:, 0]
     return CurrentAudit(
         name=spec.name,
         kind="singular",
         metrics=1,
         budget=None,
         config=f"feature={spec.feature},higher_is_more={spec.higher_is_more}",
-        counts=None,
+        count=None,
         status="OK",
-        note=tie_note,
+        note=f"unique={int(np.unique(values).size)}",
     )
 
 
 def current_audit(*, names: tuple[str, ...] | None = None) -> None:
     smoothed = apply_hierarchical_shrinkage(load_raw_cached(), EmbeddingConfig())
-    specialist_names = names
-    singular_names = names
     rows: list[CurrentAudit] = []
-    rows.extend(
-        _current_specialist_audit(spec, smoothed)
-        for spec in _specialists_by_name(specialist_names)
-    )
-    if not names:
-        rows.extend(_current_singular_audit(spec, smoothed) for spec in SINGULAR_METRICS)
+    if names:
+        requested = set(names)
+        specialist_specs = [spec for spec in SPECIALISTS if spec.name in requested]
+        singular_specs = [spec for spec in SINGULAR_METRICS if spec.name in requested]
+        found = {spec.name for spec in specialist_specs} | {
+            spec.name for spec in singular_specs
+        }
+        missing = sorted(requested - found)
+        if missing:
+            raise SystemExit(f"unknown spec(s): {', '.join(missing)}")
     else:
-        rows.extend(
-            _current_singular_audit(spec, smoothed)
-            for spec in _singulars_by_name(singular_names)
-        )
+        specialist_specs = list(SPECIALISTS)
+        singular_specs = list(SINGULAR_METRICS)
+    rows.extend(_current_specialist_audit(spec, smoothed) for spec in specialist_specs)
+    rows.extend(_current_singular_audit(spec, smoothed) for spec in singular_specs)
     for row in rows:
-        counts = "" if row.counts is None else f" counts={list(row.counts)}"
+        count = "" if row.count is None else f" count={row.count}"
         budget = "" if row.budget is None else f" budget={row.budget}"
         print(
             f"{row.kind:<10} {row.name:<28} metrics={row.metrics:<2}{budget:<11} "
-            f"{row.config:<34}{counts:<24} {row.status} {row.note}"
+            f"{row.config:<34}{count:<12} {row.status} {row.note}"
         )
 
 
@@ -177,54 +176,45 @@ def _candidate_groups(
     baseline,
     threshold: float,
     min_median_sim: float,
-) -> tuple[list[list[list[int]]], list[np.ndarray]]:
-    kept_by_phase: list[list[list[int]]] = []
-    sims: list[np.ndarray] = []
-    for phase_index in range(baseline.embeddings.shape[1]):
-        phase_embeddings = baseline.embeddings[:, phase_index, :]
-        context = _phase_sweep_context(phase_embeddings)
-        kept, _ = _split_by_coherence(
-            context.sim,
-            _groups_for_threshold(context, threshold),
-            min_median_sim,
-        )
-        kept_by_phase.append(kept)
-        sims.append(context.sim)
-    return kept_by_phase, sims
+) -> tuple[list[list[int]], np.ndarray]:
+    context = _sweep_context(baseline.embeddings)
+    kept, _ = _split_by_coherence(
+        context.sim,
+        _groups_for_threshold(context, threshold),
+        min_median_sim,
+    )
+    return kept, context.sim
 
 
 def _candidate_semantics(
     matrix: LevelMatrix,
-    groups_by_phase: list[list[list[int]]],
+    groups: list[list[int]],
 ) -> tuple[float, int, int]:
     top_abs_z: list[float] = []
     weak = 0
     small = 0
-    for phase_index, groups in enumerate(groups_by_phase):
-        x = matrix.matrix[:, phase_index, :]
-        mu = x.mean(axis=0)
-        sd = np.where(x.std(axis=0) > 1e-8, x.std(axis=0), 1.0)
-        for group in groups:
-            arr = np.asarray(group, dtype=np.int64)
-            z = (x[arr].mean(axis=0) - mu) / sd
-            max_abs = float(np.max(np.abs(z))) if z.size else 0.0
-            top_abs_z.append(max_abs)
-            if max_abs < 0.35:
-                weak += 1
-            if len(group) < 40:
-                small += 1
+    x = matrix.matrix
+    mu = x.mean(axis=0)
+    sd = np.where(x.std(axis=0) > 1e-8, x.std(axis=0), 1.0)
+    for group in groups:
+        arr = np.asarray(group, dtype=np.int64)
+        z = (x[arr].mean(axis=0) - mu) / sd
+        max_abs = float(np.max(np.abs(z))) if z.size else 0.0
+        top_abs_z.append(max_abs)
+        if max_abs < 0.35:
+            weak += 1
+        if len(group) < 40:
+            small += 1
     return (float(np.mean(top_abs_z)) if top_abs_z else 0.0, weak, small)
 
 
 def _candidate_score(row: CandidateAudit) -> float:
-    if any(count > row.budget for count in row.counts):
+    if row.count > row.budget:
         return -1000.0
     if row.coverage < 0.85:
         return -500.0
-    mean_count = float(np.mean(row.counts))
     target = max(2.0, row.budget * 0.70)
-    count_score = 1.0 - min(abs(mean_count - target) / max(target, 1.0), 1.0)
-    spread_penalty = float(np.std(row.counts)) / max(row.budget, 1)
+    count_score = 1.0 - min(abs(row.count - target) / max(target, 1.0), 1.0)
     giant_penalty = max(0.0, row.largest_share - 0.70)
     weak_penalty = row.weak_groups * 0.08
     small_penalty = row.small_groups * 0.03
@@ -235,7 +225,6 @@ def _candidate_score(row: CandidateAudit) -> float:
         + z_score
         + median_score
         + row.coverage
-        - spread_penalty
         - giant_penalty
         - weak_penalty
         - small_penalty
@@ -264,18 +253,13 @@ def sweep_specialist(
         baseline = embed.embed_level(matrix, cfg)
         axes = baseline.embeddings.shape[-1]
         for threshold in thresholds:
-            groups_by_phase, sims = _candidate_groups(baseline, threshold, floor)
-            counts = tuple(len(groups) for groups in groups_by_phase)
-            sizes = [len(group) for groups in groups_by_phase for group in groups]
-            medians = [
-                median_pair_similarity(sim, group)
-                for sim, groups in zip(sims, groups_by_phase, strict=True)
-                for group in groups
-            ]
+            groups, sim = _candidate_groups(baseline, threshold, floor)
+            sizes = [len(group) for group in groups]
+            medians = [median_pair_similarity(sim, group) for group in groups]
             n_identities = baseline.embeddings.shape[0]
             mean_top_abs_z, weak_groups, small_groups = _candidate_semantics(
                 matrix,
-                groups_by_phase,
+                groups,
             )
             row = CandidateAudit(
                 name=spec.name,
@@ -283,8 +267,8 @@ def sweep_specialist(
                 threshold=threshold,
                 budget=budget,
                 axes=axes,
-                counts=counts,
-                coverage=sum(sizes) / max(n_identities * len(PHASES), 1),
+                count=len(groups),
+                coverage=sum(sizes) / max(n_identities, 1),
                 largest_share=max(sizes, default=0) / max(n_identities, 1),
                 median_within=float(np.median(medians)) if medians else float("nan"),
                 mean_top_abs_z=mean_top_abs_z,
@@ -330,7 +314,7 @@ def sweep_audit(
         for row in rows[:topn]:
             print(
                 f"kv={row.kv:.2f} t={row.threshold:.2f} axes={row.axes} "
-                f"counts={list(row.counts)} cov={row.coverage:.2f} "
+                f"count={row.count} cov={row.coverage:.2f} "
                 f"lg={row.largest_share:.2f} med={row.median_within:.2f} "
                 f"z={row.mean_top_abs_z:.2f} weak={row.weak_groups} "
                 f"small={row.small_groups} score={row.score:.2f}",
@@ -350,53 +334,52 @@ def singular_audit(*, names: tuple[str, ...] | None, topn: int) -> None:
     for spec in _singulars_by_name(names):
         matrix = _matrix_for(smoothed, (spec.feature,))
         columns = {column: index for index, column in enumerate(matrix.key_columns)}
+        values = matrix.matrix[:, 0]
+        _, _, scores = _normalised_ordering(
+            values,
+            higher_is_more=spec.higher_is_more,
+        )
+        order = np.argsort(-scores, kind="mergesort")
+        top = order[:topn]
+        bottom = order[-topn:][::-1]
+        top_roles = Counter(
+            str(matrix.keys[index][columns["teamposition"]]) for index in top
+        )
+        top_builds = Counter(str(matrix.keys[index][columns["build"]]) for index in top)
+        top_champs = Counter(
+            champion_names.get(
+                int(matrix.keys[index][columns["championid"]]),
+                str(matrix.keys[index][columns["championid"]]),
+            )
+            for index in top
+        )
+        bottom_roles = Counter(
+            str(matrix.keys[index][columns["teamposition"]]) for index in bottom
+        )
+        bottom_builds = Counter(
+            str(matrix.keys[index][columns["build"]]) for index in bottom
+        )
+        bottom_champs = Counter(
+            champion_names.get(
+                int(matrix.keys[index][columns["championid"]]),
+                str(matrix.keys[index][columns["championid"]]),
+            )
+            for index in bottom
+        )
         print(
             f"# {spec.name} feature={spec.feature} higher_is_more={spec.higher_is_more}"
         )
-        for phase_index, phase in enumerate(PHASES):
-            values = matrix.matrix[:, phase_index, 0]
-            _, _, scores = _normalised_ordering(
-                values,
-                higher_is_more=spec.higher_is_more,
-            )
-            order = np.argsort(-scores, kind="mergesort")
-            top = order[:topn]
-            bottom = order[-topn:][::-1]
-            top_roles = Counter(
-                str(matrix.keys[index][columns["teamposition"]]) for index in top
-            )
-            top_builds = Counter(str(matrix.keys[index][columns["build"]]) for index in top)
-            top_champs = Counter(
-                champion_names.get(
-                    int(matrix.keys[index][columns["championid"]]),
-                    str(matrix.keys[index][columns["championid"]]),
-                )
-                for index in top
-            )
-            bottom_roles = Counter(
-                str(matrix.keys[index][columns["teamposition"]]) for index in bottom
-            )
-            bottom_builds = Counter(
-                str(matrix.keys[index][columns["build"]]) for index in bottom
-            )
-            bottom_champs = Counter(
-                champion_names.get(
-                    int(matrix.keys[index][columns["championid"]]),
-                    str(matrix.keys[index][columns["championid"]]),
-                )
-                for index in bottom
-            )
-            print(
-                f"{phase:<9} unique={np.unique(values).size:<4} "
-                f"top_roles={top_roles.most_common(3)} "
-                f"top_builds={top_builds.most_common(3)} "
-                f"top_champs={top_champs.most_common(5)}"
-            )
-            print(
-                f"{'':<9} bottom_roles={bottom_roles.most_common(3)} "
-                f"bottom_builds={bottom_builds.most_common(3)} "
-                f"bottom_champs={bottom_champs.most_common(5)}"
-            )
+        print(
+            f"unique={np.unique(values).size:<4} "
+            f"top_roles={top_roles.most_common(3)} "
+            f"top_builds={top_builds.most_common(3)} "
+            f"top_champs={top_champs.most_common(5)}"
+        )
+        print(
+            f"bottom_roles={bottom_roles.most_common(3)} "
+            f"bottom_builds={bottom_builds.most_common(3)} "
+            f"bottom_champs={bottom_champs.most_common(5)}"
+        )
         print()
 
 

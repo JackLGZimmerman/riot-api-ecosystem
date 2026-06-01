@@ -1,8 +1,7 @@
 """Lean sweep harness for the specialists.
 
-One row per candidate. Filters out candidates outside the per-phase target
-group-count band. Caches raw 6010 + 9000-9040 levels on disk so repeat runs are
-fast.
+One row per candidate. Filters out candidates outside the target group-count
+band. Caches raw non-temporal levels on disk so repeat runs are fast.
 
 Run:
     uv run python -m app.classification.embeddings.tune
@@ -30,12 +29,12 @@ from app.classification.embeddings.config import (
 )
 from app.classification.embeddings.load import LevelRows, load_all
 from app.classification.embeddings.matrices import build_all_matrices
-from app.classification.embeddings.posteriors import apply_hierarchical_shrinkage
 from app.classification.embeddings.similarity import median_pair_similarity
 from app.core.logging.logger import setup_logging_config
+from app.core.utils.smoothing import apply_hierarchical_shrinkage
 
 OUTPUT_DIR = Path("/tmp/embed_exp")
-RAW_CACHE_PATH = OUTPUT_DIR / "raw_levels.pkl"
+RAW_CACHE_PATH = OUTPUT_DIR / "raw_levels_non_temporal.pkl"
 
 
 def load_raw_cached() -> dict[IdentityType, LevelRows]:
@@ -55,22 +54,20 @@ class SpecRow:
     kv: float
     t: float
     kept: int
-    phase_group_counts: tuple[int, ...]
     coverage: float
     largest_share: float
     median_within: float
 
     def fmt(self) -> str:
-        phase_counts = ",".join(str(count) for count in self.phase_group_counts)
         return (
             f"{self.spec:<14} kv={self.kv:.3f} t={self.t:.2f} | "
-            f"g={self.kept:>3d} phase_g=[{phase_counts}] cov={self.coverage:>4.2f} "
+            f"g={self.kept:>3d} cov={self.coverage:>4.2f} "
             f"lg%={self.largest_share:>4.2f} med={self.median_within:>4.2f}"
         )
 
 
 @dataclass(frozen=True)
-class _PhaseSweepContext:
+class _SweepContext:
     sim: np.ndarray
     linkage_matrix: np.ndarray | None
     n: int
@@ -83,26 +80,26 @@ def _sort_groups(groups: list[list[int]]) -> list[list[int]]:
     )
 
 
-def _phase_sweep_context(phase_embeddings: np.ndarray) -> _PhaseSweepContext:
-    sim = phase_embeddings @ phase_embeddings.T
-    if phase_embeddings.shape[0] < 2:
-        return _PhaseSweepContext(
+def _sweep_context(embeddings: np.ndarray) -> _SweepContext:
+    sim = embeddings @ embeddings.T
+    if embeddings.shape[0] < 2:
+        return _SweepContext(
             sim=sim,
             linkage_matrix=None,
-            n=phase_embeddings.shape[0],
+            n=embeddings.shape[0],
         )
     distance = 1.0 - sim
     distance = np.clip(distance, 0.0, 2.0)
     np.fill_diagonal(distance, 0.0)
-    return _PhaseSweepContext(
+    return _SweepContext(
         sim=sim,
         linkage_matrix=linkage(squareform(distance, checks=False), method="average"),
-        n=phase_embeddings.shape[0],
+        n=embeddings.shape[0],
     )
 
 
 def _groups_for_threshold(
-    context: _PhaseSweepContext,
+    context: _SweepContext,
     threshold: float,
 ) -> list[list[int]]:
     if context.linkage_matrix is None or threshold > 1.0:
@@ -152,37 +149,24 @@ def sweep_specialist(
             baseline_matrix,
             EmbeddingConfig(feature_set=spec.feature_set, projection_keep_variance=kv),
         )
-        contexts = tuple(
-            _phase_sweep_context(baseline.embeddings[:, phase_index, :])
-            for phase_index in range(baseline.embeddings.shape[1])
-        )
+        context = _sweep_context(baseline.embeddings)
         for t in ts:
-            kept_by_phase = tuple(
-                _split_by_coherence(
-                    context.sim,
-                    _groups_for_threshold(context, t),
-                    floor,
-                )[0]
-                for context in contexts
+            kept, _ = _split_by_coherence(
+                context.sim,
+                _groups_for_threshold(context, t),
+                floor,
             )
-            phase_counts = tuple(len(kept) for kept in kept_by_phase)
-            sizes = [len(group) for kept in kept_by_phase for group in kept]
-            medians = [
-                median_pair_similarity(context.sim, group)
-                for context, kept in zip(contexts, kept_by_phase, strict=True)
-                for group in kept
-            ]
+            sizes = [len(group) for group in kept]
+            medians = [median_pair_similarity(context.sim, group) for group in kept]
             n = baseline.embeddings.shape[0]
-            total_slots = n * len(contexts)
             largest = max(sizes, default=0)
             rows.append(
                 SpecRow(
                     spec=spec.name,
                     kv=kv,
                     t=t,
-                    kept=sum(phase_counts),
-                    phase_group_counts=phase_counts,
-                    coverage=sum(sizes) / total_slots if total_slots else 0.0,
+                    kept=len(kept),
+                    coverage=sum(sizes) / n if n else 0.0,
                     largest_share=largest / max(n, 1),
                     median_within=(
                         float(np.median(medians)) if medians else float("nan")
@@ -193,10 +177,10 @@ def sweep_specialist(
     lo, hi = target
 
     def key(r: SpecRow) -> tuple:
-        in_band = all(lo <= count <= hi for count in r.phase_group_counts)
+        in_band = lo <= r.kept <= hi
         ok = r.coverage >= 0.85 and r.largest_share <= 0.30
         midpoint = (lo + hi) / 2
-        spread = max((abs(midpoint - count) for count in r.phase_group_counts), default=0)
+        spread = abs(midpoint - r.kept)
         return (in_band, ok, r.median_within, -spread)
 
     rows.sort(key=key, reverse=True)
@@ -231,11 +215,7 @@ def run_specialists(args: argparse.Namespace) -> None:
             target,
             min_median_override=args.min_median,
         )
-        in_band = [
-            r
-            for r in rows
-            if all(target[0] <= count <= target[1] for count in r.phase_group_counts)
-        ]
+        in_band = [r for r in rows if target[0] <= r.kept <= target[1]]
         keep = in_band[:5] if in_band else rows[:5]
         out_lines.append(
             f"# {spec.name} (curr kv={spec.projection_keep_variance:.3f} "
@@ -246,10 +226,9 @@ def run_specialists(args: argparse.Namespace) -> None:
         if in_band:
             best = in_band[0]
             summary.append(
-                f"PICK {spec.name}: kv={best.kv:.3f} t={best.t:.2f} g={best.kept} "
-                f"phase_g={list(best.phase_group_counts)} "
-                f"cov={best.coverage:.2f} lg%={best.largest_share:.2f} "
-                f"med={best.median_within:.2f}"
+                f"PICK {spec.name}: kv={best.kv:.3f} t={best.t:.2f} "
+                f"g={best.kept} cov={best.coverage:.2f} "
+                f"lg%={best.largest_share:.2f} med={best.median_within:.2f}"
             )
         else:
             summary.append(f"NO PICK {spec.name} (in-band empty)")
@@ -260,22 +239,26 @@ def run_specialists(args: argparse.Namespace) -> None:
     _write_lines(OUTPUT_DIR / "tune_specialists.txt", full)
 
 
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--name", nargs="*")
+    parser.add_argument("--lo", type=int, default=2)
+    parser.add_argument("--hi", type=int, default=14)
+    parser.add_argument("--kvs", type=float, nargs="*", default=(0.6, 0.7, 0.8, 0.9))
+    parser.add_argument(
+        "--ts",
+        type=float,
+        nargs="*",
+        default=(0.55, 0.60, 0.65, 0.70, 0.75, 0.80),
+    )
+    parser.add_argument("--min-median", type=float)
+    return parser
+
+
 def main() -> None:
     setup_logging_config()
-    logging.getLogger().setLevel(logging.WARNING)
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--kvs", type=float, nargs="*", default=[0.90, 0.93, 0.95, 0.97, 0.99]
-    )
-    parser.add_argument(
-        "--ts", type=float, nargs="*", default=[0.80, 0.85, 0.90, 0.93, 0.95]
-    )
-    parser.add_argument("--lo", type=int, default=6)
-    parser.add_argument("--hi", type=int, default=14)
-    parser.add_argument("--name", type=str, nargs="*", default=None)
-    parser.add_argument("--min-median", type=float, default=None)
-    args = parser.parse_args()
-    run_specialists(args)
+    logging.getLogger().setLevel(logging.INFO)
+    run_specialists(_parser().parse_args())
 
 
 if __name__ == "__main__":

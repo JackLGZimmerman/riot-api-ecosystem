@@ -8,7 +8,9 @@ import numpy as np
 from app.ml.cache_layout import CACHE_FORMAT, CACHE_META_FILE, array_paths
 from app.ml.config import DatasetConfig
 
-LEGACY_CACHE_FORMATS = frozenset({"npy-memmap-v15", "npy-memmap-v17"})
+LEGACY_CACHE_FORMATS = frozenset(
+    {"npy-memmap-v15", "npy-memmap-v17", "npy-memmap-v18", "npy-memmap-v19"}
+)
 COUNT_ARRAY_NAMES = ("p1_cnt", "m1v1_cnt", "s2vx_cnt")
 # Effective sample size per interaction edge after nested EB pooling (cache
 # v18+); legacy caches fall back to the raw support counts (no backoff info).
@@ -31,6 +33,10 @@ class SplitData:
     # Per-slot identity ids (HGNN identity embeddings); None for legacy caches.
     champion_id: np.ndarray | None = None
     build_id: np.ndarray | None = None
+    identity_semantic: np.ndarray | None = None
+    identity_profile: np.ndarray | None = None
+    m1v1_detail: np.ndarray | None = None
+    s2vx_detail: np.ndarray | None = None
 
 
 def _slice(arrays: dict[str, np.ndarray], lo: int, hi: int) -> SplitData:
@@ -46,6 +52,10 @@ def _slice(arrays: dict[str, np.ndarray], lo: int, hi: int) -> SplitData:
         blue_win=arrays["blue_win"][lo:hi],
         champion_id=arrays["champion_id"][lo:hi] if "champion_id" in arrays else None,
         build_id=arrays["build_id"][lo:hi] if "build_id" in arrays else None,
+        identity_semantic=arrays["identity_semantic"][lo:hi] if "identity_semantic" in arrays else None,
+        identity_profile=arrays["identity_profile"][lo:hi] if "identity_profile" in arrays else None,
+        m1v1_detail=arrays["m1v1_detail"][lo:hi] if "m1v1_detail" in arrays else None,
+        s2vx_detail=arrays["s2vx_detail"][lo:hi] if "s2vx_detail" in arrays else None,
     )
 
 
@@ -116,6 +126,9 @@ def load_splits(
             # Legacy cache without nested pooling: effective N is the raw count.
             arrays[name] = arrays[fallback]
     for name in ("champion_id", "build_id"):
+        if paths[name].exists():
+            arrays[name] = np.load(paths[name], mmap_mode="r")[:n]
+    for name in ("identity_semantic", "identity_profile", "m1v1_detail", "s2vx_detail"):
         if paths[name].exists():
             arrays[name] = np.load(paths[name], mmap_mode="r")[:n]
     return {

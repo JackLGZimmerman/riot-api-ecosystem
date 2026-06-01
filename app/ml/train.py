@@ -54,6 +54,10 @@ class RawTensorSplit:
     blue_win: torch.Tensor
     champion_id: torch.Tensor | None = None
     build_id: torch.Tensor | None = None
+    identity_semantic: torch.Tensor | None = None
+    identity_profile: torch.Tensor | None = None
+    m1v1_detail: torch.Tensor | None = None
+    s2vx_detail: torch.Tensor | None = None
 
 
 def resolve_device(device: str) -> str:
@@ -80,11 +84,13 @@ def _limit_split(split: SplitData, max_games: int | None) -> SplitData:
         p1_cnt=split.p1_cnt[:n],
         m1v1_cnt=split.m1v1_cnt[:n],
         s2vx_cnt=split.s2vx_cnt[:n],
-        m1v1_eff_n=split.m1v1_eff_n[:n] if split.m1v1_eff_n is not None else None,
-        s2vx_eff_n=split.s2vx_eff_n[:n] if split.s2vx_eff_n is not None else None,
         blue_win=split.blue_win[:n],
         champion_id=split.champion_id[:n] if split.champion_id is not None else None,
         build_id=split.build_id[:n] if split.build_id is not None else None,
+        identity_semantic=split.identity_semantic[:n] if split.identity_semantic is not None else None,
+        identity_profile=split.identity_profile[:n] if split.identity_profile is not None else None,
+        m1v1_detail=split.m1v1_detail[:n] if split.m1v1_detail is not None else None,
+        s2vx_detail=split.s2vx_detail[:n] if split.s2vx_detail is not None else None,
     )
 
 
@@ -198,6 +204,26 @@ def _cache_raw_tensor_split(
             if split.build_id is not None
             else None
         ),
+        identity_semantic=(
+            torch.tensor(split.identity_semantic, dtype=torch.float32, device=device)
+            if split.identity_semantic is not None
+            else None
+        ),
+        identity_profile=(
+            torch.tensor(split.identity_profile, dtype=torch.float32, device=device)
+            if split.identity_profile is not None
+            else None
+        ),
+        m1v1_detail=(
+            torch.tensor(split.m1v1_detail, dtype=torch.float32, device=device)
+            if split.m1v1_detail is not None
+            else None
+        ),
+        s2vx_detail=(
+            torch.tensor(split.s2vx_detail, dtype=torch.float32, device=device)
+            if split.s2vx_detail is not None
+            else None
+        ),
     )
     if device == "cuda":
         torch.cuda.synchronize()
@@ -227,6 +253,10 @@ def _raw_batch(raw: RawTensorSplit, rows: slice | torch.Tensor) -> RawTensorSpli
         blue_win=take(raw.blue_win),
         champion_id=take(raw.champion_id) if raw.champion_id is not None else None,
         build_id=take(raw.build_id) if raw.build_id is not None else None,
+        identity_semantic=take(raw.identity_semantic) if raw.identity_semantic is not None else None,
+        identity_profile=take(raw.identity_profile) if raw.identity_profile is not None else None,
+        m1v1_detail=take(raw.m1v1_detail) if raw.m1v1_detail is not None else None,
+        s2vx_detail=take(raw.s2vx_detail) if raw.s2vx_detail is not None else None,
     )
 
 
@@ -242,6 +272,73 @@ def _evaluate_predictions(scores: np.ndarray, split: SplitData) -> dict[str, flo
         "nll": _nll(scores, targets),
         "ece": _ece(scores, targets),
         "brier": float(np.mean((scores - targets) ** 2)),
+    }
+
+
+SUPPORT_BUCKETS: tuple[tuple[str, float, float], ...] = (
+    ("zero", 0.0, 0.0),
+    ("low_1_4", 1.0, 4.0),
+    ("medium_5_49", 5.0, 49.0),
+    ("high_50_plus", 50.0, math.inf),
+)
+
+
+def _metric_values(scores: np.ndarray, targets: np.ndarray) -> dict[str, float | int]:
+    if targets.size == 0:
+        return {"n": 0, "auc": float("nan"), "nll": float("nan"),
+                "ece": float("nan"), "brier": float("nan")}
+    return {
+        "n": int(targets.size),
+        "auc": _binary_auc(scores, targets),
+        "nll": _nll(scores, targets),
+        "ece": _ece(scores, targets),
+        "brier": float(np.mean((scores - targets) ** 2)),
+    }
+
+
+def _min_non_missing_support(counts: np.ndarray) -> np.ndarray:
+    positive = np.where(counts > 0.0, counts, np.inf)
+    out = positive.min(axis=1)
+    return np.where(np.isinf(out), 0.0, out)
+
+
+def _bucket_rows(
+    values: np.ndarray,
+    scores: np.ndarray,
+    targets: np.ndarray,
+) -> dict[str, dict[str, float | int]]:
+    rows: dict[str, dict[str, float | int]] = {}
+    for bucket, lo, hi in SUPPORT_BUCKETS:
+        if math.isinf(hi):
+            mask = values >= lo
+        elif lo == hi:
+            mask = values == lo
+        else:
+            mask = (values >= lo) & (values <= hi)
+        bucket_scores = scores[mask]
+        bucket_targets = targets[mask]
+        row = _metric_values(bucket_scores, bucket_targets)
+        row["mean_support"] = float(np.mean(values[mask])) if np.any(mask) else float("nan")
+        rows[bucket] = row
+    return rows
+
+
+def _support_bucket_metrics(scores: np.ndarray, split: SplitData) -> dict[str, object]:
+    targets = split.blue_win.astype(np.float64, copy=False)
+    onev1 = split.m1v1_cnt.astype(np.float64, copy=False)
+    twovx = split.s2vx_cnt.astype(np.float64, copy=False)
+    combined = np.concatenate([onev1, twovx], axis=1)
+    return {
+        "overall": _metric_values(scores, targets),
+        "1v1_min_support_bucket": _bucket_rows(_min_non_missing_support(onev1), scores, targets),
+        "1v1_mean_support_bucket": _bucket_rows(onev1.mean(axis=1), scores, targets),
+        "2vx_min_support_bucket": _bucket_rows(_min_non_missing_support(twovx), scores, targets),
+        "2vx_mean_support_bucket": _bucket_rows(twovx.mean(axis=1), scores, targets),
+        "combined_sparse_relationship_bucket": _bucket_rows(
+            _min_non_missing_support(combined),
+            scores,
+            targets,
+        ),
     }
 
 
@@ -280,6 +377,32 @@ def _checkpoint_score(
     )
 
 
+def _hgnn_config_from_meta(meta: dict[str, Any]) -> HGNNConfig:
+    classification = meta.get("classification", {}) if isinstance(meta, dict) else {}
+    # Empirical classification-feature selection (see documentation/README and
+    # the central-band analysis): the dense semantic identity is redundant with
+    # the learned champion embedding, and the 1v1 matchup detail is redundant
+    # with the matchup win-rate prior -- both only add overfitting capacity
+    # (train AUC 0.60->0.63, test 0.5925->0.5875). Only the 2vX team-synergy
+    # detail carries a small residual signal, concentrated in the central band
+    # (coin-flip matchups), so the win predictor consumes only that, via the
+    # prior-gated antisymmetric detail term. The cache still builds all three
+    # arrays; flip these dims to re-enable a pathway for experiments.
+    # The cross-team matchup-profile interaction adds the enemy-composition
+    # conditioning axis the win-rate prior is structurally blind to (e.g. an
+    # armor-stacking identity vs a physical-damage enemy team). It is a tiny,
+    # antisymmetric, zero-init term, so it is enabled by default.
+    return HGNNConfig(
+        n_champions=int(meta["n_champions"]),
+        n_builds=int(meta["n_builds"]),
+        build_vocab=tuple(meta["build_vocab"]),
+        identity_semantic_dim=0,
+        identity_profile_dim=int(classification.get("identity_profile_dim", 5)),
+        m1v1_detail_dim=0,
+        s2vx_detail_dim=int(classification.get("s2vx_detail_dim", 16)),
+    )
+
+
 def _hgnn_inputs_from_raw(
     raw: RawTensorSplit,
     *,
@@ -298,6 +421,10 @@ def _hgnn_inputs_from_raw(
         m1v1_cnt=raw.m1v1_cnt,
         s2vx_cnt=raw.s2vx_cnt,
         strength=strength,
+        identity_semantic=raw.identity_semantic,
+        identity_profile=raw.identity_profile,
+        m1v1_detail=raw.m1v1_detail,
+        s2vx_detail=raw.s2vx_detail,
         device=device,
     )
 
@@ -348,11 +475,7 @@ def train(
     }
 
     meta = identity_meta(dataset_cfg)
-    model_config = HGNNConfig(
-        n_champions=int(meta["n_champions"]),
-        n_builds=int(meta["n_builds"]),
-        build_vocab=tuple(meta["build_vocab"]),
-    )
+    model_config = _hgnn_config_from_meta(meta)
     model = HGNNWinModel(model_config).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -493,6 +616,10 @@ def train(
             predictions[split_name],
             splits[split_name].blue_win,
             best_threshold,
+        )
+        split_metrics[split_name]["support_buckets"] = _support_bucket_metrics(
+            predictions[split_name],
+            splits[split_name],
         )
     metrics = {
         "model_type": "hgnn",

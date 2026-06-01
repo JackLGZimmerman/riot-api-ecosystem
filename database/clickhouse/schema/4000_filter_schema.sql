@@ -7,7 +7,7 @@
 -- Stage 1: cheap per-participant / per-team / per-game filters scanned over
 --          latest-season f14_long_games.
 -- Stage 2: build label computation + low-build-value detection
---          (highest_value < 1.0) over stage-1-clean games only.
+--          (highest_value < 0.5) over stage-1-clean games only.
 --
 -- Run with clickhouse-client --multiquery before 4000_filter_build.sql.
 
@@ -85,7 +85,15 @@ CREATE TABLE game_data.filter_stg_participant_flags
     low_minions_killed UInt8,
     team_non_utility_avg_cs_per_min_gt_1_0_below_enemy UInt8,
     team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy UInt8,
-    unknown_teamposition UInt8
+    unknown_teamposition UInt8,
+    game_ruining_behavior UInt8,
+    was_severe_transgressor UInt8,
+    caused_game_end_from_ignb_surrender UInt8,
+    team_ignb_surrendered UInt8,
+    was_premade_with_ignb_game_end_causer UInt8,
+    was_premade_with_severe_transgressor UInt8,
+    zero_spell_casts_loss UInt8,
+    zero_item_purchases_loss UInt8
 )
 ENGINE = MergeTree
 ORDER BY (matchid, teamid, participantid);
@@ -134,6 +142,14 @@ CREATE TABLE game_data.filter_stg_game_flags
     team_non_utility_avg_cs_per_min_gt_1_0_below_enemy UInt8,
     team_non_utility_damage_to_champions_ratio_lt_1_2_vs_enemy UInt8,
     unknown_teamposition UInt8,
+    game_ruining_behavior UInt8,
+    was_severe_transgressor UInt8,
+    caused_game_end_from_ignb_surrender UInt8,
+    team_ignb_surrendered UInt8,
+    was_premade_with_ignb_game_end_causer UInt8,
+    was_premade_with_severe_transgressor UInt8,
+    zero_spell_casts_loss UInt8,
+    zero_item_purchases_loss UInt8,
     low_build_value UInt8,
     any_filter_triggered UInt8
 )

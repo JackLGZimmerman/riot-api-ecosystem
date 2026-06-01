@@ -21,18 +21,17 @@ import numpy as np
 
 from app.classification.embeddings import embed
 from app.classification.embeddings.config import (
-    PHASES,
     SPECIALISTS,
     EmbeddingConfig,
     IdentityType,
     SpecialistSpec,
 )
 from app.classification.embeddings.matrices import build_all_matrices
-from app.classification.embeddings.posteriors import apply_hierarchical_shrinkage
 from app.classification.embeddings.report import _load_champion_names
 from app.classification.embeddings.similarity import median_pair_similarity
-from app.classification.embeddings.specialists import group_specialist_by_phase
+from app.classification.embeddings.specialists import group_specialist
 from app.classification.embeddings.tune import load_raw_cached
+from app.core.utils.smoothing import apply_hierarchical_shrinkage
 
 
 class FeaturePair(NamedTuple):
@@ -55,7 +54,6 @@ def inspect_specialist(
     keep_variance: float | None = None,
     threshold: float | None = None,
     min_median_sim: float | None = None,
-    phase: str = PHASES[0],
     champion_limit: int = 10,
 ) -> None:
     spec = specialist_spec(name)
@@ -63,40 +61,38 @@ def inspect_specialist(
     kv = spec.projection_keep_variance if keep_variance is None else keep_variance
     t = spec.similarity_threshold if threshold is None else threshold
     min_median = spec.min_median_sim if min_median_sim is None else min_median_sim
-    if phase not in PHASES:
-        raise ValueError(f"phase must be one of {PHASES}, got {phase!r}")
 
     cfg = EmbeddingConfig(feature_set=resolved_features, projection_keep_variance=kv)
     smoothed = apply_hierarchical_shrinkage(load_raw_cached(), EmbeddingConfig())
     matrix = build_all_matrices(smoothed, cfg)[IdentityType.BASELINE]
     baseline = embed.embed_level(matrix, cfg)
-    grouping_spec = SpecialistSpec(
-        name=spec.name,
-        feature_set=resolved_features,
-        similarity_threshold=t,
-        projection_keep_variance=kv,
-        min_median_sim=min_median,
+    grouping = group_specialist(
+        baseline,
+        SpecialistSpec(
+            name=spec.name,
+            feature_set=resolved_features,
+            similarity_threshold=t,
+            projection_keep_variance=kv,
+            min_median_sim=min_median,
+        ),
     )
-    groupings = group_specialist_by_phase(baseline, grouping_spec)
-    grouping = next(grouping for grouping in groupings if grouping.phase == phase)
     sim = grouping.sim
     kept = grouping.kept
     dropped = grouping.dropped
 
     names = _load_champion_names()
     columns = {column: i for i, column in enumerate(baseline.key_columns)}
-    all_phase_x = matrix.matrix.reshape(-1, matrix.matrix.shape[-1])
-    x = matrix.matrix[:, grouping.phase_index, :]
+    x = matrix.matrix
     mu = x.mean(axis=0)
     sd = np.where(x.std(axis=0) > 1e-8, x.std(axis=0), 1.0)
 
     print(
-        f"{name} phase={phase} kv={kv:.2f} t={t:.2f} "
+        f"{name} kv={kv:.2f} t={t:.2f} "
         f"min_median={min_median:.2f} kept={len(kept)} "
         f"coverage={sum(len(g) for g in kept) / baseline.embeddings.shape[0]:.3f} "
         f"dropped={len(dropped)} largest={max(map(len, kept), default=0)}"
     )
-    _print_pca_axes(all_phase_x, matrix.feature_names, kv)
+    _print_pca_axes(x, matrix.feature_names, kv)
 
     for gid, group in enumerate(sorted(kept, key=len, reverse=True), start=1):
         arr = np.asarray(group, dtype=np.int64)
@@ -153,7 +149,6 @@ def main() -> None:
         keep_variance=args.kv,
         threshold=args.t,
         min_median_sim=args.min_median,
-        phase=args.phase,
         champion_limit=args.champion_limit,
     )
 
@@ -164,7 +159,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--kv", type=float)
     parser.add_argument("--t", type=float)
     parser.add_argument("--min-median", type=float)
-    parser.add_argument("--phase", choices=PHASES, default=PHASES[0])
     parser.add_argument("--champion-limit", type=int, default=10)
     parser.add_argument("--features", nargs="*")
     parser.add_argument(
@@ -273,43 +267,39 @@ def _print_replacement_comparison(
     bottom_tail_rows: list[tuple[float, float, float]] = []
     top_jaccards: list[float] = []
     bottom_jaccards: list[float] = []
-    for phase_index, phase in enumerate(PHASES):
-        left = _phase_feature(matrix, feature_index, pair.left, phase_index)
-        right = _phase_feature(matrix, feature_index, pair.right, phase_index)
-        top_left, bottom_left = _top_bottom_indices(left, topn)
-        top_right, bottom_right = _top_bottom_indices(right, topn)
-        top_j = _jaccard(top_left, top_right)
-        bottom_j = _jaccard(bottom_left, bottom_right)
-        top_jaccards.append(top_j)
-        bottom_jaccards.append(bottom_j)
+    left = _feature(matrix, feature_index, pair.left)
+    right = _feature(matrix, feature_index, pair.right)
+    top_left, bottom_left = _top_bottom_indices(left, topn)
+    top_right, bottom_right = _top_bottom_indices(right, topn)
+    top_j = _jaccard(top_left, top_right)
+    bottom_j = _jaccard(bottom_left, bottom_right)
+    top_jaccards.append(top_j)
+    bottom_jaccards.append(bottom_j)
+    print(f"  top{topn}_j={top_j:.3f} bottom{topn}_j={bottom_j:.3f}")
+    for quantile in tail_quantiles:
+        mask = left >= np.quantile(left, quantile)
+        pearson = _correlation(left[mask], right[mask], spearman=False)
+        spearman = _correlation(left[mask], right[mask], spearman=True)
+        tail_rows.append((quantile, pearson, spearman))
         print(
-            f"  {phase:<8} top{topn}_j={top_j:.3f} "
-            f"bottom{topn}_j={bottom_j:.3f}"
+            f"    top q={quantile:.2f} n={int(mask.sum())} "
+            f"pearson={pearson:+.3f} spearman={spearman:+.3f}"
         )
-        for quantile in tail_quantiles:
-            mask = left >= np.quantile(left, quantile)
-            pearson = _correlation(left[mask], right[mask], spearman=False)
-            spearman = _correlation(left[mask], right[mask], spearman=True)
-            tail_rows.append((quantile, pearson, spearman))
-            print(
-                f"    top q={quantile:.2f} n={int(mask.sum())} "
-                f"pearson={pearson:+.3f} spearman={spearman:+.3f}"
+        if include_bottom_tails:
+            bottom_q = 1.0 - quantile
+            bottom_mask = left <= np.quantile(left, bottom_q)
+            bottom_pearson = _correlation(
+                left[bottom_mask], right[bottom_mask], spearman=False
             )
-            if include_bottom_tails:
-                bottom_q = 1.0 - quantile
-                bottom_mask = left <= np.quantile(left, bottom_q)
-                bottom_pearson = _correlation(
-                    left[bottom_mask], right[bottom_mask], spearman=False
-                )
-                bottom_spearman = _correlation(
-                    left[bottom_mask], right[bottom_mask], spearman=True
-                )
-                bottom_tail_rows.append((bottom_q, bottom_pearson, bottom_spearman))
-                print(
-                    f"    bot q={bottom_q:.2f} n={int(bottom_mask.sum())} "
-                    f"pearson={bottom_pearson:+.3f} "
-                    f"spearman={bottom_spearman:+.3f}"
-                )
+            bottom_spearman = _correlation(
+                left[bottom_mask], right[bottom_mask], spearman=True
+            )
+            bottom_tail_rows.append((bottom_q, bottom_pearson, bottom_spearman))
+            print(
+                f"    bot q={bottom_q:.2f} n={int(bottom_mask.sum())} "
+                f"pearson={bottom_pearson:+.3f} "
+                f"spearman={bottom_spearman:+.3f}"
+            )
     _print_replacement_summary(
         top_jaccards=top_jaccards,
         bottom_jaccards=bottom_jaccards,
@@ -352,30 +342,28 @@ def _print_denominator_check(
     pearsons: list[float] = []
     spearmans: list[float] = []
     print(f"\n{pair.left} vs {pair.right}")
-    for phase_index, phase in enumerate(PHASES):
-        left = _phase_feature(matrix, feature_index, pair.left, phase_index)
-        right = _phase_feature(matrix, feature_index, pair.right, phase_index)
-        pearson = _correlation(left, right, spearman=False)
-        spearman = _correlation(left, right, spearman=True)
-        pearsons.append(pearson)
-        spearmans.append(spearman)
-        print(f"  {phase:<8} pearson={pearson:+.3f} spearman={spearman:+.3f}")
+    left = _feature(matrix, feature_index, pair.left)
+    right = _feature(matrix, feature_index, pair.right)
+    pearson = _correlation(left, right, spearman=False)
+    spearman = _correlation(left, right, spearman=True)
+    pearsons.append(pearson)
+    spearmans.append(spearman)
+    print(f"  pearson={pearson:+.3f} spearman={spearman:+.3f}")
     print(
         f"  summary mean_pearson={np.nanmean(pearsons):+.3f} "
         f"mean_spearman={np.nanmean(spearmans):+.3f}"
     )
 
 
-def _phase_feature(
+def _feature(
     matrix,
     feature_index: dict[str, int],
     feature: str,
-    phase_index: int,
 ) -> np.ndarray:
     if feature not in feature_index:
         available = ", ".join(feature_index)
         raise ValueError(f"feature {feature!r} not available; loaded: {available}")
-    return matrix.matrix[:, phase_index, feature_index[feature]]
+    return matrix.matrix[:, feature_index[feature]]
 
 
 def _dedupe_preserve_order(values: tuple[str, ...]) -> tuple[str, ...]:

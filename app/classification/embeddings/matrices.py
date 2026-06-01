@@ -1,8 +1,7 @@
-"""Assemble per-identity temporal feature matrices from smoothed LevelRows.
+"""Assemble per-identity feature matrices from smoothed LevelRows.
 
-Identities with fewer than `len(PHASES)` phase rows are dropped. Each feature
-column is signed-log1p compressed then standardised with median/MAD across all
-identity-phase rows. The phase axis is preserved for downstream grouping.
+Each feature column is signed-log1p compressed then standardised with median/MAD
+across all identity rows.
 """
 
 from __future__ import annotations
@@ -16,8 +15,6 @@ import numpy as np
 from app.classification.embeddings.config import (
     ALL_METRICS,
     DERIVED_METRIC_FUNCS,
-    PHASE_INDEX,
-    PHASES,
     EmbeddingConfig,
     IdentityType,
 )
@@ -31,9 +28,9 @@ class LevelMatrix:
     level: IdentityType
     keys: list[tuple]  # length n; one tuple per identity
     key_columns: tuple[str, ...]
-    matrix: np.ndarray  # (n, phases, features) float32, standardised
+    matrix: np.ndarray  # (n, features) float32, standardised
     feature_names: tuple[str, ...]  # names along the feature axis
-    matchups: np.ndarray  # (n, N) float32
+    matchups: np.ndarray  # (n,) float32
 
 
 def _identity_key_strings(rows: LevelRows, key_cols: tuple[str, ...]) -> np.ndarray:
@@ -108,44 +105,31 @@ def build_level_matrix(
         return None
     cfg = cfg or EmbeddingConfig()
     key_cols = rows.key_columns
-    n_phases = len(PHASES)
 
     identity_strs = _identity_key_strings(rows, key_cols)
-    _, inverse, counts = np.unique(
-        identity_strs, return_inverse=True, return_counts=True
+    unique_keys, first_idx, counts = np.unique(
+        identity_strs, return_index=True, return_counts=True
     )
-    complete_mask = counts[inverse] == n_phases
-    if not complete_mask.any():
+    if unique_keys.size == 0:
         return None
+    if np.any(counts > 1):
+        logger.warning(
+            "Level %s has %d duplicate identity rows; keeping first occurrence",
+            rows.level.value,
+            int(np.sum(counts > 1)),
+        )
 
-    keep_idx = np.where(complete_mask)[0]
-    phase_arr = rows.columns["phase"]
-    phase_idx = np.fromiter(
-        (PHASE_INDEX[str(phase_arr[i])] for i in keep_idx),
-        dtype=np.int64,
-        count=keep_idx.size,
-    )
-    sorter = np.lexsort((phase_idx, inverse[keep_idx]))
-    sorted_row_idx = keep_idx[sorter]
-    n_identities = sorted_row_idx.size // n_phases
+    sorted_row_idx = first_idx[np.argsort(unique_keys)]
 
     feature_cols = _resolve_feature_values(rows, cfg.feature_set, sorted_row_idx)
-    flat = np.stack(feature_cols, axis=-1)
-    n_features = len(cfg.feature_set)
-    base_matrix = flat.reshape(n_identities, n_phases, n_features)
-    matchups = (
-        rows.columns["matchups"][sorted_row_idx]
-        .astype(np.float32)
-        .reshape(n_identities, n_phases)
-    )
+    base_matrix = np.stack(feature_cols, axis=-1)
+    matchups = rows.columns["matchups"][sorted_row_idx].astype(np.float32)
 
-    raw = base_matrix.reshape(-1, base_matrix.shape[-1])
-    standardised = _standardise_columns(raw).reshape(base_matrix.shape)
+    standardised = _standardise_columns(base_matrix)
     matrix = standardised.astype(np.float32)
     feature_names = tuple(cfg.feature_set)
 
-    first_rows = sorted_row_idx[::n_phases]
-    keys = [tuple(rows.columns[c][i] for c in key_cols) for i in first_rows.tolist()]
+    keys = [tuple(rows.columns[c][i] for c in key_cols) for i in sorted_row_idx.tolist()]
     return LevelMatrix(
         level=rows.level,
         keys=keys,
@@ -170,7 +154,7 @@ def build_all_matrices(
             )
             continue
         logger.info(
-            "Matrix %s: n=%d, phases=%d, features=%d",
+            "Matrix %s: n=%d, features=%d",
             level.value,
             *lm.matrix.shape,
         )

@@ -5,13 +5,17 @@ As of 2026-05-31, `HGNNWinModel` has one production path:
 ```text
 cache/prior arrays
 -> posterior and support features
--> champion/role/build identity + 1vx node prior
+-> champion/role/build identity + 1vX node prior
 -> blue/red team readout
--> direct 1v1/2vx residual head
+-> direct 1v1/2vX residual head
 -> direct prior shortcut
 -> final logit
 -> sigmoid = P(blue wins)
 ```
+
+The direct path was selected over the typed relation encoder because the full
+same-split run showed it matched relation AUC and produced better NLL, Brier,
+and ECE.
 
 ## Input Contract
 
@@ -26,25 +30,26 @@ The model consumes these `npy-memmap-v18` cache arrays:
 
 | Array | Shape | Used as |
 | --- | --- | --- |
-| `win_rate.npy` | `[games, 10]` | smoothed `1vx` player priors |
+| `win_rate.npy` | `[games, 10]` | smoothed `1vX` player priors |
 | `matchup_1v1.npy` | `[games, 25]` | ordered blue-vs-red matchup priors |
 | `synergy_2vx.npy` | `[games, 20]` | 10 blue and 10 red same-team pair priors |
-| `p1_cnt.npy` | `[games, 10]` | raw `1vx` support |
+| `p1_cnt.npy` | `[games, 10]` | raw `1vX` support |
 | `m1v1_cnt.npy` | `[games, 25]` | raw build-level `1v1` support |
-| `s2vx_cnt.npy` | `[games, 20]` | raw build-level `2vx` support |
+| `s2vx_cnt.npy` | `[games, 20]` | raw build-level `2vX` support |
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
 | `blue_win.npy` | `[games]` | target label |
 
-`build_hgnn_inputs()` is shared by training and runtime prediction.
+`m1v1_eff_n.npy` and `s2vx_eff_n.npy` may exist in the cache as nested-pooling
+metadata, but the production direct model does not consume them.
 
 ## Posterior And Support Features
 
-`1vx` rates are treated as posterior means for node initialization:
+`1vX` rates are treated as posterior means for node initialization:
 
 ```text
 mu = clamp(rate, 0, 1)
-1vx variance = mu * (1 - mu) / (p1_cnt + confidence_strength + 1)
+1vX variance = mu * (1 - mu) / (p1_cnt + confidence_strength + 1)
 ```
 
 `confidence_strength` is saved with the artifact and is currently `30.0`.
@@ -55,6 +60,7 @@ Relationship support enters the direct heads through raw build-level features:
 
 ```text
 confidence = raw_count / (raw_count + confidence_strength)
+log_count = log1p(raw_count)
 missing = raw_count <= 0
 ```
 
@@ -64,28 +70,28 @@ The model builds logit-space residuals for each relationship prior:
 
 ```text
 joint = logit(relationship_mu)
-expected = logit(generic baseline from 1vx priors)
+expected = logit(generic baseline from 1vX priors)
 delta = joint - expected
 ```
 
 For `1v1`, expected probability is:
 
 ```text
-0.5 + (blue_1vx - red_1vx) / 2
+0.5 + (blue_1vX - red_1vX) / 2
 ```
 
-For `2vx`, expected probability is the average of the two same-team players'
-`1vx` priors.
+For `2vX`, expected probability is the average of the two same-team players'
+`1vX` priors.
 
 The flattened direct relationship order is:
 
 ```text
 25 blue-vs-red 1v1 deltas
-10 blue 2vx deltas
-10 negated red 2vx deltas
+10 blue 2vX deltas
+10 negated red 2vX deltas
 ```
 
-Red `2vx` deltas are negated so every relationship feature points in the
+Red `2vX` deltas are negated so every direct relationship feature points in the
 blue-win direction.
 
 ## Node Initialization
@@ -100,17 +106,17 @@ identity =
 ```
 
 The identity vector is layer-normalized, concatenated with the uncertainty-gated
-`1vx` posterior embedding, then projected to the node dimension:
+`1vX` posterior embedding, then projected to the node dimension:
 
 ```text
 identity:      [B, 10, 96]
-1vx phi:       [B, 10, 64]
+1vX phi:       [B, 10, 64]
 concat:        [B, 10, 160]
 node_init MLP: 160 -> 96 -> 96
 LayerNorm:     [B, 10, 96]
 ```
 
-`PhiEncoder` for `1vx` uses:
+`PhiEncoder` for `1vX` uses:
 
 ```text
 value inputs = [logit(mu), variance, confidence, log_count, missing]
@@ -156,8 +162,8 @@ The main head receives:
 The prior shortcut is a direct linear logit path:
 
 ```text
-blue 1vx logits          5
-red 1vx logits           5
+blue 1vX logits          5
+red 1vX logits           5
 blue - red role logits   5
 relationship deltas     45
 deltas * confidence     45
@@ -169,12 +175,48 @@ prior_shortcut: 105 -> 1
 Final prediction:
 
 ```text
-final_logit = main_head_logit + prior_shortcut_logit
+final_logit = main_head_logit + prior_shortcut_logit + detail_logit + profile_logit
 P(blue wins) = sigmoid(final_logit)
 ```
 
-Default source model size with `n_champions=951` and `n_builds=11` is `330,315`
+Default source model size with `n_champions=951` and `n_builds=11` is `330,521`
 parameters.
+
+## Classification-Feature Integration
+
+The classification pipeline can supply three extra per-game arrays:
+`identity_semantic` (`[10, 64]` dense identity descriptors), `m1v1_detail`
+(`[25, 16]` historic 1v1 pressure) and `s2vx_detail` (`[20, 16]` historic 2vX
+synergy pressure). A game-level residual study (detail vs win-rate prior,
+bucketed by prior centrality) showed:
+
+- **1v1 matchup detail is redundant** with the matchup win-rate prior — zero
+  residual correlation with the outcome, even in the central band. The
+  win-rate prior already encodes how a matchup resolves.
+- **The dense semantic identity is redundant** with the learned champion
+  embedding.
+- **2vX synergy detail carries a small residual signal**, concentrated where
+  the win-rate prior is a coin-flip (the central band). Out-of-sample it lifts
+  ranking by `+0.004` AUC at `|p-0.5|<0.03` and `+0.008` at `|p-0.5|<0.02`.
+
+Feeding these as wide dense heads let the model memorise compositions
+(train AUC `0.60 -> 0.63`, test `0.5925 -> 0.5875`). The production model
+therefore consumes **only the 2vX synergy detail**, through a minimal,
+overfitting-resistant term:
+
+```text
+team_diff = mean(blue synergy detail) - mean(red synergy detail)   # [B, 16]
+detail_logit_raw = Linear(16 -> 1, no bias)(team_diff)             # antisymmetric
+centrality = 4 * p * (1 - p)        # p = sigmoid(pre-detail logit), detached
+detail_logit = detail_gate * centrality * detail_logit_raw         # gate init 0
+```
+
+`team_diff` flips sign under team swap, so the term is exactly antisymmetric
+(no capacity spent learning the mirror). `centrality` restricts the nudge to
+coin-flip matchups where the signal lives; the zero-init `detail_gate` makes the
+whole term opt-in on top of the win-rate model. `_hgnn_config_from_meta` sets
+`identity_semantic_dim=0` and `m1v1_detail_dim=0`; flip them to re-enable a
+pathway for experiments.
 
 ## Training
 
@@ -195,8 +237,7 @@ with:
 | checkpoint min delta | 0.0005 |
 
 Each batch is trained twice: original blue/red order with label `y`, and a
-team-swapped mirror with label `1 - y`. The swap flips the `1v1` matrix into the
-new blue perspective and negates signed relationship logits where needed.
+team-swapped mirror with label `1 - y`.
 
 ```text
 loss = 0.5 * BCE(original_logit, y)
@@ -207,9 +248,14 @@ This encourages `P(A beats B) ~= 1 - P(B beats A)`.
 
 Training saves `structured_winrate_model.pt` with `model_type`, `model_config`,
 `confidence_strength`, and `state_dict`. Legacy artifacts may contain removed
-config/state keys; `load_hgnn_model()` keeps only the current config keys and
-loads matching weights. Retrain the artifact to make all saved weights match the
-current model exactly.
+config/state keys; `load_hgnn_model()` keeps only current config keys and loads
+matching weights.
+
+The current production artifact (synergy-detail term, current cache) has test
+accuracy `0.5678`, threshold accuracy `0.5708`, AUC `0.5921`, NLL `0.6779`,
+Brier `0.2425`, and ECE `0.0233`, with a train-test AUC gap of `0.008` (no
+overfitting). Absolute numbers are not comparable to runs on earlier caches:
+the current filtered dataset is smaller (1.15M vs 1.56M train games).
 
 ## Runtime Prediction
 
@@ -233,4 +279,3 @@ champions + roles + build ids
 Unknown champion/build ids map to the final embedding row. If
 `use_final_build_labels=False`, every build lookup is forced to
 `draft_unknown_build_label`.
-

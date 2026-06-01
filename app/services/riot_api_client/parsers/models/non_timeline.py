@@ -299,6 +299,7 @@ class Participant(BaseModel):
     playerAugment6: NonNegativeInt | None = None
     PlayerBehavior: PlayerBehaviorData | None = None  # Schema drift, nullable nested participant behavior payload.
     playerSubteamId: NonNegativeInt
+    positionAssignedByMatchmaking: str | None = None
     profileIcon: NonNegativeInt
     pushPings: NonNegativeInt
     puuid: str
@@ -308,6 +309,7 @@ class Participant(BaseModel):
     riotIdTagline: str
     role: str | None
     roleBoundItem: int | None = None  # Schema drift, likely latest-season field behavior.
+    selectedRolePreferences: str | None = None
     bountyLevel: int | None = None  # Schema drift, likely latest-season addition.
     sightWardsBoughtInGame: NonNegativeInt
     spell1Casts: NonNegativeInt

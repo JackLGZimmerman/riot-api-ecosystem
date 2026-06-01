@@ -38,7 +38,7 @@ def _sample_mask(
         weights = weights.mean(axis=1)
     if weights.shape != (n,):
         raise ValueError(
-            f"sample_weight must have shape ({n},) or ({n}, phases), got {weights.shape}"
+            f"sample_weight must have shape ({n},) or a 2-D reducible array, got {weights.shape}"
         )
     return weights >= min_sample_weight
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -15,45 +15,121 @@ EMBEDDINGS_CACHE_DIR = (
     PROJECT_ROOT / "app" / "classification" / "data" / "embeddings" / "cache"
 )
 SPECIALIST_REPORT_PATH = EMBEDDINGS_CACHE_DIR.parent / "specialist_report.html"
+DENSE_IDENTITY_CACHE_PATH = EMBEDDINGS_CACHE_DIR / "identity_semantic_embedding.npz"
+IDENTITY_PROFILE_CACHE_PATH = EMBEDDINGS_CACHE_DIR / "identity_profile_embedding.npz"
+RELATIONSHIP_DETAIL_CACHE_DIR = EMBEDDINGS_CACHE_DIR / "relationship_details"
 
-SOURCE_TABLE = "game_data_filtered.synergy_1vx_temporal"
+PARTICIPANT_STATS_TABLE = "game_data_filtered.participant_stats"
+ITEM_VALUE_TOTALS_TABLE = "game_data_filtered.participant_item_value_totals"
+ML_GAME_SPLIT_TABLE = "game_data_filtered.ml_game_split"
+TIMELINE_STATS_TABLE = "game_data.tl_participant_stats"
+PARTICIPANT_CHALLENGES_TABLE = "game_data.participant_challenges"
 
-PHASES: tuple[str, ...] = ("early_mid", "mid", "mid_late", "late")
-PHASE_INDEX: dict[str, int] = {p: i for i, p in enumerate(PHASES)}
+DENSE_IDENTITY_DIM = 64
 
-BUILD_GROUPS: dict[str, tuple[str, ...]] = {
-    "ap": ("ability_power", "ap_off_tank"),
-    "ad": ("attack_damage", "ad_off_tank"),
-    "tank": ("ar_tank", "mr_tank"),
-    "utility": ("utility_enchanter", "utility_protection"),
-}
-SIBLING_BUILD_PAIRS: tuple[tuple[str, str], ...] = tuple(
-    (labels[0], labels[1]) for labels in BUILD_GROUPS.values()
+TIMELINE_CHECKPOINT_MINUTES: tuple[int, ...] = (3, 4, 5, 7, 10, 12, 15, 20, 22, 25)
+TIMELINE_SLOPE_INTERVALS: tuple[tuple[int, int], ...] = (
+    (3, 5),
+    (5, 10),
+    (10, 15),
+    (15, 20),
+    (20, 25),
 )
-SIBLING_BUILD_BY_LABEL: dict[str, str] = {}
-for _left, _right in SIBLING_BUILD_PAIRS:
-    SIBLING_BUILD_BY_LABEL.update({_left: _right, _right: _left})
+TIMELINE_SOURCE_METRICS: tuple[tuple[str, str], ...] = (
+    ("gold", "totalgold"),
+    ("xp", "xp"),
+    ("level", "level"),
+    ("cs", "minionskilled + jungleminionskilled"),
+    ("champion_damage", "totaldamagedonetochampions"),
+    ("damage_taken", "totaldamagetaken"),
+    ("health", "health"),
+    ("healthmax", "healthmax"),
+    ("armor", "armor"),
+    ("magicresist", "magicresist"),
+    ("attackdamage", "attackdamage"),
+    ("abilitypower", "abilitypower"),
+    ("attackspeed", "attackspeed"),
+)
+TIMELINE_TRAJECTORY_METRICS: tuple[str, ...] = (
+    "gold",
+    "xp",
+    "level",
+    "cs",
+    "champion_damage",
+    "damage_taken",
+)
 
+TIMELINE_CHECKPOINT_METRICS: tuple[str, ...] = tuple(
+    f"tl_{minute}_{metric}"
+    for minute in TIMELINE_CHECKPOINT_MINUTES
+    for metric, _ in TIMELINE_SOURCE_METRICS
+)
+TIMELINE_CHECKPOINT_MISSING_METRICS: tuple[str, ...] = tuple(
+    f"tl_{minute}_missing" for minute in TIMELINE_CHECKPOINT_MINUTES
+)
 
-def _sql_strings(values: Iterable[str]) -> str:
-    return ", ".join(f"'{value}'" for value in values)
+CHALLENGE_AVG_METRICS: tuple[str, ...] = (
+    "challenge_solokills",
+    "challenge_quicksolokills",
+    "challenge_maxcsadvantageonlaneopponent",
+    "challenge_maxlevelleadlaneopponent",
+    "challenge_damageperminute",
+    "challenge_goldperminute",
+    "challenge_teamdamagepercentage",
+    "challenge_earlylaningphasegoldexpadvantage",
+    "challenge_laningphasegoldexpadvantage",
+    "challenge_turretplatestaken",
+    "challenge_firstturretkilled",
+    "challenge_firstturretkilledtime",
+    "challenge_takedownonfirstturret",
+    "challenge_turrettakedowns",
+    "challenge_missing",
+)
 
+RELATIONSHIP_DETAIL_FEATURES: tuple[str, ...] = (
+    "gold_diff_mean",
+    "gold_adv_2k_net_rate",
+    "gold_adv_5k_net_rate",
+    "cs_diff_mean",
+    "cs_adv_50_net_rate",
+    "xp_diff_mean",
+    "champion_damage_diff_mean",
+    "damage_adv_20k_net_rate",
+    "damage_taken_diff_mean",
+    "solo_kills_diff_mean",
+    "solo2_net_rate",
+    "max_cs_adv_diff_mean",
+    "max_level_lead_diff_mean",
+    "turret_plate_diff_mean",
+    "gold_diff_10_mean",
+    "gold_diff_15_mean",
+)
+RELATIONSHIP_DETAIL_DIM = len(RELATIONSHIP_DETAIL_FEATURES)
 
-def build_group_sql(column: str = "build", alias: str | None = "build_group") -> str:
-    clauses = ", ".join(
-        f"{column} IN ({_sql_strings(labels)}), '{group}'"
-        for group, labels in BUILD_GROUPS.items()
-    )
-    expr = f"multiIf({clauses}, {column})"
-    return f"{expr} AS {alias}" if alias else expr
-
-
-def sibling_build_sql(column: str = "build") -> str:
-    clauses = ", ".join(
-        f"{column} = '{source}', '{target}'"
-        for source, target in SIBLING_BUILD_BY_LABEL.items()
-    )
-    return f"multiIf({clauses}, '')"
+# Interpretable per-identity "matchup profile" consumed by the HGNN cross-team
+# interaction term. Each identity is summarised by where it deals champion
+# damage (offense damage-type mix) and where it invests resistance (armor vs
+# magic-resist fraction). The model crosses one team's profile against the
+# other's, so e.g. an armor-stacking identity gains logit against a physical-
+# damage enemy team -- a conditioning axis the (enemy-blind) win-rate prior
+# cannot represent. All dims are in [0, 1] so the bilinear term is well-scaled.
+# Source features needed to build the profile (resolved from the smoothed
+# baseline matrix); armor/magic-resist are turned into fractions in the writer.
+IDENTITY_PROFILE_SOURCE_FEATURES: tuple[str, ...] = (
+    "physicaldamagedealttochampions_share",
+    "magicdamagedealttochampions_share",
+    "truedamagedealttochampions_share",
+    "armor",
+    "magicresist",
+)
+IDENTITY_PROFILE_FEATURES: tuple[str, ...] = (
+    "phys_offense_share",
+    "magic_offense_share",
+    "true_offense_share",
+    "armor_resist_frac",
+    "mr_resist_frac",
+)
+IDENTITY_PROFILE_DIM = len(IDENTITY_PROFILE_FEATURES)
 
 
 class IdentityType(str, Enum):
@@ -63,15 +139,6 @@ class IdentityType(str, Enum):
     ROLE_BUILD = "role_build"
     CHAMPION_BUILD = "champion_build"
     BUILD = "build"
-
-
-PRIOR_TABLE: dict[IdentityType, str] = {
-    IdentityType.SIBLING: "game_data_filtered.synergy_1vx_temporal_prior_sibling",
-    IdentityType.CHAMPION_ROLE: "game_data_filtered.synergy_1vx_temporal_prior_champion_role",
-    IdentityType.ROLE_BUILD: "game_data_filtered.synergy_1vx_temporal_prior_role_build",
-    IdentityType.CHAMPION_BUILD: "game_data_filtered.synergy_1vx_temporal_prior_champion_build",
-    IdentityType.BUILD: "game_data_filtered.synergy_1vx_temporal_prior_build",
-}
 
 
 LEVEL_KEY: dict[IdentityType, tuple[str, ...]] = {
@@ -113,7 +180,8 @@ DEFAULT_PRIOR_PER_MINUTE_STRENGTHS: dict[IdentityType, float] = {
 
 # ---------------------------------------------------------------------------
 # Metrics catalogues. Two stages:
-#   1. Source: every raw column loaded from 6010 / 9000-9040 (ALL_METRICS).
+#   1. Source: every raw column loaded from direct non-temporal ClickHouse
+#      aggregation (ALL_METRICS).
 #   2. Derived: pre-divided ratios computed from smoothed source columns
 #      (DERIVED_METRIC_FUNCS).
 # Both are kept full so future specialists can pull from them.
@@ -205,6 +273,9 @@ RATE_LIKE_METRICS: tuple[str, ...] = (
     *RATE_METRICS,
     *LARGEST_AVG_METRICS,
     *FINAL_SNAPSHOT_AVG_METRICS,
+    *TIMELINE_CHECKPOINT_METRICS,
+    *TIMELINE_CHECKPOINT_MISSING_METRICS,
+    *CHALLENGE_AVG_METRICS,
 )
 ALL_METRICS: tuple[str, ...] = (*RATE_LIKE_METRICS, *PER_MINUTE_METRICS)
 
@@ -586,6 +657,37 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
 }
 
 
+def _timeline_delta(start: int, end: int, metric: str) -> Callable[[Mapping[str, np.ndarray]], np.ndarray]:
+    return lambda d: (d[f"tl_{end}_{metric}"] - d[f"tl_{start}_{metric}"]).astype(np.float32)
+
+
+def _timeline_slope(start: int, end: int, metric: str) -> Callable[[Mapping[str, np.ndarray]], np.ndarray]:
+    minutes = float(end - start)
+    return lambda d: _safe_divide(
+        d[f"tl_{end}_{metric}"] - d[f"tl_{start}_{metric}"],
+        np.full_like(d[f"tl_{end}_{metric}"], minutes, dtype=np.float32),
+    )
+
+
+for _start, _end in TIMELINE_SLOPE_INTERVALS:
+    for _metric in TIMELINE_TRAJECTORY_METRICS:
+        DERIVED_METRIC_FUNCS[f"tl_{_start}_{_end}_{_metric}_delta"] = _timeline_delta(
+            _start,
+            _end,
+            _metric,
+        )
+        DERIVED_METRIC_FUNCS[f"tl_{_start}_{_end}_{_metric}_per_minute"] = _timeline_slope(
+            _start,
+            _end,
+            _metric,
+        )
+
+
+def identity_semantic_feature_set() -> tuple[str, ...]:
+    """Dense identity descriptor inputs used by the HGNN semantic feature path."""
+    return (*ALL_METRICS, *DERIVED_METRIC_FUNCS.keys())
+
+
 @dataclass(frozen=True)
 class EmbeddingConfig:
     cache_dir: Path = EMBEDDINGS_CACHE_DIR
@@ -654,7 +756,7 @@ class SpecialistSpec:
 
 @dataclass(frozen=True)
 class SingularMetricSpec:
-    """One-dimensional phase-relative ordering.
+    """One-dimensional identity ordering.
 
     These are intentionally not clustered. They produce continuous rank-like
     features for metrics whose meaning is mainly "higher/lower than peers"
@@ -993,12 +1095,12 @@ SINGULAR_METRICS: tuple[SingularMetricSpec, ...] = (
     SingularMetricSpec(
         name="movement_speed",
         feature="movementspeed",
-        description="Phase-relative mobility ordering.",
+        description="Mobility ordering.",
     ),
     SingularMetricSpec(
         name="attack_speed",
         feature="attackspeed",
-        description="Phase-relative basic-attack cadence ordering.",
+        description="Basic-attack cadence ordering.",
     ),
     SingularMetricSpec(
         name="critical_strike_ceiling",
@@ -1008,12 +1110,12 @@ SINGULAR_METRICS: tuple[SingularMetricSpec, ...] = (
     SingularMetricSpec(
         name="spree_ceiling",
         feature="largestkillingspree",
-        description="Phase-relative snowball ceiling from killing sprees.",
+        description="Snowball ceiling from killing sprees.",
     ),
     SingularMetricSpec(
         name="multikill_ceiling",
         feature="largestmultikill",
-        description="Phase-relative multi-kill ceiling.",
+        description="Multi-kill ceiling.",
     ),
     SingularMetricSpec(
         name="low_death_rate",
