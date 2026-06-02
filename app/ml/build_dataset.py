@@ -16,14 +16,14 @@ from app.ml.cache_layout import (
     CACHE_META_FILE,
     DISK_DTYPES,
     IDENTITY_CONTEXT_DIM,
+    IDENTITY_CONTEXT_INTERP_DIM,
     IDENTITY_CONTEXT_RAW_DIM,
     IDENTITY_PROFILE_DIM,
     IDENTITY_SEMANTIC_DIM,
     RELATIONSHIP_DETAIL_DIM,
     array_paths,
 )
-from app.classification.embeddings.config import IDENTITY_CONTEXT_INTERP_DIM
-from app.classification.embeddings.runtime import (
+from app.ml.legacy_classification_runtime import (
     IdentityContextLookup,
     IdentityProfileLookup,
     IdentitySemanticLookup,

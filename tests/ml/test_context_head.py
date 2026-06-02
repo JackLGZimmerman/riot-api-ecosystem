@@ -3,11 +3,12 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from app.classification.embeddings.config import (
+from app.ml.cache_layout import (
+    ARRAY_SHAPES,
+    CACHE_FORMAT,
     IDENTITY_CONTEXT_DIM,
     IDENTITY_CONTEXT_RAW_DIM,
 )
-from app.ml.cache_layout import ARRAY_SHAPES, CACHE_FORMAT
 from app.ml.hgnn_model import (
     HGNNConfig,
     HGNNWinModel,

@@ -2,11 +2,10 @@
 
 """Match-Outcome HGNN win-rate model.
 
-Production currently uses the relationship-direct path plus the
-identity-conditioned raw semantic-context residual: identity embeddings and the
-1vX posterior initialise the 10 player nodes, then direct 1v1/2vX residual
-features feed the residual head and prior shortcut. Training and inference share
-one model shape.
+Production currently uses the identity-conditioned raw semantic-context residual
+on top of the 1vX player prior. Direct 1v1/2vX integrations remain as explicit
+legacy/research capacity but are disabled by default, and training/inference
+share one model shape.
 """
 
 from __future__ import annotations
@@ -21,6 +20,8 @@ from torch import nn
 from app.core.utils.common import TEAM_PAIRS as TEAM_PAIRS
 
 N_PLAYERS = 10
+N_MATCHUPS_1V1 = 25
+N_SYNERGIES_2VX = 20
 N_RELATIONSHIP_EDGES = 45
 LOGIT_EPS = 1e-6
 
@@ -36,7 +37,10 @@ class HGNNConfig:
     gate_hidden: tuple[int, ...] = (32,)
     node_init_hidden: tuple[int, ...] = (96,)
     readout_hidden: tuple[int, ...] = (256,)
+    team_slot_readout_hidden: tuple[int, ...] = ()
     residual_head_hidden: tuple[int, ...] = (128,)
+    use_relationship_integrations: bool = False
+    use_1vx_posterior_variance: bool = True
     dropout: float = 0.1
     logit_clip: float | None = 5.0
     identity_semantic_dim: int = 64
@@ -66,6 +70,13 @@ class HGNNConfig:
     context_support_strength: float = 30.0
     context_include_ally: bool = True
     context_include_relational: bool = True
+    context_set_encoder_type: str = "mean"  # "mean" | "deepsets" | "set_transformer" | "attention" | "summary_stats"
+    context_set_encoder_dim: int = 32
+    context_set_encoder_heads: int = 4
+    context_summary_topk: int = 2
+    context_summary_quantiles: tuple[float, ...] = (0.25, 0.50, 0.75)
+    structural_antisymmetry: bool = False
+    structural_antisymmetry_scale: float = 0.5
     # Identity-conditioned context module. Instead of one shared
     # context head for every identity, a low-rank bottleneck lets the model learn
     # which context interactions matter per (champion, role, build): an identity
@@ -77,7 +88,7 @@ class HGNNConfig:
     # config builder enables this raw-atlas path by default; when enabled it
     # REPLACES the shared context head's contribution.
     use_identity_conditioned_context: bool = False
-    identity_context_conditioning_type: str = "none"  # "none" | "low_rank"
+    identity_context_conditioning_type: str = "none"  # "none" | "low_rank" | "film"
     identity_context_source: str = "raw"  # "raw" | "raw_plus_dense"
     identity_context_raw_dim: int = 0  # width of the wide RAW atlas block
     identity_context_rank: int = 16
@@ -86,6 +97,10 @@ class HGNNConfig:
     identity_context_init_scale: float = 0.01
     identity_context_dropout: float = 0.0
     identity_context_use_residual_mlp: bool = False
+    identity_context_include_products: bool = False
+    identity_context_include_support_features: bool = False
+    identity_context_support_log_scale: float = 1000.0
+    identity_context_film_regularization: float = 1.0e-3
     m1v1_detail_dim: int = 0
     # Classification-feature integration keeps relationship detail disabled in
     # production. The 1v1 detail path remains as an explicit experiment hook.
@@ -168,10 +183,12 @@ def support_features(
     count: torch.Tensor,
     strength: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Explicit support features for node priors and direct relationship heads.
+    """Explicit support features derived from support counts.
 
     Posterior variance has a tiny numeric range for this dataset, so the model also
-    sees a direct confidence score, log support, and a missing flag.
+    sees direct confidence and log support. The missing flag is retained only for
+    opt-in relationship heads where absent relationship tables are distinguishable
+    from neutral internal placeholders.
     """
     count_f = count.clamp_min(0.0)
     denom = count_f + float(strength)
@@ -186,12 +203,13 @@ def build_hgnn_inputs(
     champion_id: Any,
     build_id: Any,
     win_rate: Any,
-    matchup_1v1: Any,
-    synergy_2vx: Any,
     p1_cnt: Any,
-    m1v1_cnt: Any,
-    s2vx_cnt: Any,
     strength: float,
+    matchup_1v1: Any | None = None,
+    synergy_2vx: Any | None = None,
+    m1v1_cnt: Any | None = None,
+    s2vx_cnt: Any | None = None,
+    include_relationship_features: bool = False,
     identity_semantic: Any | None = None,
     identity_profile: Any | None = None,
     identity_context: Any | None = None,
@@ -206,9 +224,11 @@ def build_hgnn_inputs(
     numpy arrays or tensors. mu values stay in probability space (the model maps
     them to logits internally); champion/build ids become long embedding indices.
 
-    Relationship means already include nested-pooling backoff. Direct
-    confidence/log-count/missing features use raw build-level support so the
-    model knows when an exact relationship cell was sparse or absent.
+    The production path no longer consumes direct 1v1/2vX relationship arrays.
+    When they are absent, neutral internal placeholders preserve the model
+    tensor contract for swapping and old artifacts. Explicit research or legacy
+    callers can still pass relationship arrays and set
+    include_relationship_features=True to expose their deltas/support tensors.
     """
 
     def to_tensor(arr: Any) -> torch.Tensor:
@@ -218,14 +238,32 @@ def build_hgnn_inputs(
         return torch.as_tensor(arr, dtype=torch.long, device=device)
 
     count_1vx = to_tensor(p1_cnt)
-    count_2vx = to_tensor(s2vx_cnt)
-    count_1v1 = to_tensor(m1v1_cnt)
     mu_1vx, var_1vx = posterior_mean_var(to_tensor(win_rate), count_1vx, strength)
-    mu_2vx = to_tensor(synergy_2vx).clamp(0.0, 1.0)
-    mu_1v1 = to_tensor(matchup_1v1).clamp(0.0, 1.0)
-    conf_1vx, log_count_1vx, missing_1vx = support_features(count_1vx, strength)
-    conf_2vx, log_count_2vx, missing_2vx = support_features(count_2vx, strength)
-    conf_1v1, log_count_1v1, missing_1v1 = support_features(count_1v1, strength)
+
+    def neutral_relationship(width: int, value: float) -> torch.Tensor:
+        return count_1vx.new_full((count_1vx.shape[0], width), value)
+
+    count_2vx = (
+        neutral_relationship(N_SYNERGIES_2VX, 0.0)
+        if s2vx_cnt is None
+        else to_tensor(s2vx_cnt)
+    )
+    count_1v1 = (
+        neutral_relationship(N_MATCHUPS_1V1, 0.0)
+        if m1v1_cnt is None
+        else to_tensor(m1v1_cnt)
+    )
+    mu_2vx = (
+        neutral_relationship(N_SYNERGIES_2VX, 0.5)
+        if synergy_2vx is None
+        else to_tensor(synergy_2vx).clamp(0.0, 1.0)
+    )
+    mu_1v1 = (
+        neutral_relationship(N_MATCHUPS_1V1, 0.5)
+        if matchup_1v1 is None
+        else to_tensor(matchup_1v1).clamp(0.0, 1.0)
+    )
+    conf_1vx, log_count_1vx, _ = support_features(count_1vx, strength)
     inputs = {
         "champion_id": to_long(champion_id),
         "build_id": to_long(build_id),
@@ -233,16 +271,22 @@ def build_hgnn_inputs(
         "var_1vx": var_1vx,
         "conf_1vx": conf_1vx,
         "log_count_1vx": log_count_1vx,
-        "missing_1vx": missing_1vx,
         "mu_2vx": mu_2vx,
-        "conf_2vx": conf_2vx,
-        "log_count_2vx": log_count_2vx,
-        "missing_2vx": missing_2vx,
         "mu_1v1": mu_1v1,
-        "conf_1v1": conf_1v1,
-        "log_count_1v1": log_count_1v1,
-        "missing_1v1": missing_1v1,
     }
+    if include_relationship_features:
+        conf_2vx, log_count_2vx, missing_2vx = support_features(count_2vx, strength)
+        conf_1v1, log_count_1v1, missing_1v1 = support_features(count_1v1, strength)
+        inputs.update(
+            {
+                "conf_2vx": conf_2vx,
+                "log_count_2vx": log_count_2vx,
+                "missing_2vx": missing_2vx,
+                "conf_1v1": conf_1v1,
+                "log_count_1v1": log_count_1v1,
+                "missing_1v1": missing_1v1,
+            }
+        )
     if identity_semantic is not None:
         inputs["identity_semantic"] = to_tensor(identity_semantic)
     if identity_profile is not None:
@@ -255,7 +299,8 @@ def build_hgnn_inputs(
         inputs["identity_context_raw"] = to_tensor(identity_context_raw)
     if m1v1_detail is not None:
         inputs["m1v1_detail"] = to_tensor(m1v1_detail)
-    inputs.update(relationship_logit_features(mu_1vx=mu_1vx, mu_2vx=mu_2vx, mu_1v1=mu_1v1))
+    if include_relationship_features:
+        inputs.update(relationship_logit_features(mu_1vx=mu_1vx, mu_2vx=mu_2vx, mu_1v1=mu_1v1))
     return inputs
 
 
@@ -307,7 +352,7 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
     if "var_1v1" in inputs:
         swapped["var_1v1"] = swap_1v1_matrix(inputs["var_1v1"])
     for suffix, half, prefixes in (
-        ("1vx", 5, ("conf", "log_count", "missing")),
+        ("1vx", 5, ("conf", "log_count")),
         ("2vx", 10, ("conf", "log_count", "missing")),
     ):
         for prefix in prefixes:
@@ -342,8 +387,11 @@ class PhiEncoder(nn.Module):
 
     def __init__(self, config: HGNNConfig) -> None:
         super().__init__()
-        self.value = _mlp(5, config.value_hidden, config.edge_hidden, dropout=config.dropout)
-        self.gate = _mlp(4, config.gate_hidden, config.edge_hidden, dropout=config.dropout)
+        self.use_variance = bool(config.use_1vx_posterior_variance)
+        value_dim = 4 if self.use_variance else 3
+        gate_dim = 3 if self.use_variance else 2
+        self.value = _mlp(value_dim, config.value_hidden, config.edge_hidden, dropout=config.dropout)
+        self.gate = _mlp(gate_dim, config.gate_hidden, config.edge_hidden, dropout=config.dropout)
 
     def forward(
         self,
@@ -351,13 +399,16 @@ class PhiEncoder(nn.Module):
         var: torch.Tensor,
         confidence: torch.Tensor | None = None,
         log_count: torch.Tensor | None = None,
-        missing: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if confidence is None or log_count is None or missing is None:
-            raise ValueError("PhiEncoder requires confidence/log_count/missing tensors")
-        precision = 1.0 / (1.0 + var)
-        value_input = torch.stack([mu_logit, var, confidence, log_count, missing], dim=-1)
-        gate_input = torch.stack([precision, confidence, log_count, missing], dim=-1)
+        if confidence is None or log_count is None:
+            raise ValueError("PhiEncoder requires confidence/log_count tensors")
+        if self.use_variance:
+            precision = 1.0 / (1.0 + var)
+            value_input = torch.stack([mu_logit, var, confidence, log_count], dim=-1)
+            gate_input = torch.stack([precision, confidence, log_count], dim=-1)
+        else:
+            value_input = torch.stack([mu_logit, confidence, log_count], dim=-1)
+            gate_input = torch.stack([confidence, log_count], dim=-1)
         value = self.value(value_input)
         gate = torch.sigmoid(self.gate(gate_input))
         return gate * value
@@ -407,6 +458,142 @@ class AttnPool(nn.Module):
         return (x * weights).sum(dim=1)
 
 
+CONTEXT_SET_ENCODER_TYPES = frozenset(
+    {"mean", "deepsets", "set_transformer", "attention", "summary_stats"}
+)
+
+
+def _normalise_context_set_encoder_type(value: str) -> str:
+    name = value.lower().replace("-", "_")
+    aliases = {
+        "deepset": "deepsets",
+        "settransformer": "set_transformer",
+        "attn": "attention",
+        "learned_attention": "attention",
+        "stats": "summary_stats",
+        "summary": "summary_stats",
+    }
+    name = aliases.get(name, name)
+    if name not in CONTEXT_SET_ENCODER_TYPES:
+        raise ValueError(
+            "context_set_encoder_type must be one of: "
+            + ", ".join(sorted(CONTEXT_SET_ENCODER_TYPES))
+        )
+    return name
+
+
+def _usable_attention_heads(hidden_dim: int, requested: int) -> int:
+    heads = min(max(1, int(requested)), max(1, int(hidden_dim)))
+    while hidden_dim % heads != 0 and heads > 1:
+        heads -= 1
+    return heads
+
+
+class ContextSetEncoder(nn.Module):
+    """Permutation-invariant encoder for unordered ally/enemy context sets.
+
+    The encoder intentionally sees only a team's unordered context descriptors.
+    Slot-specific features such as the lane opponent stay outside this module so
+    role-aligned relationships remain explicit in the surrounding head.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        *,
+        encoder_type: str = "mean",
+        hidden_dim: int = 32,
+        heads: int = 4,
+        topk: int = 2,
+        quantiles: tuple[float, ...] = (0.25, 0.50, 0.75),
+        weighted_index: int = 5,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError("ContextSetEncoder requires input_dim > 0")
+        self.input_dim = int(input_dim)
+        self.encoder_type = _normalise_context_set_encoder_type(encoder_type)
+        self.hidden_dim = max(1, int(hidden_dim))
+        self.weighted_index = int(weighted_index)
+        self.topk = max(0, int(topk))
+        self.quantiles = tuple(float(q) for q in quantiles if 0.0 <= float(q) <= 1.0)
+
+        if self.encoder_type == "mean":
+            self.output_dim = 2 * self.input_dim
+        elif self.encoder_type == "deepsets":
+            self.phi = _mlp(self.input_dim, (self.hidden_dim,), self.hidden_dim, dropout=0.0)
+            self.rho = _mlp(self.hidden_dim, (self.hidden_dim,), self.input_dim, dropout=0.0)
+            self.output_dim = self.input_dim
+        elif self.encoder_type == "attention":
+            self.key = nn.Linear(self.input_dim, self.hidden_dim)
+            self.value = nn.Linear(self.input_dim, self.hidden_dim)
+            self.query = nn.Parameter(torch.randn(self.hidden_dim) * 0.02)
+            self.out = nn.Linear(self.hidden_dim, self.input_dim)
+            self.output_dim = self.input_dim
+        elif self.encoder_type == "set_transformer":
+            attn_heads = _usable_attention_heads(self.hidden_dim, heads)
+            self.input_proj = nn.Linear(self.input_dim, self.hidden_dim)
+            self.sab_attn = nn.MultiheadAttention(
+                self.hidden_dim,
+                attn_heads,
+                dropout=0.0,
+                batch_first=True,
+            )
+            self.sab_norm1 = nn.LayerNorm(self.hidden_dim)
+            self.sab_ff = _mlp(self.hidden_dim, (self.hidden_dim,), self.hidden_dim, dropout=0.0)
+            self.sab_norm2 = nn.LayerNorm(self.hidden_dim)
+            self.seed = nn.Parameter(torch.randn(1, 1, self.hidden_dim) * 0.02)
+            self.pool_attn = nn.MultiheadAttention(
+                self.hidden_dim,
+                attn_heads,
+                dropout=0.0,
+                batch_first=True,
+            )
+            self.out = nn.Linear(self.hidden_dim, self.input_dim)
+            self.output_dim = self.input_dim
+        else:
+            self.output_dim = (4 + len(self.quantiles) + self.topk) * self.input_dim
+
+    def _weighted_mean(self, team: torch.Tensor) -> torch.Tensor:
+        if 0 <= self.weighted_index < team.shape[-1]:
+            weight = team[..., self.weighted_index : self.weighted_index + 1].clamp_min(0.0)
+            denom = weight.sum(dim=1).clamp_min(1.0e-6)
+            return (team * weight).sum(dim=1) / denom
+        return team.mean(dim=1)
+
+    def forward(self, team: torch.Tensor) -> torch.Tensor:
+        if team.dim() != 3:
+            raise ValueError("ContextSetEncoder expects [batch, set, features]")
+        mean = team.mean(dim=1)
+        if self.encoder_type == "mean":
+            return torch.cat([mean, self._weighted_mean(team)], dim=-1)
+        if self.encoder_type == "deepsets":
+            return self.rho(self.phi(team).mean(dim=1))
+        if self.encoder_type == "attention":
+            key = torch.tanh(self.key(team))
+            scores = (key @ self.query) / (self.hidden_dim**0.5)
+            weights = torch.softmax(scores, dim=1).unsqueeze(-1)
+            return self.out((self.value(team) * weights).sum(dim=1))
+        if self.encoder_type == "set_transformer":
+            h = self.input_proj(team)
+            attn, _ = self.sab_attn(h, h, h, need_weights=False)
+            h = self.sab_norm1(h + attn)
+            h = self.sab_norm2(h + self.sab_ff(h))
+            seed = self.seed.expand(team.shape[0], -1, -1)
+            pooled, _ = self.pool_attn(seed, h, h, need_weights=False)
+            return self.out(pooled.squeeze(1))
+
+        parts = [mean, self._weighted_mean(team), team.max(dim=1).values, team.var(dim=1, unbiased=False)]
+        if self.quantiles:
+            q = torch.tensor(self.quantiles, dtype=team.dtype, device=team.device)
+            qv = torch.quantile(team, q, dim=1).permute(1, 0, 2).reshape(team.shape[0], -1)
+            parts.append(qv)
+        if self.topk > 0:
+            k = min(self.topk, team.shape[1])
+            parts.append(team.topk(k, dim=1).values.reshape(team.shape[0], -1))
+        return torch.cat(parts, dim=-1)
+
+
 class IdentityConditionedContext(nn.Module):
     """Low-rank identity-conditioned context interaction.
 
@@ -427,6 +614,9 @@ class IdentityConditionedContext(nn.Module):
     def __init__(self, config: HGNNConfig) -> None:
         super().__init__()
         c = config
+        self.conditioning_type = c.identity_context_conditioning_type
+        if self.conditioning_type not in {"low_rank", "film"}:
+            raise ValueError("IdentityConditionedContext requires conditioning type low_rank or film")
         self.source_mode = c.identity_context_source
         self.raw_dim = c.identity_context_raw_dim
         self.dense_dim = (
@@ -437,8 +627,49 @@ class IdentityConditionedContext(nn.Module):
         self.source_dim = self.raw_dim + self.dense_dim
         self.support_strength = float(c.context_support_strength)
         self.damage_idx = c.context_damage_pressure_index
+        self.armor_idx = c.context_armor_index
+        self.mr_idx = c.context_mr_index
+        self.taken_idx = c.context_taken_index
+        self.heal_idx = c.context_heal_shield_index
         self.init_scale = float(c.identity_context_init_scale)
         self.use_residual_mlp = bool(c.identity_context_use_residual_mlp)
+        self.include_products = bool(c.identity_context_include_products)
+        self.include_support_features = bool(c.identity_context_include_support_features)
+        self.support_log_scale = float(c.identity_context_support_log_scale)
+        self.film_regularization = float(c.identity_context_film_regularization)
+        if self.include_support_features and self.support_log_scale <= 0.0:
+            raise ValueError("identity_context_support_log_scale must be > 0")
+        required_product_dim = (
+            max(1, self.armor_idx, self.mr_idx, self.damage_idx, self.taken_idx, self.heal_idx)
+            + 1
+        )
+        if self.include_products and self.raw_dim < required_product_dim:
+            raise ValueError(
+                "identity_context_include_products requires the raw context "
+                f"interpretable prefix to contain at least {required_product_dim} features"
+            )
+        self.support_feature_dim = 3 if self.include_support_features else 0
+        self.set_encoder_type = _normalise_context_set_encoder_type(c.context_set_encoder_type)
+        self.context_source_dim = self.source_dim + self.support_feature_dim
+        self.context_set_encoder = (
+            None
+            if self.set_encoder_type == "mean"
+            else ContextSetEncoder(
+                self.context_source_dim,
+                encoder_type=self.set_encoder_type,
+                hidden_dim=c.context_set_encoder_dim,
+                heads=c.context_set_encoder_heads,
+                topk=c.context_summary_topk,
+                quantiles=c.context_summary_quantiles,
+                weighted_index=c.context_damage_pressure_index,
+            )
+        )
+        set_dim = (
+            2 * self.context_source_dim
+            if self.context_set_encoder is None
+            else self.context_set_encoder.output_dim
+        )
+        self.product_dim = 7 if self.include_products else 0
 
         emb = c.identity_context_emb_dim
         rank = c.identity_context_rank
@@ -453,24 +684,140 @@ class IdentityConditionedContext(nn.Module):
             "role_idx", torch.tensor([0, 1, 2, 3, 4], dtype=torch.long), persistent=False
         )
 
-        cond_in = 3 * emb + self.source_dim
-        ctx_in = 5 * self.source_dim  # self, enemy_mean, enemy_weighted, lane_opp, ally_mean
-        self.identity_conditioner = _mlp(cond_in, (hidden,), rank, dropout=dropout)
-        self.context_projector = _mlp(ctx_in, (hidden,), rank, dropout=dropout)
-        nn.init.zeros_(self.context_projector[-1].weight)
-        nn.init.zeros_(self.context_projector[-1].bias)
+        cond_in = 3 * emb + self.context_source_dim
+        if self.context_set_encoder is None:
+            ctx_in = 5 * self.context_source_dim  # self, enemy_mean, enemy_weighted, lane_opp, ally_mean
+        else:
+            ctx_in = 2 * self.context_source_dim + 2 * set_dim  # self, enemy_set, lane_opp, ally_set
+        ctx_in += self.product_dim
+        self.context_feature_dim = ctx_in
+        if self.conditioning_type == "low_rank":
+            self.identity_conditioner = _mlp(cond_in, (hidden,), rank, dropout=dropout)
+            self.context_projector = _mlp(ctx_in, (hidden,), rank, dropout=dropout)
+            nn.init.zeros_(self.context_projector[-1].weight)
+            nn.init.zeros_(self.context_projector[-1].bias)
+        else:
+            self.film_conditioner = _mlp(cond_in, (hidden,), 2 * ctx_in, dropout=dropout)
+            self.film_scorer = _mlp(ctx_in, (hidden,), 1, dropout=dropout)
+            nn.init.zeros_(self.film_conditioner[-1].weight)
+            nn.init.zeros_(self.film_conditioner[-1].bias)
+            nn.init.zeros_(self.film_scorer[-1].weight)
+            nn.init.zeros_(self.film_scorer[-1].bias)
         if self.use_residual_mlp:
             self.residual_mlp = _mlp(ctx_in, (hidden,), 1, dropout=dropout)
             nn.init.zeros_(self.residual_mlp[-1].weight)
             nn.init.zeros_(self.residual_mlp[-1].bias)
 
-    def _source(self, raw: torch.Tensor, dense: torch.Tensor | None) -> torch.Tensor:
+    def _support_features(
+        self,
+        support: torch.Tensor | None,
+        *,
+        like: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.include_support_features:
+            return like.new_zeros(*like.shape[:-1], 0)
+        if support is None:
+            features = like.new_zeros(*like.shape[:-1], self.support_feature_dim)
+            features[..., 2] = 1.0
+            return features
+        sup = support.to(dtype=like.dtype).clamp_min(0.0)
+        denom = sup + max(self.support_strength, 1.0e-6)
+        confidence = sup / denom.clamp_min(1.0e-6)
+        log_scale = torch.log1p(sup.new_tensor(self.support_log_scale))
+        log_support = torch.log1p(sup) / log_scale.clamp_min(1.0e-6)
+        missing = (sup <= 0.0).to(dtype=like.dtype)
+        return torch.stack([confidence, log_support, missing], dim=-1)
+
+    def _source(
+        self,
+        raw: torch.Tensor,
+        dense: torch.Tensor | None,
+        support: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         raw = _fit_dim(raw, self.raw_dim)
         if self.dense_dim <= 0:
-            return raw
-        if dense is None:
-            dense = raw.new_zeros(*raw.shape[:-1], self.dense_dim)
-        return torch.cat([raw, _fit_dim(dense, self.dense_dim)], dim=-1)
+            src = raw
+        else:
+            if dense is None:
+                dense = raw.new_zeros(*raw.shape[:-1], self.dense_dim)
+            src = torch.cat([raw, _fit_dim(dense, self.dense_dim)], dim=-1)
+        if self.include_support_features:
+            src = torch.cat([src, self._support_features(support, like=raw)], dim=-1)
+        return src
+
+    def _weighted_context_mean(self, team: torch.Tensor) -> torch.Tensor:
+        weight = team[..., self.damage_idx : self.damage_idx + 1].clamp_min(0.0)
+        denom = weight.sum(dim=1, keepdim=True).clamp_min(1.0e-6)
+        return (team * weight).sum(dim=1, keepdim=True) / denom
+
+    def _context_products(
+        self,
+        players: torch.Tensor,
+        enemy_weighted: torch.Tensor,
+        ally_mean: torch.Tensor,
+    ) -> torch.Tensor:
+        n_players = players.shape[1]
+        enemy = enemy_weighted.expand(-1, n_players, -1)
+        ally = ally_mean.expand(-1, n_players, -1)
+
+        def col(t: torch.Tensor, i: int) -> torch.Tensor:
+            return t[..., i : i + 1]
+
+        armor = col(players, self.armor_idx)
+        mr = col(players, self.mr_idx)
+        enemy_phys = col(enemy, 0)
+        enemy_magic = col(enemy, 1)
+        enemy_damage = col(enemy, self.damage_idx)
+        enemy_heal = col(enemy, self.heal_idx)
+        self_taken = col(players, self.taken_idx)
+        self_damage = col(players, self.damage_idx)
+        self_heal = col(players, self.heal_idx)
+        ally_damage = col(ally, self.damage_idx)
+        return torch.cat(
+            [
+                armor * enemy_phys,
+                mr * enemy_magic,
+                armor * (enemy_phys - enemy_magic),
+                mr * (enemy_magic - enemy_phys),
+                self_taken * enemy_damage,
+                self_damage * enemy_heal,
+                self_heal * ally_damage,
+            ],
+            dim=-1,
+        )
+
+    def _context_features(self, self_src: torch.Tensor, enemy_src: torch.Tensor) -> torch.Tensor:
+        ally_mean = self_src.mean(dim=1, keepdim=True)
+        enemy_weighted = self._weighted_context_mean(enemy_src)
+        if self.context_set_encoder is None:
+            enemy_mean = enemy_src.mean(dim=1, keepdim=True)
+            parts = [
+                self_src,
+                enemy_mean.expand_as(self_src),
+                enemy_weighted.expand_as(self_src),
+                enemy_src,
+                ally_mean.expand_as(self_src),
+            ]
+        else:
+            enemy_set = self.context_set_encoder(enemy_src).unsqueeze(1).expand(-1, self_src.shape[1], -1)
+            ally_set = self.context_set_encoder(self_src).unsqueeze(1).expand(-1, self_src.shape[1], -1)
+            parts = [self_src, enemy_set, enemy_src, ally_set]
+        if self.include_products:
+            parts.append(self._context_products(self_src, enemy_weighted, ally_mean))
+        return torch.cat(parts, dim=-1)
+
+    def _identity_features(
+        self,
+        self_src: torch.Tensor,
+        self_champ: torch.Tensor,
+        self_build: torch.Tensor,
+    ) -> torch.Tensor:
+        b, n = self_src.shape[0], self_src.shape[1]
+        role = self.role(cast(torch.Tensor, self.role_idx)).unsqueeze(0).expand(b, n, -1)
+        return torch.cat(
+            [self.champion(self_champ), role, self.build(self_build), self_src],
+            dim=-1,
+        )
 
     def _team_score(
         self,
@@ -480,33 +827,31 @@ class IdentityConditionedContext(nn.Module):
         self_build: torch.Tensor,  # [B, 5]
         conf: torch.Tensor,  # [B, 5]
     ) -> torch.Tensor:
-        b, n = self_src.shape[0], self_src.shape[1]
-        enemy_mean = enemy_src.mean(dim=1, keepdim=True)
-        weight = enemy_src[..., self.damage_idx : self.damage_idx + 1].clamp_min(0.0)
-        denom = weight.sum(dim=1, keepdim=True).clamp_min(1.0e-6)
-        enemy_weighted = (enemy_src * weight).sum(dim=1, keepdim=True) / denom
-        ally_mean = self_src.mean(dim=1, keepdim=True)
-        # lane_opp == enemy_src (slots are role-ordered, so slot i faces slot i).
-        ctx_feat = torch.cat(
-            [
-                self_src,
-                enemy_mean.expand_as(self_src),
-                enemy_weighted.expand_as(self_src),
-                enemy_src,
-                ally_mean.expand_as(self_src),
-            ],
-            dim=-1,
-        )
-        role = self.role(cast(torch.Tensor, self.role_idx)).unsqueeze(0).expand(b, n, -1)
-        cond = torch.cat(
-            [self.champion(self_champ), role, self.build(self_build), self_src], dim=-1
-        )
-        z_id = self.identity_conditioner(cond)
-        z_ctx = self.context_projector(ctx_feat)
-        raw_context = self.init_scale * (z_id * z_ctx).sum(dim=-1)
+        ctx_feat = self._context_features(self_src, enemy_src)
+        cond = self._identity_features(self_src, self_champ, self_build)
+        if self.conditioning_type == "low_rank":
+            z_id = self.identity_conditioner(cond)
+            z_ctx = self.context_projector(ctx_feat)
+            raw_context = self.init_scale * (z_id * z_ctx).sum(dim=-1)
+        else:
+            gamma, beta = self.film_conditioner(cond).chunk(2, dim=-1)
+            modulated = ctx_feat * (1.0 + self.init_scale * gamma) + self.init_scale * beta
+            raw_context = self.init_scale * self.film_scorer(modulated).squeeze(-1)
         if self.use_residual_mlp:
             raw_context = raw_context + self.init_scale * self.residual_mlp(ctx_feat).squeeze(-1)
         return (conf * raw_context).sum(dim=1)
+
+    def regularization_loss(self) -> torch.Tensor:
+        if self.conditioning_type != "film" or self.film_regularization <= 0.0:
+            return next(self.parameters()).new_zeros(())
+        reg = next(self.parameters()).new_zeros(())
+        for module in (self.film_conditioner, self.film_scorer):
+            last = module[-1]
+            if isinstance(last, nn.Linear):
+                reg = reg + last.weight.square().mean()
+                if last.bias is not None:
+                    reg = reg + last.bias.square().mean()
+        return self.film_regularization * reg
 
     def forward(
         self,
@@ -516,13 +861,13 @@ class IdentityConditionedContext(nn.Module):
         build_id: torch.Tensor,
         identity_context_dense: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        src = self._source(identity_context_raw, identity_context_dense)
+        src = self._source(identity_context_raw, identity_context_dense, identity_context_support)
         blue_src, red_src = src[:, :5], src[:, 5:]
         blue_c, red_c = champion_id[:, :5], champion_id[:, 5:]
         blue_b, red_b = build_id[:, :5], build_id[:, 5:]
         if identity_context_support is None:
-            blue_conf = blue_src.new_ones(blue_src.shape[0], 5)
-            red_conf = red_src.new_ones(red_src.shape[0], 5)
+            blue_conf = blue_src.new_zeros(blue_src.shape[0], 5)
+            red_conf = red_src.new_zeros(red_src.shape[0], 5)
         else:
             sup = identity_context_support.clamp_min(0.0)
             conf = sup / (sup + self.support_strength)
@@ -548,6 +893,24 @@ class HGNNWinModel(nn.Module):
             raise ValueError("Pass either config or keyword overrides, not both")
         self.config = config or HGNNConfig(**overrides)
         c = self.config
+        if c.identity_context_include_products and not (
+            c.use_identity_conditioned_context
+            and c.identity_context_conditioning_type in {"low_rank", "film"}
+            and c.identity_context_raw_dim > 0
+        ):
+            raise ValueError(
+                "identity_context_include_products requires an enabled "
+                "identity-conditioned raw context head"
+            )
+        if c.identity_context_include_support_features and not (
+            c.use_identity_conditioned_context
+            and c.identity_context_conditioning_type in {"low_rank", "film"}
+            and c.identity_context_raw_dim > 0
+        ):
+            raise ValueError(
+                "identity_context_include_support_features requires an enabled "
+                "identity-conditioned raw context head"
+            )
 
         self.phi = nn.ModuleDict({"1vx": PhiEncoder(c)})
         self.identity = IdentityEncoder(c.n_champions, c.n_builds, c.node_dim)
@@ -569,7 +932,15 @@ class HGNNWinModel(nn.Module):
         self.node_norm = nn.LayerNorm(c.node_dim)
 
         self.attn_pool = AttnPool(c.node_dim)
-        self.team_proj = nn.Linear(c.node_dim * 3, c.node_dim)
+        self.team_proj = nn.Linear(c.node_dim * 2, c.node_dim)
+        self.team_slot_readout = (
+            _mlp(c.node_dim * 5, c.team_slot_readout_hidden, c.node_dim, dropout=c.dropout)
+            if c.team_slot_readout_hidden
+            else None
+        )
+        if self.team_slot_readout is not None:
+            nn.init.zeros_(self.team_slot_readout[-1].weight)
+            nn.init.zeros_(self.team_slot_readout[-1].bias)
         self.residual_head = _mlp(
             N_RELATIONSHIP_EDGES * 4,
             c.residual_head_hidden,
@@ -659,8 +1030,32 @@ class HGNNWinModel(nn.Module):
         self.context_enabled = c.identity_context_dim > 0
         if self.context_enabled:
             self.context_product_dim = 7 if c.context_include_relational else 0
-            n_set = 4 + (1 if c.context_include_ally else 0)
-            context_input_dim = n_set * c.identity_context_dim + self.context_product_dim
+            self.context_set_encoder_type = _normalise_context_set_encoder_type(
+                c.context_set_encoder_type
+            )
+            self.context_set_encoder = (
+                None
+                if self.context_set_encoder_type == "mean"
+                else ContextSetEncoder(
+                    c.identity_context_dim,
+                    encoder_type=self.context_set_encoder_type,
+                    hidden_dim=c.context_set_encoder_dim,
+                    heads=c.context_set_encoder_heads,
+                    topk=c.context_summary_topk,
+                    quantiles=c.context_summary_quantiles,
+                    weighted_index=c.context_damage_pressure_index,
+                )
+            )
+            if self.context_set_encoder is None:
+                n_set = 4 + (1 if c.context_include_ally else 0)
+                context_input_dim = n_set * c.identity_context_dim + self.context_product_dim
+            else:
+                n_context_sets = 1 + (1 if c.context_include_ally else 0)
+                context_input_dim = (
+                    2 * c.identity_context_dim
+                    + n_context_sets * self.context_set_encoder.output_dim
+                    + self.context_product_dim
+                )
             self.context_head = _mlp(
                 context_input_dim,
                 c.context_head_hidden,
@@ -675,22 +1070,19 @@ class HGNNWinModel(nn.Module):
         # path, which supplies the context residual in place of the shared head.
         self.identity_conditioned_context_enabled = (
             c.use_identity_conditioned_context
-            and c.identity_context_conditioning_type == "low_rank"
+            and c.identity_context_conditioning_type in {"low_rank", "film"}
             and c.identity_context_raw_dim > 0
         )
         if self.identity_conditioned_context_enabled:
             self.identity_conditioned_context = IdentityConditionedContext(c)
-        self.prior_shortcut = _mlp(
-            15 + N_RELATIONSHIP_EDGES * 2,
-            (),
-            1,
-            dropout=0.0,
-        )
         self.head = _mlp(c.node_dim * 5, c.readout_hidden, 1, dropout=c.dropout)
 
     def _readout(self, team: torch.Tensor) -> torch.Tensor:  # team: [B, 5, d]
-        pooled = torch.cat([team.mean(dim=1), team.max(dim=1).values, self.attn_pool(team)], dim=-1)
-        return self.team_proj(pooled)
+        pooled = torch.cat([team.mean(dim=1), self.attn_pool(team)], dim=-1)
+        out = self.team_proj(pooled)
+        if self.team_slot_readout is not None:
+            out = out + self.team_slot_readout(team.flatten(start_dim=1))
+        return out
 
     def _signed_relationship_tensor(
         self,
@@ -712,7 +1104,7 @@ class HGNNWinModel(nn.Module):
             return torch.full_like(default_like, default_value)
         return torch.cat([tensor_1v1, tensor_2vx], dim=1)
 
-    def _shortcut_relationship_features(
+    def _relationship_residual_features(
         self,
         *,
         delta_logit_2vx: torch.Tensor,
@@ -754,7 +1146,7 @@ class HGNNWinModel(nn.Module):
         missing_2vx: torch.Tensor | None,
         missing_1v1: torch.Tensor | None,
     ) -> torch.Tensor:
-        residual_input = self._shortcut_relationship_features(
+        residual_input = self._relationship_residual_features(
             delta_logit_2vx=delta_logit_2vx,
             delta_logit_1v1=delta_logit_1v1,
             conf_2vx=conf_2vx,
@@ -937,19 +1329,26 @@ class HGNNWinModel(nn.Module):
         enemy_team: torch.Tensor,  # [B, 5, D]
         conf: torch.Tensor,  # [B, 5] support gate
     ) -> torch.Tensor:
-        enemy_mean = enemy_team.mean(dim=1, keepdim=True)
         enemy_weighted = self._ctx_weighted_mean(enemy_team)
         ally_mean = self_team.mean(dim=1, keepdim=True)
         # Same-role lane opponent: slots are role-ordered, so enemy_team[:, i] is
         # the 1v1 opposite of self_team[:, i].
-        parts = [
-            self_team,
-            enemy_mean.expand_as(self_team),
-            enemy_weighted.expand_as(self_team),
-            enemy_team,
-        ]
-        if self.config.context_include_ally:
-            parts.append(ally_mean.expand_as(self_team))
+        if self.context_set_encoder is None:
+            enemy_mean = enemy_team.mean(dim=1, keepdim=True)
+            parts = [
+                self_team,
+                enemy_mean.expand_as(self_team),
+                enemy_weighted.expand_as(self_team),
+                enemy_team,
+            ]
+            if self.config.context_include_ally:
+                parts.append(ally_mean.expand_as(self_team))
+        else:
+            enemy_set = self.context_set_encoder(enemy_team).unsqueeze(1)
+            parts = [self_team, enemy_set.expand(-1, self_team.shape[1], -1), enemy_team]
+            if self.config.context_include_ally:
+                ally_set = self.context_set_encoder(self_team).unsqueeze(1)
+                parts.append(ally_set.expand(-1, self_team.shape[1], -1))
         if self.config.context_include_relational:
             parts.append(self._ctx_products(self_team, enemy_weighted, ally_mean))
         h = self.context_head(torch.cat(parts, dim=-1)).squeeze(-1)  # [B, 5]
@@ -981,31 +1380,6 @@ class HGNNWinModel(nn.Module):
         rev = self._context_team_score(red, blue, red_conf)
         return fwd - rev
 
-    def _prior_shortcut_logit(
-        self,
-        *,
-        mu_1vx: torch.Tensor,
-        delta_logit_2vx: torch.Tensor | None,
-        delta_logit_1v1: torch.Tensor | None,
-        conf_2vx: torch.Tensor | None,
-        conf_1v1: torch.Tensor | None,
-    ) -> torch.Tensor:
-        identity = _logit(mu_1vx, self.config.logit_clip)
-        blue = identity[:, :5]
-        red = identity[:, 5:]
-        base = torch.cat([blue, red, blue - red], dim=1)
-        if delta_logit_2vx is None or delta_logit_1v1 is None:
-            raise ValueError("Direct prior shortcut requires relationship delta logits")
-        relationship_input = self._shortcut_relationship_features(
-            delta_logit_2vx=delta_logit_2vx,
-            delta_logit_1v1=delta_logit_1v1,
-            conf_2vx=conf_2vx,
-            conf_1v1=conf_1v1,
-            include_support=False,
-        )
-        shortcut_input = torch.cat([base, relationship_input], dim=1)
-        return self.prior_shortcut(shortcut_input).squeeze(-1)
-
     def _forward_impl(
         self,
         *,
@@ -1025,7 +1399,6 @@ class HGNNWinModel(nn.Module):
         delta_logit_1v1: torch.Tensor | None = None,
         conf_1vx: torch.Tensor | None = None,
         log_count_1vx: torch.Tensor | None = None,
-        missing_1vx: torch.Tensor | None = None,
         conf_2vx: torch.Tensor | None = None,
         log_count_2vx: torch.Tensor | None = None,
         missing_2vx: torch.Tensor | None = None,
@@ -1033,7 +1406,8 @@ class HGNNWinModel(nn.Module):
         log_count_1v1: torch.Tensor | None = None,
         missing_1v1: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        if delta_logit_2vx is None or delta_logit_1v1 is None:
+        relationships_enabled = bool(self.config.use_relationship_integrations)
+        if relationships_enabled and (delta_logit_2vx is None or delta_logit_1v1 is None):
             features = relationship_logit_features(mu_1vx=mu_1vx, mu_2vx=mu_2vx, mu_1v1=mu_1v1)
             delta_logit_2vx = features["delta_logit_2vx"]
             delta_logit_1v1 = features["delta_logit_1v1"]
@@ -1047,31 +1421,26 @@ class HGNNWinModel(nn.Module):
             var_1vx,
             conf_1vx,
             log_count_1vx,
-            missing_1vx,
         )
         h = self.node_norm(self.node_init(torch.cat([h0, phi_node], dim=-1)))
 
         a = self._readout(h[:, :5])
         b = self._readout(h[:, 5:])
         head_parts = [a, b, a - b, a * b]
-        head_parts.append(
-            self._residual_readout(
-                delta_logit_2vx=delta_logit_2vx,
-                delta_logit_1v1=delta_logit_1v1,
-                conf_2vx=conf_2vx,
-                conf_1v1=conf_1v1,
-                missing_2vx=missing_2vx,
-                missing_1v1=missing_1v1,
+        if relationships_enabled:
+            head_parts.append(
+                self._residual_readout(
+                    delta_logit_2vx=delta_logit_2vx,
+                    delta_logit_1v1=delta_logit_1v1,
+                    conf_2vx=conf_2vx,
+                    conf_1v1=conf_1v1,
+                    missing_2vx=missing_2vx,
+                    missing_1v1=missing_1v1,
+                )
             )
-        )
+        else:
+            head_parts.append(a.new_zeros(a.shape))
         logit = self.head(torch.cat(head_parts, dim=-1)).squeeze(-1)
-        logit = logit + self._prior_shortcut_logit(
-            mu_1vx=mu_1vx,
-            delta_logit_2vx=delta_logit_2vx,
-            delta_logit_1v1=delta_logit_1v1,
-            conf_2vx=conf_2vx,
-            conf_1v1=conf_1v1,
-        )
         if self.detail_enabled:
             detail_logit = self._detail_logit(m1v1_detail, like=logit)
             if self.config.detail_prior_gated:
@@ -1085,11 +1454,12 @@ class HGNNWinModel(nn.Module):
         # Context correction. The identity-conditioned module, when enabled,
         # supplies the residual in place of the shared context head; both are
         # antisymmetric, support-gated, and zero-init opt-in.
+        context_logit = logit.new_zeros(logit.shape)
         if self.identity_conditioned_context_enabled and identity_context_raw is not None:
             dense = None
             if self.identity_conditioned_context.dense_dim > 0 and identity_context is not None:
                 dense = identity_context[..., self.config.context_interpretable_dim :]
-            logit = logit + self.identity_conditioned_context(
+            context_logit = self.identity_conditioned_context(
                 identity_context_raw,
                 identity_context_support,
                 champion_id,
@@ -1097,8 +1467,19 @@ class HGNNWinModel(nn.Module):
                 dense,
             )
         elif self.context_enabled and identity_context is not None:
-            logit = logit + self._context_logit(identity_context, identity_context_support)
-        return {"final_logit": logit}
+            context_logit = self._context_logit(identity_context, identity_context_support)
+        base_logit = logit
+        logit = base_logit + context_logit
+        return {
+            "final_logit": logit,
+            "base_logit": base_logit,
+            "context_logit": context_logit,
+        }
+
+    def context_regularization_loss(self) -> torch.Tensor:
+        if not self.identity_conditioned_context_enabled:
+            return next(self.parameters()).new_zeros(())
+        return self.identity_conditioned_context.regularization_loss()
 
     def forward(
         self,
@@ -1119,7 +1500,6 @@ class HGNNWinModel(nn.Module):
         delta_logit_1v1: torch.Tensor | None = None,
         conf_1vx: torch.Tensor | None = None,
         log_count_1vx: torch.Tensor | None = None,
-        missing_1vx: torch.Tensor | None = None,
         conf_2vx: torch.Tensor | None = None,
         log_count_2vx: torch.Tensor | None = None,
         missing_2vx: torch.Tensor | None = None,
@@ -1146,7 +1526,6 @@ class HGNNWinModel(nn.Module):
             "delta_logit_1v1": delta_logit_1v1,
             "conf_1vx": conf_1vx,
             "log_count_1vx": log_count_1vx,
-            "missing_1vx": missing_1vx,
             "conf_2vx": conf_2vx,
             "log_count_2vx": log_count_2vx,
             "missing_2vx": missing_2vx,
@@ -1154,12 +1533,29 @@ class HGNNWinModel(nn.Module):
             "log_count_1v1": log_count_1v1,
             "missing_1v1": missing_1v1,
         }
-        inputs.update({key: value for key, value in optional.items() if value is not None})
-        return self._forward_impl(**inputs)
+        inputs.update(optional)
+        filtered = {key: value for key, value in inputs.items() if value is not None}
+        if self.config.structural_antisymmetry:
+            direct = self._forward_impl(**filtered)
+            swapped = self._forward_impl(**swap_hgnn_inputs(filtered))
+            scale = float(self.config.structural_antisymmetry_scale)
+            final_logit = scale * (direct["final_logit"] - swapped["final_logit"])
+            context_logit = scale * (direct["context_logit"] - swapped["context_logit"])
+            return {
+                "final_logit": final_logit,
+                "base_logit": final_logit - context_logit,
+                "context_logit": context_logit,
+            }
+        return self._forward_impl(**filtered)
 
 
 def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
     raw_config = dict(payload.get("model_config", {}))
+    if "use_relationship_integrations" not in raw_config:
+        # Older artifacts were trained with direct 1v1/2vX integration enabled
+        # before the flag existed. Preserve their saved semantics on load; newly
+        # trained models record the now-disabled default explicitly.
+        raw_config["use_relationship_integrations"] = True
     allowed = {field.name for field in fields(HGNNConfig)}
     config_dict = {
         key: value
@@ -1174,6 +1570,9 @@ def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
         "readout_hidden",
         "residual_head_hidden",
         "profile_head_hidden",
+        "context_head_hidden",
+        "team_slot_readout_hidden",
+        "context_summary_quantiles",
     ):
         if key in config_dict:
             config_dict[key] = tuple(config_dict[key])
@@ -1204,6 +1603,7 @@ def load_hgnn_model(path: Path, *, device: str = "cpu") -> tuple[HGNNWinModel, H
 
 
 __all__ = [
+    "ContextSetEncoder",
     "HGNNConfig",
     "HGNNWinModel",
     "IdentityEncoder",

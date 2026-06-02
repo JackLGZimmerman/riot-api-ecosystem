@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from app.classification.embeddings.runtime import (
+from app.ml.legacy_classification_runtime import (
     IdentityContextLookup,
     IdentityProfileLookup,
     IdentitySemanticLookup,
@@ -36,6 +36,7 @@ from app.ml.hgnn_model import (
 )
 from app.core.utils.common import fit_last_dim
 from app.core.utils.smoothing import (
+    smooth_rate_by_mode,
     smooth_ml_prior_features,
 )
 
@@ -134,7 +135,13 @@ class WinRatePredictor:
         self._identity_lookup = identity_lookup or IdentitySemanticLookup.load()
         self._profile_lookup = profile_lookup or IdentityProfileLookup.load()
         self._context_lookup = context_lookup or IdentityContextLookup.load()
-        self._m1v1_detail_lookup = m1v1_detail_lookup or RelationshipDetailLookup.load("m1v1")
+        self._use_relationship_integrations = bool(model.config.use_relationship_integrations)
+        self._use_m1v1_detail = bool(model.m1v1_detail_enabled)
+        self._m1v1_detail_lookup = (
+            m1v1_detail_lookup or RelationshipDetailLookup.load("m1v1")
+            if self._use_m1v1_detail
+            else None
+        )
         self._device = device
         # Identity-embedding mapping from the trained artifact's config.
         self._n_champions = model.config.n_champions
@@ -153,6 +160,19 @@ class WinRatePredictor:
             "p1_raw": p1_raw.reshape(1, -1),
             "p1_cnt": p1_cnt.reshape(1, -1),
         }
+        if not self._use_relationship_integrations:
+            return {
+                "win_rate": smooth_rate_by_mode(
+                    raw["p1_raw"],
+                    raw["p1_cnt"],
+                    prior_mean=DEFAULT_WIN_RATE,
+                    prior_strength=self._smoothing_prior_strength,
+                    amplification_threshold=self._amplification_threshold,
+                    smoothing_mode=self._smoothing_mode,
+                    confidence_threshold=self._prior_confidence_matchups,
+                ),
+                "p1_cnt": raw["p1_cnt"],
+            }
 
         # 1v1 levels (blue-perspective, 25): build -> no-build -> champion pair.
         m1v1_l0_wr, m1v1_l0_cnt = self._priors.lookup_1v1_blue(blue_tuples, red_tuples)
@@ -281,11 +301,13 @@ class WinRatePredictor:
             10,
             self._profile_lookup.dim,
         )
-        m1v1_detail = self._m1v1_detail_lookup.lookup_1v1_blue(blue_tuples, red_tuples).reshape(
-            1,
-            25,
-            self._m1v1_detail_lookup.dim,
-        )
+        m1v1_detail = None
+        if self._m1v1_detail_lookup is not None:
+            m1v1_detail = self._m1v1_detail_lookup.lookup_1v1_blue(blue_tuples, red_tuples).reshape(
+                1,
+                25,
+                self._m1v1_detail_lookup.dim,
+            )
         identity_context = self._context_lookup.lookup_players(tuples).reshape(
             1,
             10,
@@ -309,18 +331,23 @@ class WinRatePredictor:
             champion_id=champion_id,
             build_id=build_id,
             win_rate=raw["win_rate"],
-            matchup_1v1=raw["matchup_1v1"],
-            synergy_2vx=raw["synergy_2vx"],
             p1_cnt=raw["p1_cnt"],
-            m1v1_cnt=raw["m1v1_cnt"],
-            s2vx_cnt=raw["s2vx_cnt"],
             strength=self._prior_strength,
+            matchup_1v1=raw.get("matchup_1v1"),
+            synergy_2vx=raw.get("synergy_2vx"),
+            m1v1_cnt=raw.get("m1v1_cnt"),
+            s2vx_cnt=raw.get("s2vx_cnt"),
+            include_relationship_features=self._use_relationship_integrations,
             identity_semantic=fit_last_dim(identity_semantic, IDENTITY_SEMANTIC_DIM),
             identity_profile=fit_last_dim(identity_profile, IDENTITY_PROFILE_DIM),
             identity_context=fit_last_dim(identity_context, IDENTITY_CONTEXT_DIM),
             identity_context_support=identity_context_support,
             identity_context_raw=fit_last_dim(identity_context_raw, IDENTITY_CONTEXT_RAW_DIM),
-            m1v1_detail=fit_last_dim(m1v1_detail, RELATIONSHIP_DETAIL_DIM),
+            m1v1_detail=(
+                fit_last_dim(m1v1_detail, RELATIONSHIP_DETAIL_DIM)
+                if m1v1_detail is not None
+                else None
+            ),
             device=self._device,
         )
         with torch.no_grad():

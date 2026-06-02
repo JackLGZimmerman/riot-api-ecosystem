@@ -4,9 +4,8 @@ The embeddable population is one row per:
     (championid, teamposition, build)
 
 Rows are aggregated directly from filtered participant stats plus final
-participant timeline snapshots. Prior levels are derived in memory from the
-baseline aggregate, so classification no longer depends on persisted temporal
-ClickHouse tables.
+participant stat snapshots. Prior levels are derived in memory from the
+baseline aggregate.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ import numpy as np
 from app.classification.embeddings.config import (
     ALL_METRICS,
     FINAL_SNAPSHOT_AVG_METRICS,
+    FINAL_PARTICIPANT_STATS_TABLE,
     ITEM_VALUE_TOTALS_TABLE,
     LARGEST_AVG_METRICS,
     LEVEL_KEY,
@@ -30,12 +30,13 @@ from app.classification.embeddings.config import (
     PER_MINUTE_METRICS,
     PRIOR_LEVELS,
     RATE_METRICS,
-    RATE_LIKE_METRICS,
-    TIMELINE_CHECKPOINT_MINUTES,
-    TIMELINE_SOURCE_METRICS,
-    TIMELINE_STATS_TABLE,
     EmbeddingConfig,
     IdentityType,
+)
+from app.classification.embeddings.registry import (
+    EVIDENCE_BY_RAW_METRIC,
+    Evidence,
+    catalogue_hash,
 )
 from app.core.utils.common import sql_literal
 from app.core.utils.smoothing import (
@@ -134,6 +135,7 @@ def _save_level_rows(path: Path, rows: LevelRows) -> None:
             "__n": np.asarray([rows.n], dtype=np.int64),
             "__level": np.asarray([rows.level.value], dtype=object),
             "__key_columns": np.asarray(rows.key_columns, dtype=object),
+            "__catalogue_hash": np.asarray([catalogue_hash()], dtype=object),
             **rows.columns,
         },
     )
@@ -148,6 +150,12 @@ def _load_level_rows(path: Path, level: IdentityType) -> LevelRows | None:
     key_columns = tuple(str(value) for value in columns.pop("__key_columns").tolist())
     if cached_level != level.value or key_columns != LEVEL_KEY[level]:
         logger.warning("Ignoring stale classification cache %s", path)
+        return None
+    # Pre-hash caches are grandfathered (absent hash); caches written since carry
+    # the catalogue hash and are rejected when the catalogue changes.
+    cached_hash = columns.pop("__catalogue_hash", None)
+    if cached_hash is not None and str(cached_hash[0]) != catalogue_hash():
+        logger.warning("Ignoring classification cache with stale catalogue %s", path)
         return None
     if any(arr.shape != (n,) for arr in columns.values()):
         logger.warning("Ignoring malformed classification cache %s", path)
@@ -289,7 +297,7 @@ SETTINGS
 """
 
 
-def _timeline_final_query(split: str) -> str:
+def _final_snapshot_query(split: str) -> str:
     split_sql = sql_literal(split)
     tuple_select = ",\n                ".join(FINAL_SNAPSHOT_AVG_METRICS)
     metric_aggs = ",\n    ".join(
@@ -298,7 +306,7 @@ def _timeline_final_query(split: str) -> str:
     )
     return f"""
 WITH
-timeline_final AS (
+final_snapshot AS (
     SELECT
         matchid,
         participantid,
@@ -308,7 +316,7 @@ timeline_final AS (
             ),
             frame_timestamp
         ) AS final_stats
-    FROM {TIMELINE_STATS_TABLE}
+    FROM {FINAL_PARTICIPANT_STATS_TABLE}
     WHERE matchid IN (
         SELECT matchid
         FROM {ML_GAME_SPLIT_TABLE}
@@ -325,73 +333,7 @@ SELECT
     ps.build AS build,
     {metric_aggs}
 FROM participant_context AS ps
-LEFT JOIN timeline_final AS ts
-    ON
-        ps.matchid = ts.matchid
-        AND ps.participantid = ts.participantid
-GROUP BY
-    championid,
-    teamposition,
-    build
-SETTINGS
-    max_threads = 2,
-    max_bytes_before_external_group_by = 2000000000,
-    max_bytes_before_external_sort = 2000000000
-"""
-
-
-def _timeline_checkpoint_query(split: str, minute: int) -> str:
-    split_sql = sql_literal(split)
-    checkpoint_tuple = ",\n                ".join(
-        expr for _, expr in TIMELINE_SOURCE_METRICS
-    )
-    has_expr = "coalesce(ts.matchid, '') != ''"
-    metric_aggs = []
-    for i, (metric, _) in enumerate(TIMELINE_SOURCE_METRICS, start=1):
-        name = f"tl_{minute}_{metric}"
-        metric_aggs.append(
-            "toFloat32("
-            f"coalesce(avgIf(tupleElement(ts.stats, {i}), {has_expr}), 0)"
-            f") AS {name}"
-        )
-    metric_aggs.append(
-        "toFloat32("
-        f"1.0 - (countIf({has_expr}) / count())"
-        f") AS tl_{minute}_missing"
-    )
-    threshold_ms = minute * 60_000
-    return f"""
-WITH
-timeline_checkpoint AS (
-    SELECT
-        matchid,
-        participantid,
-        argMax(
-            tuple(
-                {checkpoint_tuple}
-            ),
-            frame_timestamp
-        ) AS stats
-    FROM {TIMELINE_STATS_TABLE}
-    WHERE
-        frame_timestamp <= {threshold_ms}
-        AND matchid IN (
-            SELECT matchid
-            FROM {ML_GAME_SPLIT_TABLE}
-            WHERE split = {split_sql}
-        )
-    GROUP BY
-        matchid,
-        participantid
-),
-{_participant_context_cte(split_sql, include_stats=False)}
-SELECT
-    ps.championid_nn AS championid,
-    ps.teamposition_str AS teamposition,
-    ps.build AS build,
-    {", ".join(metric_aggs)}
-FROM participant_context AS ps
-LEFT JOIN timeline_checkpoint AS ts
+LEFT JOIN final_snapshot AS ts
     ON
         ps.matchid = ts.matchid
         AND ps.participantid = ts.participantid
@@ -432,9 +374,9 @@ def _merge_identity_metrics(
         cached = _load_npz_columns(cache_path)
         if cached is not None and set(cached) == set(metrics):
             if all(cached[metric].shape == (rows.n,) for metric in metrics):
-                logger.info("Loaded cached timeline metrics: %s", cache_path.name)
+                logger.info("Loaded cached identity metrics: %s", cache_path.name)
                 return rows.with_columns({metric: cached[metric] for metric in metrics})
-            logger.warning("Ignoring malformed timeline cache %s", cache_path)
+            logger.warning("Ignoring malformed identity cache %s", cache_path)
 
     fetched = get_client().query(query).result_rows
     index = _baseline_index(rows)
@@ -448,7 +390,7 @@ def _merge_identity_metrics(
             continue
         for offset, metric in enumerate(metrics, start=3):
             extra[metric][idx] = np.float32(row[offset] or 0.0)
-    logger.info("Merged %d timeline rows into %s", len(fetched), rows.level.value)
+    logger.info("Merged %d metric rows into %s", len(fetched), rows.level.value)
     if cache_path is not None:
         _save_npz_atomic(cache_path, extra)
     return rows.with_columns(extra)
@@ -492,21 +434,10 @@ def load_baseline(cfg: EmbeddingConfig) -> LevelRows:
         )
     rows = _merge_identity_metrics(
         rows,
-        _timeline_final_query(cfg.split),
+        _final_snapshot_query(cfg.split),
         FINAL_SNAPSHOT_AVG_METRICS,
-        cache_path=_raw_cache_path(cfg, "timeline_final"),
+        cache_path=_raw_cache_path(cfg, "final_snapshot"),
     )
-    for minute in TIMELINE_CHECKPOINT_MINUTES:
-        metrics = (
-            *(f"tl_{minute}_{metric}" for metric, _ in TIMELINE_SOURCE_METRICS),
-            f"tl_{minute}_missing",
-        )
-        rows = _merge_identity_metrics(
-            rows,
-            _timeline_checkpoint_query(cfg.split, minute),
-            metrics,
-            cache_path=_raw_cache_path(cfg, f"timeline_{minute}"),
-        )
     return rows
 
 
@@ -574,20 +505,16 @@ def derive_prior(level: IdentityType, baseline: LevelRows) -> LevelRows:
         dtype=np.float32,
     )
 
-    for metric in RATE_LIKE_METRICS:
+    weight_by_evidence = {
+        Evidence.MATCHUPS: matchups,
+        Evidence.SUM_W_TIMEPLAYED: timeplayed,
+    }
+    for metric in ALL_METRICS:
         values = baseline.columns[metric]
+        weights = weight_by_evidence[EVIDENCE_BY_RAW_METRIC[metric]]
         columns[metric] = np.asarray(
             [
-                _weighted_average(values, matchups, np.asarray(grouped[key], dtype=np.int64))
-                for key in keys
-            ],
-            dtype=np.float32,
-        )
-    for metric in PER_MINUTE_METRICS:
-        values = baseline.columns[metric]
-        columns[metric] = np.asarray(
-            [
-                _weighted_average(values, timeplayed, np.asarray(grouped[key], dtype=np.int64))
+                _weighted_average(values, weights, np.asarray(grouped[key], dtype=np.int64))
                 for key in keys
             ],
             dtype=np.float32,

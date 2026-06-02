@@ -79,7 +79,7 @@ dependencies = [
     "tensorrt-cu13[numpy]==10.16.1.11",
     "pyarrow>=17.0.0",
     "tensorboard>=2.20.0",
-    "scipy>=1.17.1",
+    "pandas>=3.0.3",
 ]
 
 [tool.pyright]

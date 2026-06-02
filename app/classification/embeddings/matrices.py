@@ -119,6 +119,11 @@ def build_level_matrix(
     matchups = rows.columns["matchups"][sorted_row_idx].astype(np.float32)
 
     standardised, _, _ = median_mad_standardise(base_matrix)
+    if cfg.matrix_clip_value is not None:
+        clip = float(cfg.matrix_clip_value)
+        if clip <= 0.0:
+            raise ValueError("matrix_clip_value must be positive when set")
+        standardised = np.clip(standardised, -clip, clip)
     matrix = standardised.astype(np.float32)
     feature_names = tuple(cfg.feature_set)
 

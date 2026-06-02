@@ -25,14 +25,14 @@ from pathlib import Path
 
 import numpy as np
 
-from app.classification.embeddings.config import IDENTITY_CONTEXT_INTERP_DIM
-from app.classification.embeddings.runtime import IdentityContextLookup
 from app.core.logging.logger import setup_logging_config
 from app.core.utils.common import POSITIONS
+from app.ml.legacy_classification_runtime import IdentityContextLookup
 from app.ml.cache_layout import (
     CACHE_FORMAT,
     CACHE_META_FILE,
     IDENTITY_CONTEXT_DIM,
+    IDENTITY_CONTEXT_INTERP_DIM,
     array_paths,
 )
 from app.ml.config import DatasetConfig

@@ -111,9 +111,24 @@ class TrainConfig:
     device: str = "auto"
     seed: int = 0
     max_grad_norm: float | None = 1.0
+    # Supported values are defined in app.ml.train.CHECKPOINT_METRICS.
+    # The default preserves the production threshold-tuned checkpoint path.
     checkpoint_metric: str = "val_threshold_accuracy"
     # Minimum checkpoint-score improvement required to reset early stopping.
     # For the default threshold-accuracy metric, 5e-4 means tiny validation
     # wiggles no longer keep training alive when we are looking for material
     # movement.
     checkpoint_min_delta: float = 5e-4
+    # Validation-only, report-only context support calibration diagnostic. This
+    # never changes served probabilities or checkpoint selection.
+    report_context_support_calibration: bool = False
+    context_support_calibration_min_bucket: int = 500
+    # Experimental, training-only auxiliary objective. When >0, the context
+    # residual is also trained against labels on top of a detached non-context
+    # base logit. This is opt-in and does not change served inference shape.
+    context_auxiliary_loss_weight: float = 0.0
+    # Experimental, training-only pairwise ranking objective. When >0, each
+    # batch samples positive/negative logit pairs and adds a soft AUC surrogate
+    # to BCE. This is opt-in research behaviour and does not affect inference.
+    auc_ranking_loss_weight: float = 0.0
+    auc_ranking_loss_pairs: int = 4096
