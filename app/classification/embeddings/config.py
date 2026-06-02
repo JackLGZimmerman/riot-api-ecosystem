@@ -23,7 +23,10 @@ PARTICIPANT_STATS_TABLE = "game_data_filtered.participant_stats"
 ITEM_VALUE_TOTALS_TABLE = "game_data_filtered.participant_item_value_totals"
 ML_GAME_SPLIT_TABLE = "game_data_filtered.ml_game_split"
 TIMELINE_STATS_TABLE = "game_data.tl_participant_stats"
-PARTICIPANT_CHALLENGES_TABLE = "game_data.participant_challenges"
+
+# Challenge-derived data is forbidden in classification embeddings. Do not add
+# participant_challenges joins or challenge_* columns here; they are post-game
+# diagnostics and are not valid identity semantics for draft-time use.
 
 DENSE_IDENTITY_DIM = 64
 
@@ -68,44 +71,6 @@ TIMELINE_CHECKPOINT_MISSING_METRICS: tuple[str, ...] = tuple(
     f"tl_{minute}_missing" for minute in TIMELINE_CHECKPOINT_MINUTES
 )
 
-CHALLENGE_AVG_METRICS: tuple[str, ...] = (
-    "challenge_solokills",
-    "challenge_quicksolokills",
-    "challenge_maxcsadvantageonlaneopponent",
-    "challenge_maxlevelleadlaneopponent",
-    "challenge_damageperminute",
-    "challenge_goldperminute",
-    "challenge_teamdamagepercentage",
-    "challenge_earlylaningphasegoldexpadvantage",
-    "challenge_laningphasegoldexpadvantage",
-    "challenge_turretplatestaken",
-    "challenge_firstturretkilled",
-    "challenge_firstturretkilledtime",
-    "challenge_takedownonfirstturret",
-    "challenge_turrettakedowns",
-    "challenge_missing",
-)
-
-RELATIONSHIP_DETAIL_FEATURES: tuple[str, ...] = (
-    "gold_diff_mean",
-    "gold_adv_2k_net_rate",
-    "gold_adv_5k_net_rate",
-    "cs_diff_mean",
-    "cs_adv_50_net_rate",
-    "xp_diff_mean",
-    "champion_damage_diff_mean",
-    "damage_adv_20k_net_rate",
-    "damage_taken_diff_mean",
-    "solo_kills_diff_mean",
-    "solo2_net_rate",
-    "max_cs_adv_diff_mean",
-    "max_level_lead_diff_mean",
-    "turret_plate_diff_mean",
-    "gold_diff_10_mean",
-    "gold_diff_15_mean",
-)
-RELATIONSHIP_DETAIL_DIM = len(RELATIONSHIP_DETAIL_FEATURES)
-
 # Interpretable per-identity "matchup profile" consumed by the HGNN cross-team
 # interaction term. Each identity is summarised by where it deals champion
 # damage, how much champion-damage pressure it usually supplies, and where it
@@ -137,6 +102,143 @@ IDENTITY_PROFILE_FEATURES: tuple[str, ...] = (
     "true_damage_pressure",
 )
 IDENTITY_PROFILE_DIM = len(IDENTITY_PROFILE_FEATURES)
+
+
+# ---------------------------------------------------------------------------
+# identity_context: the "context atlas" descriptor consumed by the HGNN's
+# unified antisymmetric context head. It generalises the 9-dim matchup profile
+# to every identity: the first 9 axes are byte-for-byte the profile axes, then
+# additional interpretable natural-unit pressure axes the audit shows the model
+# is blind to (damage-taken, ally heal/shield, crowd control, siege, scaling),
+# followed by a dense low-rank PCA tail over the remaining allowed metrics.
+#
+# Hard constraint: NO challenge data anywhere in this path or in classification
+# embeddings generally. The interpretable sources are participant_stats
+# per-minute / end-of-game aggregations and timeline snapshots only. All values
+# are train-split identity aggregates, so the descriptor is draft-time estimable
+# and never reads the current match.
+IDENTITY_CONTEXT_CACHE_PATH = EMBEDDINGS_CACHE_DIR / "identity_context_embedding.npz"
+
+# Source columns (resolved from the smoothed baseline) needed to build the
+# interpretable axes. armor/magicresist become resistance fractions; the
+# per-minute volumes become robust-scaled [0, 1] "pressure" axes in the writer.
+IDENTITY_CONTEXT_INTERP_SOURCE_FEATURES: tuple[str, ...] = (
+    "physicaldamagedealttochampions_share",
+    "magicdamagedealttochampions_share",
+    "truedamagedealttochampions_share",
+    "armor",
+    "magicresist",
+    "totaldamagedealttochampions",
+    "totaldamagetaken",
+    "ally_support",  # totalhealsonteammates + totaldamageshieldedonteammates
+    "timeccingothers",
+    "structure_damage",  # damagedealttobuildings + damagedealttoturrets
+    "goldearned",
+)
+IDENTITY_CONTEXT_INTERP_FEATURES: tuple[str, ...] = (
+    "phys_offense_share",  # 0
+    "magic_offense_share",  # 1
+    "true_offense_share",  # 2
+    "armor_resist_frac",  # 3
+    "mr_resist_frac",  # 4
+    "champion_damage_pressure",  # 5
+    "phys_damage_pressure",  # 6
+    "magic_damage_pressure",  # 7
+    "true_damage_pressure",  # 8
+    "damage_taken_pressure",  # 9
+    "heal_shield_pressure",  # 10
+    "cc_pressure",  # 11
+    "siege_pressure",  # 12
+    "scaling_pressure",  # 13
+)
+IDENTITY_CONTEXT_INTERP_DIM = len(IDENTITY_CONTEXT_INTERP_FEATURES)
+# Stable axis indices shared by the writer, the HGNN context head (resistance /
+# damage-taken / heal-shield products), and the post-train probes.
+CONTEXT_OFFENSE_DIMS = 3
+CONTEXT_ARMOR_INDEX = 3
+CONTEXT_MR_INDEX = 4
+CONTEXT_DAMAGE_PRESSURE_INDEX = 5
+CONTEXT_TAKEN_INDEX = 9
+CONTEXT_HEAL_SHIELD_INDEX = 10
+CONTEXT_CC_INDEX = 11
+CONTEXT_SIEGE_INDEX = 12
+CONTEXT_SCALING_INDEX = 13
+# Dense PCA tail width over the remaining allowed (challenge-free) metrics.
+IDENTITY_CONTEXT_LOWRANK_DIM = 10
+IDENTITY_CONTEXT_DIM = IDENTITY_CONTEXT_INTERP_DIM + IDENTITY_CONTEXT_LOWRANK_DIM
+
+# ---------------------------------------------------------------------------
+# Wide RAW atlas block: the primary interaction source for the identity-
+# conditioned context head. Design principle: "wide raw input atlas, narrow
+# regularised interaction mechanism". The first IDENTITY_CONTEXT_INTERP_DIM
+# columns are byte-for-byte the natural-unit interpretable axes (the debuggable
+# core, kept in [0, 1] so the damage-pressure weight stays a valid non-negative
+# weight); the remaining columns are a broad selection of draft-safe metrics,
+# median/MAD-standardised but NOT PCA-compressed, so identity-specific
+# interactions are not hidden by compression. Same hard constraint as the rest of
+# this path: no challenge data anywhere.
+IDENTITY_CONTEXT_RAW_EXTRA_FEATURES: tuple[str, ...] = (
+    # Damage type / efficiency
+    "physicaldamagedealttochampions_share",
+    "magicdamagedealttochampions_share",
+    "truedamagedealttochampions_share",
+    "champion_damage_to_total_damage_ratio",
+    "totaldamagedealttochampions_to_goldearned_ratio",
+    "totaldamagedealttochampions_to_deaths_ratio",
+    # Resistances / durability
+    "armor",
+    "magicresist",
+    "healthmax",
+    "armor_to_goldearned_ratio",
+    "magicresist_to_goldearned_ratio",
+    "healthmax_to_goldearned_ratio",
+    "durability_total_to_goldearned_ratio",
+    "durability_total_to_deaths_ratio",
+    "damageselfmitigated_to_goldearned_ratio",
+    "physicaldamagetaken_to_durability_total_ratio",
+    "magicdamagetaken_to_durability_total_ratio",
+    "damage_taken_to_goldearned_ratio",
+    "vamp_sustain",
+    "self_heal_to_goldearned_ratio",
+    # Statline / scaling levers
+    "attackdamage",
+    "abilitypower",
+    "attackspeed",
+    "movementspeed",
+    "attackdamage_to_goldearned_ratio",
+    "abilitypower_to_goldearned_ratio",
+    # Combat tempo
+    "kills_to_deaths_ratio",
+    "assists_to_deaths_ratio",
+    "takedowns_to_deaths_ratio",
+    "kills_to_assists_ratio",
+    "largestkillingspree",
+    "largestmultikill",
+    # Utility / enchanting / crowd control
+    "ally_support_to_goldearned_ratio",
+    "totalhealsonteammates_to_goldearned_ratio",
+    "totaldamageshieldedonteammates_to_goldearned_ratio",
+    "cc_effectiveness_ratio",
+    "cc_to_assists_ratio",
+    "visionscore_to_goldearned_ratio",
+    # Economy / farming / objectives
+    "total_farm_to_goldearned_ratio",
+    "champexperience_to_goldearned_ratio",
+    "jungle_minion_share",
+    "structure_damage_to_goldearned_ratio",
+    "objective_damage_to_goldearned_ratio",
+    "epic_kills",
+    # Timeline trajectory (scaling / tempo)
+    "tl_5_10_gold_per_minute",
+    "tl_10_15_gold_per_minute",
+    "tl_10_15_xp_per_minute",
+    "tl_10_15_champion_damage_per_minute",
+)
+IDENTITY_CONTEXT_RAW_FEATURES: tuple[str, ...] = (
+    *IDENTITY_CONTEXT_INTERP_FEATURES,
+    *IDENTITY_CONTEXT_RAW_EXTRA_FEATURES,
+)
+IDENTITY_CONTEXT_RAW_DIM = len(IDENTITY_CONTEXT_RAW_FEATURES)
 
 
 class IdentityType(str, Enum):
@@ -282,9 +384,19 @@ RATE_LIKE_METRICS: tuple[str, ...] = (
     *FINAL_SNAPSHOT_AVG_METRICS,
     *TIMELINE_CHECKPOINT_METRICS,
     *TIMELINE_CHECKPOINT_MISSING_METRICS,
-    *CHALLENGE_AVG_METRICS,
 )
 ALL_METRICS: tuple[str, ...] = (*RATE_LIKE_METRICS, *PER_MINUTE_METRICS)
+
+
+def _assert_no_challenge_features(
+    feature_set: tuple[str, ...],
+    *,
+    owner: str,
+) -> None:
+    leaked = tuple(name for name in feature_set if "challenge" in name.lower())
+    if leaked:
+        preview = ", ".join(leaked[:5])
+        raise AssertionError(f"{owner} cannot use challenge data: {preview}")
 
 
 def _safe_divide(num: np.ndarray, denom: np.ndarray) -> np.ndarray:
@@ -692,7 +804,35 @@ for _start, _end in TIMELINE_SLOPE_INTERVALS:
 
 def identity_semantic_feature_set() -> tuple[str, ...]:
     """Dense identity descriptor inputs used by the HGNN semantic feature path."""
-    return (*ALL_METRICS, *DERIVED_METRIC_FUNCS.keys())
+    feature_set = (*ALL_METRICS, *DERIVED_METRIC_FUNCS.keys())
+    _assert_no_challenge_features(feature_set, owner="identity_semantic_feature_set")
+    return feature_set
+
+
+def identity_context_feature_set() -> tuple[str, ...]:
+    """Low-rank-tail inputs for the identity_context descriptor.
+
+    Every allowed source metric (participant_stats per-minute / end-of-game plus
+    timeline checkpoints/slopes) and every derived ratio. Challenge-derived
+    columns are categorically disallowed: this path must never touch
+    participant_challenges or challenge_* features.
+    """
+    feature_set = (*ALL_METRICS, *DERIVED_METRIC_FUNCS.keys())
+    _assert_no_challenge_features(feature_set, owner="identity_context_feature_set")
+    return feature_set
+
+
+def identity_context_raw_extra_feature_set() -> tuple[str, ...]:
+    """Standardised wide-raw inputs appended after the interpretable axes.
+
+    The interpretable axes are computed in natural units by the writer; these
+    extra metrics are median/MAD-standardised. Same challenge prohibition.
+    """
+    _assert_no_challenge_features(
+        IDENTITY_CONTEXT_RAW_EXTRA_FEATURES,
+        owner="identity_context_raw_extra_feature_set",
+    )
+    return IDENTITY_CONTEXT_RAW_EXTRA_FEATURES
 
 
 @dataclass(frozen=True)

@@ -56,8 +56,10 @@ class RawTensorSplit:
     build_id: torch.Tensor | None = None
     identity_semantic: torch.Tensor | None = None
     identity_profile: torch.Tensor | None = None
+    identity_context: torch.Tensor | None = None
+    identity_context_support: torch.Tensor | None = None
+    identity_context_raw: torch.Tensor | None = None
     m1v1_detail: torch.Tensor | None = None
-    s2vx_detail: torch.Tensor | None = None
 
 
 def resolve_device(device: str) -> str:
@@ -91,6 +93,39 @@ def _limit_split(split: SplitData, max_games: int | None) -> SplitData:
         return split
     n = int(max_games)
     return _map_split(split, lambda array: array[:n])
+
+
+def _drop_unused_model_arrays(split: SplitData, config: HGNNConfig) -> SplitData:
+    """Null out per-player classification arrays the configured model never reads.
+
+    Production uses the threshold-tuned identity-conditioned raw context head as
+    the naive semantic-context implementation. The legacy semantic / profile /
+    1v1-detail node paths remain disabled, and the two context heads are
+    mutually exclusive, so this keeps multiple GB of unused tensors off the GPU
+    without changing any model output (build_hgnn_inputs only forwards present
+    arrays)."""
+    conditioned = (
+        config.use_identity_conditioned_context
+        and config.identity_context_conditioning_type == "low_rank"
+        and config.identity_context_raw_dim > 0
+    )
+    drop: dict[str, bool] = {
+        "identity_semantic": config.identity_semantic_dim <= 0,
+        "identity_profile": config.identity_profile_dim <= 0,
+        "m1v1_detail": config.m1v1_detail_dim <= 0,
+        # raw block: only the conditioned head consumes it.
+        "identity_context_raw": not conditioned,
+        # 24-dim descriptor: the shared head always needs it; the conditioned head
+        # needs it only for the raw_plus_dense source's dense tail.
+        "identity_context": config.identity_context_dim <= 0
+        or (conditioned and config.identity_context_source != "raw_plus_dense"),
+    }
+    overrides = {name: None for name, unused in drop.items() if unused}
+    if not overrides:
+        return split
+    return type(split)(
+        **{f.name: overrides.get(f.name, getattr(split, f.name)) for f in fields(split)}
+    )
 
 
 def _binary_auc(scores: np.ndarray, targets: np.ndarray) -> float:
@@ -338,45 +373,50 @@ def _checkpoint_score(
     )
 
 
-def _hgnn_config_from_meta(meta: dict[str, Any]) -> HGNNConfig:
+def _hgnn_config_from_meta(
+    meta: dict[str, Any],
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> HGNNConfig:
     classification = meta.get("classification", {}) if isinstance(meta, dict) else {}
-    # Empirical classification-feature selection (see documentation/README and
-    # the central-band analysis): the dense semantic identity is redundant with
-    # the learned champion embedding, and the 1v1 matchup detail is redundant
-    # with the matchup win-rate prior -- both only add overfitting capacity
-    # (train AUC 0.60->0.63, test 0.5925->0.5875). Only the 2vX team-synergy
-    # detail carries a small residual signal, concentrated in the central band
-    # (coin-flip matchups), so the win predictor consumes only that, via the
-    # prior-gated antisymmetric detail term. The cache still builds all three
-    # arrays; flip these dims to re-enable a pathway for experiments.
-    # The cross-team matchup-profile interaction adds the enemy-composition
-    # conditioning axis the win-rate prior is structurally blind to (e.g. an
-    # armor-stacking identity vs a physical-damage enemy team). The profile now
-    # carries expected champion-damage pressure, so the head receives a
-    # draft-time, damage-weighted enemy offense context instead of treating all
-    # five opponents as equal damage contributors. Explicit resistance x enemy
-    # offense products expose the core specialization axis to the shared profile
-    # head (armor tanks into physical damage, MR tanks into magic damage, etc.).
-    # The broad semantic node path stays disabled, but a tiny semantic bottleneck
-    # is enabled inside the profile head so historical durability/identity
-    # context can condition the response without becoming a standalone memorizer.
-    return HGNNConfig(
+    # Production classification context is the threshold-tuned raw-atlas
+    # identity-conditioned head. It is the first deliberately naive semantic
+    # context implementation: give every (champion, role, build) a draft-safe raw
+    # semantic descriptor, then let a low-rank bottleneck learn which ally/enemy
+    # context interactions matter for that identity. The shared 24-dim atlas head
+    # remains available as an explicit baseline, but production uses the raw head
+    # because the win-rate prior marginalises over enemy/ally composition and the
+    # shared head under-fits identity-specific tails (armor tank vs physical
+    # enemy, MR tank vs magic enemy, low-damage team vs enemy heal/shield, etc.).
+    # The head is antisymmetric, support-gated, and zero-initialised, so it is
+    # opt-in on top of the win-rate model.
+    base = dict(
         n_champions=int(meta["n_champions"]),
         n_builds=int(meta["n_builds"]),
         build_vocab=tuple(meta["build_vocab"]),
         identity_semantic_dim=0,
-        identity_profile_dim=int(classification.get("identity_profile_dim", 5)),
-        profile_context_dim=int(classification.get("identity_semantic_dim", 0)),
-        profile_context_rank=4,
-        profile_include_ally_context=False,
-        profile_include_weighted_enemy_context=True,
-        profile_include_resistance_products=True,
-        profile_offense_dims=3,
-        profile_damage_pressure_index=5,
-        profile_head_hidden=(24,),
+        identity_profile_dim=0,
         m1v1_detail_dim=0,
-        s2vx_detail_dim=int(classification.get("s2vx_detail_dim", 16)),
+        identity_context_dim=int(classification.get("identity_context_dim", 0)),
+        context_interpretable_dim=int(classification.get("context_interpretable_dim", 14)),
+        context_head_hidden=(32,),
+        context_support_strength=30.0,
+        context_include_ally=True,
+        context_include_relational=True,
+        identity_context_raw_dim=int(classification.get("identity_context_raw_dim", 0)),
+        use_identity_conditioned_context=True,
+        identity_context_conditioning_type="low_rank",
+        identity_context_source="raw",
+        identity_context_rank=16,
+        identity_context_hidden_dim=64,
+        identity_context_emb_dim=16,
+        identity_context_init_scale=0.01,
+        identity_context_dropout=0.0,
+        identity_context_use_residual_mlp=False,
     )
+    if overrides:
+        base.update(overrides)
+    return HGNNConfig(**base)
 
 
 def _hgnn_inputs_from_raw(
@@ -399,8 +439,10 @@ def _hgnn_inputs_from_raw(
         strength=strength,
         identity_semantic=raw.identity_semantic,
         identity_profile=raw.identity_profile,
+        identity_context=raw.identity_context,
+        identity_context_support=raw.identity_context_support,
+        identity_context_raw=raw.identity_context_raw,
         m1v1_detail=raw.m1v1_detail,
-        s2vx_detail=raw.s2vx_detail,
         device=device,
     )
 
@@ -428,6 +470,8 @@ def _predict_hgnn(
 def train(
     dataset_cfg: DatasetConfig | None = None,
     train_cfg: TrainConfig | None = None,
+    *,
+    model_overrides: dict[str, Any] | None = None,
 ) -> Path:
     dataset_cfg = dataset_cfg or DatasetConfig()
     train_cfg = train_cfg or TrainConfig()
@@ -439,8 +483,11 @@ def train(
     # Cap the training batch because each step also runs a team-swapped copy.
     train_batch_size = min(train_cfg.batch_size, HGNN_TRAIN_BATCH)
 
+    meta = identity_meta(dataset_cfg)
+    model_config = _hgnn_config_from_meta(meta, overrides=model_overrides)
+
     splits = {
-        name: _limit_split(split, dataset_cfg.max_games)
+        name: _drop_unused_model_arrays(_limit_split(split, dataset_cfg.max_games), model_config)
         for name, split in load_splits(dataset_cfg, require_counts=True).items()
     }
     if splits["train"].blue_win.size == 0:
@@ -450,8 +497,6 @@ def train(
         for name in ("train", "val")
     }
 
-    meta = identity_meta(dataset_cfg)
-    model_config = _hgnn_config_from_meta(meta)
     model = HGNNWinModel(model_config).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -638,7 +683,27 @@ def train(
     return train_cfg.model_path
 
 
-def _parse_args() -> tuple[DatasetConfig, TrainConfig]:
+def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """HGNNConfig overrides for production semantic context or its baseline."""
+    if args.shared_context:
+        return {
+            "use_identity_conditioned_context": False,
+            "identity_context_conditioning_type": "none",
+        }
+    return {
+        "use_identity_conditioned_context": True,
+        "identity_context_conditioning_type": "low_rank",
+        "identity_context_source": args.identity_context_source,
+        "identity_context_rank": args.identity_context_rank,
+        "identity_context_hidden_dim": args.identity_context_hidden_dim,
+        "identity_context_emb_dim": args.identity_context_emb_dim,
+        "identity_context_init_scale": args.identity_context_init_scale,
+        "identity_context_dropout": args.identity_context_dropout,
+        "identity_context_use_residual_mlp": args.identity_context_residual_mlp,
+    }
+
+
+def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
     dataset_defaults = DatasetConfig()
     train_defaults = TrainConfig()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -660,6 +725,30 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig]:
         type=float,
         default=train_defaults.checkpoint_min_delta,
     )
+    parser.add_argument(
+        "--identity-conditioned",
+        action="store_true",
+        help=(
+            "Deprecated no-op: the low-rank identity-conditioned raw context "
+            "head is now the production default."
+        ),
+    )
+    parser.add_argument(
+        "--shared-context",
+        action="store_true",
+        help="Use the legacy shared 24-dim context-atlas head instead of production semantic context.",
+    )
+    parser.add_argument(
+        "--identity-context-source",
+        default="raw",
+        choices=("raw", "raw_plus_dense"),
+    )
+    parser.add_argument("--identity-context-rank", type=int, default=16)
+    parser.add_argument("--identity-context-hidden-dim", type=int, default=64)
+    parser.add_argument("--identity-context-emb-dim", type=int, default=16)
+    parser.add_argument("--identity-context-init-scale", type=float, default=0.01)
+    parser.add_argument("--identity-context-dropout", type=float, default=0.0)
+    parser.add_argument("--identity-context-residual-mlp", action="store_true")
     args = parser.parse_args()
     return (
         DatasetConfig(cache_dir=args.cache_dir, max_games=args.max_games),
@@ -677,12 +766,13 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig]:
             checkpoint_metric=args.checkpoint_metric,
             checkpoint_min_delta=args.checkpoint_min_delta,
         ),
+        _model_overrides_from_args(args),
     )
 
 
 def main() -> None:
-    dataset_cfg, train_cfg = _parse_args()
-    train(dataset_cfg, train_cfg)
+    dataset_cfg, train_cfg, model_overrides = _parse_args()
+    train(dataset_cfg, train_cfg, model_overrides=model_overrides)
 
 
 if __name__ == "__main__":

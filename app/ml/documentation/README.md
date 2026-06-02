@@ -1,9 +1,13 @@
 # ML Win-Rate Model
 
-As of 2026-06-01, production uses the direct relationship HGNN path plus the
-semantic matchup-profile interaction. The typed relation encoder experiments
-were removed after the same-split ablation showed the direct model had the best
-NLL/Brier/ECE while matching relation AUC.
+As of 2026-06-02, production uses the direct relationship HGNN path plus the
+threshold-tuned raw identity-conditioned context head. This is the naive
+semantic-context implementation: a wide draft-safe identity atlas, a low-rank
+identity-specific ally/enemy interaction, and no manual champion-specific rules.
+The shared 24-dim context-atlas head remains available as `--shared-context` for
+baseline runs. Context docs:
+[HGNN_CONTEXT_ATLAS.md](HGNN_CONTEXT_ATLAS.md) and
+[HGNN_IDENTITY_CONDITIONED_CONTEXT.md](HGNN_IDENTITY_CONDITIONED_CONTEXT.md).
 
 ## Production Path
 
@@ -14,8 +18,7 @@ cache/prior arrays
 -> blue/red team readout
 -> direct 1v1/2vX residual head
 -> direct prior shortcut
--> 2vX semantic-detail nudge
--> cross-team matchup-profile interaction
+-> raw identity-conditioned context interaction (support-gated, antisymmetric)
 -> final logit
 -> sigmoid = P(blue wins)
 ```
@@ -37,7 +40,7 @@ Runtime prediction uses `load_predictor()` from `app/ml/predictor.py`.
 
 ## Cache Contract
 
-The model consumes `npy-memmap-v23` cache arrays with 10 ordered slots:
+The model consumes `npy-memmap-v26` cache arrays with 10 ordered slots:
 
 ```text
 0..4 = blue TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
@@ -54,14 +57,15 @@ The model consumes `npy-memmap-v23` cache arrays with 10 ordered slots:
 | `s2vx_cnt.npy` | `[games, 20]` | raw `2vX` support for direct confidence/missing features |
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
-| `identity_semantic.npy` | `[games, 10, 64]` | low-rank profile conditioning context |
-| `identity_profile.npy` | `[games, 10, 9]` | interpretable cross-team matchup profile |
-| `s2vx_detail.npy` | `[games, 20, 16]` | small 2vX semantic-detail nudge |
+| `identity_context.npy` | `[games, 10, 24]` | shared descriptor; dense tail available to `raw_plus_dense` experiments |
+| `identity_context_support.npy` | `[games, 10]` | per-player historical support (context head gate) |
+| `identity_context_raw.npy` | `[games, 10, 62]` | production raw semantic atlas for the identity-conditioned head |
 | `blue_win.npy` | `[games]` | target label |
 
-The cache may also contain `m1v1_eff_n.npy` and `s2vx_eff_n.npy` from nested
-pooling. These are retained in the cache for prior construction and backward
-compatibility, but the production direct HGNN does not consume them.
+`identity_semantic.npy` `[games, 10, 64]` and `identity_profile.npy`
+`[games, 10, 9]` are retained for inspection/back-compat but unused by the
+production model. The cache may also contain `m1v1_eff_n.npy` / `s2vx_eff_n.npy`
+from nested pooling; the production direct HGNN does not consume them either.
 
 ## Relationship Features
 
@@ -99,15 +103,14 @@ total                  105
 Final prediction:
 
 ```text
-final_logit = main_head_logit + prior_shortcut_logit
-            + detail_logit + profile_logit
+final_logit = main_head_logit + prior_shortcut_logit + context_logit
 P(blue wins) = sigmoid(final_logit)
 ```
 
 ## Training
 
 `app/ml/train.py` trains one production model shape with AdamW, team-swap
-augmentation, and validation-AUC checkpointing.
+augmentation, and validation threshold-accuracy checkpointing.
 
 | Setting | Value |
 | --- | ---: |
@@ -119,7 +122,7 @@ augmentation, and validation-AUC checkpointing.
 | learning rate | 0.001 |
 | weight decay | 0.001 |
 | gradient clip | 1.0 |
-| checkpoint metric | `val_auc` |
+| checkpoint metric | `val_threshold_accuracy` |
 | checkpoint min delta | 0.0005 |
 
 Each batch is trained twice: original blue/red order with label `y`, and a
@@ -144,14 +147,18 @@ The same-split ablation selected the direct model:
 | relation encoder | 0.5998 | 0.6767 | 0.2419 | 0.0266 |
 
 Production therefore keeps the calibrated direct priors and direct sparse
-residual corrections, removes the typed relation transfer layer, and adds a
-small semantic matchup-profile term for enemy-composition context.
+residual corrections, removes the typed relation transfer layer, and adds the
+threshold-tuned raw semantic-context term for enemy/ally-composition context.
 
-The current production profile-v2 artifact saved
+The current production semantic-context artifact saved
 `app/ml/data/structured_winrate_model.pt` with:
 
 | Split | Accuracy | Threshold Acc | AUC | NLL | Brier | ECE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| train | 0.5731 | 0.5713 | 0.6037 | 0.6747 | 0.2410 | 0.0030 |
-| val | 0.5733 | 0.5765 | 0.5994 | 0.6755 | 0.2414 | 0.0248 |
-| test | 0.5693 | 0.5722 | 0.5942 | 0.6773 | 0.2422 | 0.0221 |
+| train | 0.5735 | 0.5710 | 0.6038 | 0.6747 | 0.2410 | 0.0037 |
+| val | 0.5750 | 0.5779 | 0.6014 | 0.6749 | 0.2411 | 0.0252 |
+| test | 0.5717 | 0.5743 | 0.5972 | 0.6763 | 0.2418 | 0.0222 |
+
+This promotes the audited identity-conditioned raw atlas into production and
+selects the checkpoint by threshold accuracy. Concrete context slices are in
+[HGNN_CONTEXT_EXAMPLES_AUDIT.md](HGNN_CONTEXT_EXAMPLES_AUDIT.md).

@@ -8,6 +8,7 @@ from app.classification.embeddings.config import (
     identity_semantic_feature_set,
 )
 from app.classification.embeddings.load import _baseline_query, _timeline_checkpoint_query
+from app.classification.embeddings.relationship_details import _m1v1_query, _s2vx_query
 from app.classification.embeddings.runtime import (
     IdentitySemanticLookup,
     RelationshipDetailLookup,
@@ -27,9 +28,26 @@ def test_baseline_query_marks_missing_checkpoints_without_zero_filling() -> None
     checkpoint_query = _timeline_checkpoint_query("train", 25)
 
     assert "toFloat32(0) AS tl_25_gold" in baseline_query
+    assert "participant_challenges" not in baseline_query
     assert "avgIf(tupleElement(ts.stats" in checkpoint_query
     assert "tl_25_missing" in checkpoint_query
     assert "1.0 - (countIf(coalesce(ts.matchid, '') != '') / count())" in checkpoint_query
+
+
+def test_relationship_detail_queries_do_not_touch_challenges() -> None:
+    queries = (_m1v1_query("TOP", "TOP"), _s2vx_query("TOP", "JUNGLE"))
+    forbidden = (
+        "participant_challenges",
+        "challenge_",
+        "solokills",
+        "maxcsadvantage",
+        "maxlevellead",
+        "turretplatestaken",
+    )
+    for query in queries:
+        lower = query.lower()
+        for term in forbidden:
+            assert term not in lower
 
 
 def test_identity_semantic_lookup_loads_vectors_and_falls_back(tmp_path) -> None:

@@ -16,6 +16,9 @@ LEGACY_CACHE_FORMATS = frozenset(
         "npy-memmap-v19",
         "npy-memmap-v20",
         "npy-memmap-v21",
+        "npy-memmap-v23",
+        "npy-memmap-v24",
+        "npy-memmap-v25",
     }
 )
 COUNT_ARRAY_NAMES = ("p1_cnt", "m1v1_cnt", "s2vx_cnt")
@@ -42,8 +45,12 @@ class SplitData:
     build_id: np.ndarray | None = None
     identity_semantic: np.ndarray | None = None
     identity_profile: np.ndarray | None = None
+    # Context atlas (cache v25): per-player descriptor + per-player support.
+    identity_context: np.ndarray | None = None
+    identity_context_support: np.ndarray | None = None
+    # Wide RAW atlas block (cache v26): primary source for the conditioned head.
+    identity_context_raw: np.ndarray | None = None
     m1v1_detail: np.ndarray | None = None
-    s2vx_detail: np.ndarray | None = None
 
 
 def _slice(arrays: dict[str, np.ndarray], lo: int, hi: int) -> SplitData:
@@ -130,7 +137,14 @@ def load_splits(
     for name in ("champion_id", "build_id"):
         if paths[name].exists():
             arrays[name] = np.load(paths[name], mmap_mode="r")[:n]
-    for name in ("identity_semantic", "identity_profile", "m1v1_detail", "s2vx_detail"):
+    for name in (
+        "identity_semantic",
+        "identity_profile",
+        "identity_context",
+        "identity_context_support",
+        "identity_context_raw",
+        "m1v1_detail",
+    ):
         if paths[name].exists():
             arrays[name] = np.load(paths[name], mmap_mode="r")[:n]
     return {

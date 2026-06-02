@@ -2,8 +2,9 @@
 
 """Match-Outcome HGNN win-rate model.
 
-Production currently uses the relationship-direct path: identity embeddings and
-the 1vX posterior initialise the 10 player nodes, then direct 1v1/2vX residual
+Production currently uses the relationship-direct path plus the
+identity-conditioned raw semantic-context residual: identity embeddings and the
+1vX posterior initialise the 10 player nodes, then direct 1v1/2vX residual
 features feed the residual head and prior shortcut. Training and inference share
 one model shape.
 """
@@ -48,22 +49,46 @@ class HGNNConfig:
     profile_offense_dims: int = 3
     profile_damage_pressure_index: int = 5
     profile_head_hidden: tuple[int, ...] = (16,)
-    m1v1_detail_dim: int = 16
-    s2vx_detail_dim: int = 16
-    # Classification-feature integration (semantic identity + relationship
-    # detail). Game-level analysis showed: the 1v1 matchup detail is redundant
-    # with the matchup win-rate prior (zero residual signal, even in the central
-    # band), while the 2vX team-synergy detail carries a small signal
-    # concentrated where the prior is a coin-flip. The signal is tiny (~+0.001
-    # AUC overall), so any flexible head fits more spurious train correlation
-    # than real signal and overfits. The detail term is therefore a *minimal*
-    # extractor: an antisymmetric blue-minus-red team-difference of the detail
-    # vector mapped to one scalar logit by a single linear layer, gated by prior
-    # uncertainty (`detail_prior_gated`) so it only nudges central-band
-    # predictions, and scaled by a zero-init scalar so it is opt-in on top of
-    # the stable win-rate model. Default config disables the redundant 1v1
-    # detail (m1v1_detail_dim=0). The semantic identity descriptor enters node
-    # init via its own zero-init gate.
+    # Context atlas head (generalises the profile head to every identity). The
+    # per-player identity_context descriptor is crossed against permutation-aware
+    # ally/enemy set summaries plus relational 1v1 (lane-opponent) and 2vX (ally)
+    # products. identity_context_dim == 0 disables the head (default off). Axis
+    # indices match app.classification.embeddings.config.
+    identity_context_dim: int = 0
+    context_interpretable_dim: int = 14
+    context_offense_dims: int = 3
+    context_armor_index: int = 3
+    context_mr_index: int = 4
+    context_damage_pressure_index: int = 5
+    context_taken_index: int = 9
+    context_heal_shield_index: int = 10
+    context_head_hidden: tuple[int, ...] = (32,)
+    context_support_strength: float = 30.0
+    context_include_ally: bool = True
+    context_include_relational: bool = True
+    # Identity-conditioned context module. Instead of one shared
+    # context head for every identity, a low-rank bottleneck lets the model learn
+    # which context interactions matter per (champion, role, build): an identity
+    # conditioner maps [champion/role/build embedding || self raw context] to a
+    # rank-r vector, a context projector maps the player's raw set/relational
+    # context to another rank-r vector, and their dot product is the per-player
+    # context score. Same module/params for both teams; aggregated as the
+    # antisymmetric, support-gated blue-minus-red residual. The production
+    # config builder enables this raw-atlas path by default; when enabled it
+    # REPLACES the shared context head's contribution.
+    use_identity_conditioned_context: bool = False
+    identity_context_conditioning_type: str = "none"  # "none" | "low_rank"
+    identity_context_source: str = "raw"  # "raw" | "raw_plus_dense"
+    identity_context_raw_dim: int = 0  # width of the wide RAW atlas block
+    identity_context_rank: int = 16
+    identity_context_hidden_dim: int = 64
+    identity_context_emb_dim: int = 16
+    identity_context_init_scale: float = 0.01
+    identity_context_dropout: float = 0.0
+    identity_context_use_residual_mlp: bool = False
+    m1v1_detail_dim: int = 0
+    # Classification-feature integration keeps relationship detail disabled in
+    # production. The 1v1 detail path remains as an explicit experiment hook.
     detail_prior_gated: bool = True
 
 
@@ -169,8 +194,10 @@ def build_hgnn_inputs(
     strength: float,
     identity_semantic: Any | None = None,
     identity_profile: Any | None = None,
+    identity_context: Any | None = None,
+    identity_context_support: Any | None = None,
+    identity_context_raw: Any | None = None,
     m1v1_detail: Any | None = None,
-    s2vx_detail: Any | None = None,
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
     """Turn raw cache/prior arrays into the model's node/edge tensors.
@@ -220,10 +247,14 @@ def build_hgnn_inputs(
         inputs["identity_semantic"] = to_tensor(identity_semantic)
     if identity_profile is not None:
         inputs["identity_profile"] = to_tensor(identity_profile)
+    if identity_context is not None:
+        inputs["identity_context"] = to_tensor(identity_context)
+    if identity_context_support is not None:
+        inputs["identity_context_support"] = to_tensor(identity_context_support)
+    if identity_context_raw is not None:
+        inputs["identity_context_raw"] = to_tensor(identity_context_raw)
     if m1v1_detail is not None:
         inputs["m1v1_detail"] = to_tensor(m1v1_detail)
-    if s2vx_detail is not None:
-        inputs["s2vx_detail"] = to_tensor(s2vx_detail)
     inputs.update(relationship_logit_features(mu_1vx=mu_1vx, mu_2vx=mu_2vx, mu_1v1=mu_1v1))
     return inputs
 
@@ -263,8 +294,12 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
         swapped["identity_semantic"] = swap_halves(inputs["identity_semantic"], 5)
     if "identity_profile" in inputs:
         swapped["identity_profile"] = swap_halves(inputs["identity_profile"], 5)
-    if "s2vx_detail" in inputs:
-        swapped["s2vx_detail"] = swap_halves(inputs["s2vx_detail"], 10)
+    if "identity_context" in inputs:
+        swapped["identity_context"] = swap_halves(inputs["identity_context"], 5)
+    if "identity_context_support" in inputs:
+        swapped["identity_context_support"] = swap_halves(inputs["identity_context_support"], 5)
+    if "identity_context_raw" in inputs:
+        swapped["identity_context_raw"] = swap_halves(inputs["identity_context_raw"], 5)
     if "m1v1_detail" in inputs:
         swapped["m1v1_detail"] = swap_1v1_detail(inputs["m1v1_detail"])
     if "var_2vx" in inputs:
@@ -372,6 +407,140 @@ class AttnPool(nn.Module):
         return (x * weights).sum(dim=1)
 
 
+class IdentityConditionedContext(nn.Module):
+    """Low-rank identity-conditioned context interaction.
+
+    Generalises the shared context head: instead of one global function of the
+    context summaries, the per-player score is a dot product between
+
+    * ``z_id``  = identity_conditioner([champion_emb, role_emb, build_emb, self_raw])
+    * ``z_ctx`` = context_projector([self, enemy_mean, enemy_weighted, lane_opp, ally_mean])
+
+    so different identities can express different context sensitivities through one
+    small, regularised low-rank bottleneck — no per-champion parameters and no
+    sparse matchup keys. The same module/params score both teams; the team-level
+    contribution is the antisymmetric, support-gated ``sum_blue - sum_red`` so it
+    flips sign under team swap for any weights. The context projector's last layer
+    is zero-initialised, so the whole residual starts at exactly zero (opt-in).
+    """
+
+    def __init__(self, config: HGNNConfig) -> None:
+        super().__init__()
+        c = config
+        self.source_mode = c.identity_context_source
+        self.raw_dim = c.identity_context_raw_dim
+        self.dense_dim = (
+            max(c.identity_context_dim - c.context_interpretable_dim, 0)
+            if c.identity_context_source == "raw_plus_dense"
+            else 0
+        )
+        self.source_dim = self.raw_dim + self.dense_dim
+        self.support_strength = float(c.context_support_strength)
+        self.damage_idx = c.context_damage_pressure_index
+        self.init_scale = float(c.identity_context_init_scale)
+        self.use_residual_mlp = bool(c.identity_context_use_residual_mlp)
+
+        emb = c.identity_context_emb_dim
+        rank = c.identity_context_rank
+        hidden = c.identity_context_hidden_dim
+        dropout = c.identity_context_dropout
+        self.champion = nn.Embedding(c.n_champions + 1, emb)
+        self.role = nn.Embedding(5, emb)
+        self.build = nn.Embedding(c.n_builds + 1, emb)
+        for table in (self.champion, self.role, self.build):
+            nn.init.normal_(table.weight, std=0.02)
+        self.register_buffer(
+            "role_idx", torch.tensor([0, 1, 2, 3, 4], dtype=torch.long), persistent=False
+        )
+
+        cond_in = 3 * emb + self.source_dim
+        ctx_in = 5 * self.source_dim  # self, enemy_mean, enemy_weighted, lane_opp, ally_mean
+        self.identity_conditioner = _mlp(cond_in, (hidden,), rank, dropout=dropout)
+        self.context_projector = _mlp(ctx_in, (hidden,), rank, dropout=dropout)
+        nn.init.zeros_(self.context_projector[-1].weight)
+        nn.init.zeros_(self.context_projector[-1].bias)
+        if self.use_residual_mlp:
+            self.residual_mlp = _mlp(ctx_in, (hidden,), 1, dropout=dropout)
+            nn.init.zeros_(self.residual_mlp[-1].weight)
+            nn.init.zeros_(self.residual_mlp[-1].bias)
+
+    def _source(self, raw: torch.Tensor, dense: torch.Tensor | None) -> torch.Tensor:
+        raw = _fit_dim(raw, self.raw_dim)
+        if self.dense_dim <= 0:
+            return raw
+        if dense is None:
+            dense = raw.new_zeros(*raw.shape[:-1], self.dense_dim)
+        return torch.cat([raw, _fit_dim(dense, self.dense_dim)], dim=-1)
+
+    def _team_score(
+        self,
+        self_src: torch.Tensor,  # [B, 5, S]
+        enemy_src: torch.Tensor,  # [B, 5, S]
+        self_champ: torch.Tensor,  # [B, 5]
+        self_build: torch.Tensor,  # [B, 5]
+        conf: torch.Tensor,  # [B, 5]
+    ) -> torch.Tensor:
+        b, n = self_src.shape[0], self_src.shape[1]
+        enemy_mean = enemy_src.mean(dim=1, keepdim=True)
+        weight = enemy_src[..., self.damage_idx : self.damage_idx + 1].clamp_min(0.0)
+        denom = weight.sum(dim=1, keepdim=True).clamp_min(1.0e-6)
+        enemy_weighted = (enemy_src * weight).sum(dim=1, keepdim=True) / denom
+        ally_mean = self_src.mean(dim=1, keepdim=True)
+        # lane_opp == enemy_src (slots are role-ordered, so slot i faces slot i).
+        ctx_feat = torch.cat(
+            [
+                self_src,
+                enemy_mean.expand_as(self_src),
+                enemy_weighted.expand_as(self_src),
+                enemy_src,
+                ally_mean.expand_as(self_src),
+            ],
+            dim=-1,
+        )
+        role = self.role(cast(torch.Tensor, self.role_idx)).unsqueeze(0).expand(b, n, -1)
+        cond = torch.cat(
+            [self.champion(self_champ), role, self.build(self_build), self_src], dim=-1
+        )
+        z_id = self.identity_conditioner(cond)
+        z_ctx = self.context_projector(ctx_feat)
+        raw_context = self.init_scale * (z_id * z_ctx).sum(dim=-1)
+        if self.use_residual_mlp:
+            raw_context = raw_context + self.init_scale * self.residual_mlp(ctx_feat).squeeze(-1)
+        return (conf * raw_context).sum(dim=1)
+
+    def forward(
+        self,
+        identity_context_raw: torch.Tensor,
+        identity_context_support: torch.Tensor | None,
+        champion_id: torch.Tensor,
+        build_id: torch.Tensor,
+        identity_context_dense: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        src = self._source(identity_context_raw, identity_context_dense)
+        blue_src, red_src = src[:, :5], src[:, 5:]
+        blue_c, red_c = champion_id[:, :5], champion_id[:, 5:]
+        blue_b, red_b = build_id[:, :5], build_id[:, 5:]
+        if identity_context_support is None:
+            blue_conf = blue_src.new_ones(blue_src.shape[0], 5)
+            red_conf = red_src.new_ones(red_src.shape[0], 5)
+        else:
+            sup = identity_context_support.clamp_min(0.0)
+            conf = sup / (sup + self.support_strength)
+            blue_conf, red_conf = conf[:, :5], conf[:, 5:]
+        fwd = self._team_score(blue_src, red_src, blue_c, blue_b, blue_conf)
+        rev = self._team_score(red_src, blue_src, red_c, red_b, red_conf)
+        return fwd - rev
+
+
+def _fit_dim(values: torch.Tensor, dim: int) -> torch.Tensor:
+    if values.shape[-1] == dim:
+        return values
+    if values.shape[-1] > dim:
+        return values[..., :dim]
+    pad = values.new_zeros(*values.shape[:-1], dim - values.shape[-1])
+    return torch.cat([values, pad], dim=-1)
+
+
 class HGNNWinModel(nn.Module):
     def __init__(self, config: HGNNConfig | None = None, **overrides: Any) -> None:
         super().__init__()
@@ -407,18 +576,10 @@ class HGNNWinModel(nn.Module):
             c.node_dim,
             dropout=c.dropout,
         )
-        # Relationship-detail signal: a single antisymmetric linear map from the
-        # blue-minus-red team-difference of each enabled detail vector to a
-        # scalar logit (see HGNNConfig). Each type is independent so the
-        # redundant 1v1 detail can be dropped while keeping the 2vX synergy one.
         self.m1v1_detail_enabled = c.m1v1_detail_dim > 0
-        self.s2vx_detail_enabled = c.s2vx_detail_dim > 0
-        self.detail_enabled = self.m1v1_detail_enabled or self.s2vx_detail_enabled
+        self.detail_enabled = self.m1v1_detail_enabled
         if self.m1v1_detail_enabled:
             self.m1v1_detail_lin = nn.Linear(c.m1v1_detail_dim, 1, bias=False)
-        if self.s2vx_detail_enabled:
-            self.s2vx_detail_lin = nn.Linear(c.s2vx_detail_dim, 1, bias=False)
-        if self.detail_enabled:
             self.detail_gate = nn.Parameter(torch.zeros(1))
         # Cross-team matchup-profile interaction: each identity carries an
         # interpretable profile (offense damage-type mix + resistance fractions).
@@ -486,6 +647,39 @@ class HGNNWinModel(nn.Module):
             self.profile_weighted_context_dim = 0
             self.profile_resistance_product_dim = 0
             self.profile_context_proj = None
+        # Context-atlas head: the production generalisation of the profile head.
+        # Each player's full identity_context descriptor is crossed against
+        # permutation-aware ally/enemy set summaries (mean + damage-pressure
+        # weighted mean = DeepSets), the same-role lane opponent (1v1 edge), and
+        # explicit interpretable cross products (resistance vs enemy offense,
+        # damage-taken vs enemy damage, own damage vs enemy heal/shield, own
+        # heal/shield vs ally damage = enchanter/carry 2vX). The contribution is
+        # support-gated per player and antisymmetric (fwd - rev); the final layer
+        # is zero-initialised so the whole path is opt-in.
+        self.context_enabled = c.identity_context_dim > 0
+        if self.context_enabled:
+            self.context_product_dim = 7 if c.context_include_relational else 0
+            n_set = 4 + (1 if c.context_include_ally else 0)
+            context_input_dim = n_set * c.identity_context_dim + self.context_product_dim
+            self.context_head = _mlp(
+                context_input_dim,
+                c.context_head_hidden,
+                1,
+                dropout=0.0,
+            )
+            nn.init.zeros_(self.context_head[-1].weight)
+            nn.init.zeros_(self.context_head[-1].bias)
+        else:
+            self.context_product_dim = 0
+        # Identity-conditioned context module. Production enables this raw-atlas
+        # path, which supplies the context residual in place of the shared head.
+        self.identity_conditioned_context_enabled = (
+            c.use_identity_conditioned_context
+            and c.identity_context_conditioning_type == "low_rank"
+            and c.identity_context_raw_dim > 0
+        )
+        if self.identity_conditioned_context_enabled:
+            self.identity_conditioned_context = IdentityConditionedContext(c)
         self.prior_shortcut = _mlp(
             15 + N_RELATIONSHIP_EDGES * 2,
             (),
@@ -574,23 +768,12 @@ class HGNNWinModel(nn.Module):
     def _detail_logit(
         self,
         m1v1_detail: torch.Tensor | None,
-        s2vx_detail: torch.Tensor | None,
         like: torch.Tensor,
     ) -> torch.Tensor:
-        """Antisymmetric scalar logit from the blue-minus-red detail difference.
-
-        1v1 detail is already blue-perspective signed, so the mean over the 25
-        edges is the net blue advantage. 2vX detail is symmetric pair averages,
-        so blue is mean(blue pairs) - mean(red pairs). Both flip sign under team
-        swap, making this term exactly antisymmetric (no capacity spent learning
-        it). A missing/disabled type contributes zero.
-        """
+        """Experimental scalar logit from blue-perspective 1v1 detail."""
         logit = like.new_zeros(like.shape[0])
         if self.m1v1_detail_enabled and m1v1_detail is not None:
             logit = logit + self.m1v1_detail_lin(m1v1_detail.mean(dim=1)).squeeze(-1)
-        if self.s2vx_detail_enabled and s2vx_detail is not None:
-            team_diff = s2vx_detail[:, :10].mean(dim=1) - s2vx_detail[:, 10:].mean(dim=1)
-            logit = logit + self.s2vx_detail_lin(team_diff).squeeze(-1)
         return logit
 
     def _fit_feature_dim(self, values: torch.Tensor, dim: int) -> torch.Tensor:
@@ -695,6 +878,109 @@ class HGNNWinModel(nn.Module):
         rev = self.profile_head(torch.cat(red_parts, dim=-1)).squeeze(-1).sum(dim=1)
         return fwd - rev
 
+    def _ctx_weighted_mean(self, team: torch.Tensor) -> torch.Tensor:
+        """Damage-pressure-weighted team-context mean (DeepSets summary), [B, 1, D]."""
+        idx = self.config.context_damage_pressure_index
+        if team.shape[-1] > idx:
+            weight = team[..., idx : idx + 1].clamp_min(0.0)
+            denom = weight.sum(dim=1, keepdim=True).clamp_min(1.0e-6)
+            return (team * weight).sum(dim=1, keepdim=True) / denom
+        return team.mean(dim=1, keepdim=True)
+
+    def _ctx_products(
+        self,
+        players: torch.Tensor,  # [B, 5, D]
+        enemy_weighted: torch.Tensor,  # [B, 1, D]
+        ally_mean: torch.Tensor,  # [B, 1, D]
+    ) -> torch.Tensor:
+        """Explicit interpretable cross products (the audit's specialization axes).
+
+        Generalises ``_resistance_products`` to the wider context descriptor: the
+        same armor/MR × enemy-offense terms, plus damage-taken × enemy damage,
+        own-damage × enemy heal/shield, and own heal/shield × ally damage (the
+        enchanter/carry 2vX synergy).
+        """
+        c = self.config
+        n_players = players.shape[1]
+        enemy = enemy_weighted.expand(-1, n_players, -1)
+        ally = ally_mean.expand(-1, n_players, -1)
+
+        def col(t: torch.Tensor, i: int) -> torch.Tensor:
+            return t[..., i : i + 1]
+
+        armor = col(players, c.context_armor_index)
+        mr = col(players, c.context_mr_index)
+        enemy_phys = col(enemy, 0)
+        enemy_magic = col(enemy, 1)
+        enemy_damage = col(enemy, c.context_damage_pressure_index)
+        enemy_heal = col(enemy, c.context_heal_shield_index)
+        self_taken = col(players, c.context_taken_index)
+        self_damage = col(players, c.context_damage_pressure_index)
+        self_heal = col(players, c.context_heal_shield_index)
+        ally_damage = col(ally, c.context_damage_pressure_index)
+        return torch.cat(
+            [
+                armor * enemy_phys,
+                mr * enemy_magic,
+                armor * (enemy_phys - enemy_magic),
+                mr * (enemy_magic - enemy_phys),
+                self_taken * enemy_damage,
+                self_damage * enemy_heal,
+                self_heal * ally_damage,
+            ],
+            dim=-1,
+        )
+
+    def _context_team_score(
+        self,
+        self_team: torch.Tensor,  # [B, 5, D] (also the ally team)
+        enemy_team: torch.Tensor,  # [B, 5, D]
+        conf: torch.Tensor,  # [B, 5] support gate
+    ) -> torch.Tensor:
+        enemy_mean = enemy_team.mean(dim=1, keepdim=True)
+        enemy_weighted = self._ctx_weighted_mean(enemy_team)
+        ally_mean = self_team.mean(dim=1, keepdim=True)
+        # Same-role lane opponent: slots are role-ordered, so enemy_team[:, i] is
+        # the 1v1 opposite of self_team[:, i].
+        parts = [
+            self_team,
+            enemy_mean.expand_as(self_team),
+            enemy_weighted.expand_as(self_team),
+            enemy_team,
+        ]
+        if self.config.context_include_ally:
+            parts.append(ally_mean.expand_as(self_team))
+        if self.config.context_include_relational:
+            parts.append(self._ctx_products(self_team, enemy_weighted, ally_mean))
+        h = self.context_head(torch.cat(parts, dim=-1)).squeeze(-1)  # [B, 5]
+        return (conf * h).sum(dim=1)
+
+    def _context_logit(
+        self,
+        identity_context: torch.Tensor,
+        identity_context_support: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Antisymmetric, support-gated context-atlas contribution.
+
+        ``sum_blue conf*head(self, ally_set, enemy_set, lane_opp, products)
+        - sum_red (mirror)`` flips sign under team swap for any head, because the
+        per-player support gate, the lane-opponent pairing, and the set summaries
+        all swap with the players. Zero-init head keeps it opt-in.
+        """
+        ctx = self._fit_feature_dim(identity_context, self.config.identity_context_dim)
+        blue, red = ctx[:, :5], ctx[:, 5:]
+        if identity_context_support is None:
+            blue_conf = blue.new_ones(blue.shape[0], 5)
+            red_conf = red.new_ones(red.shape[0], 5)
+        else:
+            s = float(self.config.context_support_strength)
+            sup = identity_context_support.clamp_min(0.0)
+            conf = sup / (sup + s)
+            blue_conf, red_conf = conf[:, :5], conf[:, 5:]
+        fwd = self._context_team_score(blue, red, blue_conf)
+        rev = self._context_team_score(red, blue, red_conf)
+        return fwd - rev
+
     def _prior_shortcut_logit(
         self,
         *,
@@ -731,8 +1017,10 @@ class HGNNWinModel(nn.Module):
         mu_1v1: torch.Tensor,
         identity_semantic: torch.Tensor | None = None,
         identity_profile: torch.Tensor | None = None,
+        identity_context: torch.Tensor | None = None,
+        identity_context_support: torch.Tensor | None = None,
+        identity_context_raw: torch.Tensor | None = None,
         m1v1_detail: torch.Tensor | None = None,
-        s2vx_detail: torch.Tensor | None = None,
         delta_logit_2vx: torch.Tensor | None = None,
         delta_logit_1v1: torch.Tensor | None = None,
         conf_1vx: torch.Tensor | None = None,
@@ -784,11 +1072,8 @@ class HGNNWinModel(nn.Module):
             conf_2vx=conf_2vx,
             conf_1v1=conf_1v1,
         )
-        # Relationship-detail correction: a small scalar logit, gated by prior
-        # uncertainty so it only nudges central-band (coin-flip) predictions
-        # where the synergy detail actually carries residual signal.
         if self.detail_enabled:
-            detail_logit = self._detail_logit(m1v1_detail, s2vx_detail, like=logit)
+            detail_logit = self._detail_logit(m1v1_detail, like=logit)
             if self.config.detail_prior_gated:
                 prob = torch.sigmoid(logit).detach()
                 detail_logit = (4.0 * prob * (1.0 - prob)) * detail_logit
@@ -797,6 +1082,22 @@ class HGNNWinModel(nn.Module):
         # along the enemy-composition axis the win-rate prior is blind to.
         if self.profile_enabled and identity_profile is not None:
             logit = logit + self._profile_logit(identity_profile, identity_semantic)
+        # Context correction. The identity-conditioned module, when enabled,
+        # supplies the residual in place of the shared context head; both are
+        # antisymmetric, support-gated, and zero-init opt-in.
+        if self.identity_conditioned_context_enabled and identity_context_raw is not None:
+            dense = None
+            if self.identity_conditioned_context.dense_dim > 0 and identity_context is not None:
+                dense = identity_context[..., self.config.context_interpretable_dim :]
+            logit = logit + self.identity_conditioned_context(
+                identity_context_raw,
+                identity_context_support,
+                champion_id,
+                build_id,
+                dense,
+            )
+        elif self.context_enabled and identity_context is not None:
+            logit = logit + self._context_logit(identity_context, identity_context_support)
         return {"final_logit": logit}
 
     def forward(
@@ -810,8 +1111,10 @@ class HGNNWinModel(nn.Module):
         mu_1v1: torch.Tensor,
         identity_semantic: torch.Tensor | None = None,
         identity_profile: torch.Tensor | None = None,
+        identity_context: torch.Tensor | None = None,
+        identity_context_support: torch.Tensor | None = None,
+        identity_context_raw: torch.Tensor | None = None,
         m1v1_detail: torch.Tensor | None = None,
-        s2vx_detail: torch.Tensor | None = None,
         delta_logit_2vx: torch.Tensor | None = None,
         delta_logit_1v1: torch.Tensor | None = None,
         conf_1vx: torch.Tensor | None = None,
@@ -829,12 +1132,14 @@ class HGNNWinModel(nn.Module):
             "build_id": build_id,
             "identity_semantic": identity_semantic,
             "identity_profile": identity_profile,
+            "identity_context": identity_context,
+            "identity_context_support": identity_context_support,
+            "identity_context_raw": identity_context_raw,
             "mu_1vx": mu_1vx,
             "var_1vx": var_1vx,
             "mu_2vx": mu_2vx,
             "mu_1v1": mu_1v1,
             "m1v1_detail": m1v1_detail,
-            "s2vx_detail": s2vx_detail,
         }
         optional = {
             "delta_logit_2vx": delta_logit_2vx,

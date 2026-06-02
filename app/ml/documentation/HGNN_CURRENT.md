@@ -1,22 +1,35 @@
 # Current HGNN Mechanics
 
-As of 2026-06-01, `HGNNWinModel` has one production path:
+Updated: 2026-06-02.
+
+`HGNNWinModel` uses a direct relationship path plus one optional context
+residual. Production enables the raw identity-conditioned residual and selects
+the checkpoint by validation threshold accuracy.
 
 ```text
 cache/prior arrays
--> posterior and support features
--> champion/role/build identity + 1vX node prior
+-> build_hgnn_inputs()
+-> champion/role/build identity + 1vX posterior features
 -> blue/red team readout
 -> direct 1v1/2vX residual head
 -> direct prior shortcut
--> cross-team matchup-profile interaction
+-> context residual: raw identity-conditioned atlas (production) OR shared atlas
 -> final logit
 -> sigmoid = P(blue wins)
 ```
 
-The direct path was selected over the typed relation encoder because the full
-same-split run showed it matched relation AUC and produced better NLL, Brier,
-and ECE.
+The direct path replaced the retired typed relation encoder because it matched
+relation AUC and improved NLL, Brier, and ECE on the same split.
+
+Context docs:
+
+| Doc | Owns |
+| --- | --- |
+| [HGNN_CONTEXT_ATLAS.md](HGNN_CONTEXT_ATLAS.md) | Shared 24-dim atlas design and its historical limitation. |
+| [HGNN_IDENTITY_CONDITIONED_CONTEXT.md](HGNN_IDENTITY_CONDITIONED_CONTEXT.md) | Production low-rank raw-atlas conditioned head and measured gains. |
+| [HGNN_CONTEXT_WR_VALIDATION.md](HGNN_CONTEXT_WR_VALIDATION.md) | Global context-ceiling and calibration validation. |
+| [HGNN_CONTEXT_EXAMPLES_AUDIT.md](HGNN_CONTEXT_EXAMPLES_AUDIT.md) | Concrete identity/context slices. |
+| [../context_examples_audit.py](../context_examples_audit.py) | Reproducer for the examples-audit values. |
 
 ## Input Contract
 
@@ -27,7 +40,7 @@ Each row is one match with 10 ordered slots:
 5..9 = red  TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
 ```
 
-The model consumes these `npy-memmap-v23` cache arrays:
+The current cache format is `npy-memmap-v26`.
 
 | Array | Shape | Used as |
 | --- | --- | --- |
@@ -39,13 +52,15 @@ The model consumes these `npy-memmap-v23` cache arrays:
 | `s2vx_cnt.npy` | `[games, 20]` | raw build-level `2vX` support |
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
-| `identity_semantic.npy` | `[games, 10, 64]` | low-rank profile conditioning context |
-| `identity_profile.npy` | `[games, 10, 9]` | per-player matchup profile (cross-team term) |
-| `s2vx_detail.npy` | `[games, 20, 16]` | small 2vX semantic-detail nudge |
+| `identity_context.npy` | `[games, 10, 24]` | shared atlas descriptor; dense tail also available to conditioned `raw_plus_dense` |
+| `identity_context_support.npy` | `[games, 10]` | per-player historical support for the context gate |
+| `identity_context_raw.npy` | `[games, 10, 62]` | production wide raw atlas for semantic context |
 | `blue_win.npy` | `[games]` | target label |
 
-`m1v1_eff_n.npy` and `s2vx_eff_n.npy` may exist in the cache as nested-pooling
-metadata, but the production direct model does not consume them.
+Retained inspection/back-compat arrays are not consumed by the production direct
+config: `identity_semantic.npy`, `identity_profile.npy`, `m1v1_detail.npy`,
+`m1v1_eff_n.npy`, and `s2vx_eff_n.npy`. Experimental config flags can still wire
+some of those paths back in.
 
 ## Posterior And Support Features
 
@@ -53,14 +68,12 @@ metadata, but the production direct model does not consume them.
 
 ```text
 mu = clamp(rate, 0, 1)
-1vX variance = mu * (1 - mu) / (p1_cnt + confidence_strength + 1)
+variance = mu * (1 - mu) / (p1_cnt + confidence_strength + 1)
 ```
 
 `confidence_strength` is saved with the artifact and is currently `30.0`.
-Relationship means already include nested-pooling backoff before they reach the
-model.
 
-Relationship support enters the direct heads through raw build-level features:
+Raw support features enter the node encoder and direct relationship heads:
 
 ```text
 confidence = raw_count / (raw_count + confidence_strength)
@@ -68,9 +81,12 @@ log_count = log1p(raw_count)
 missing = raw_count <= 0
 ```
 
+Relationship means already include upstream nested-pooling backoff before they
+reach the model.
+
 ## Relationship Deltas
 
-The model builds logit-space residuals for each relationship prior:
+The model converts cached priors to logit-space residuals:
 
 ```text
 joint = logit(relationship_mu)
@@ -78,16 +94,16 @@ expected = logit(generic baseline from 1vX priors)
 delta = joint - expected
 ```
 
-For `1v1`, expected probability is:
+For `1v1`, the expected probability is:
 
 ```text
 0.5 + (blue_1vX - red_1vX) / 2
 ```
 
-For `2vX`, expected probability is the average of the two same-team players'
-`1vX` priors.
+For `2vX`, the expected probability is the average of the two same-team
+players' `1vX` priors.
 
-The flattened direct relationship order is:
+The direct relationship order is:
 
 ```text
 25 blue-vs-red 1v1 deltas
@@ -95,10 +111,10 @@ The flattened direct relationship order is:
 10 negated red 2vX deltas
 ```
 
-Red `2vX` deltas are negated so every direct relationship feature points in the
-blue-win direction.
+Red `2vX` deltas are negated so every direct feature points in the blue-win
+direction.
 
-## Node Initialization
+## Node And Team Readout
 
 Each player starts from multiplicative identity embeddings:
 
@@ -110,17 +126,16 @@ identity =
 ```
 
 The identity vector is layer-normalized, concatenated with the uncertainty-gated
-`1vX` posterior embedding, then projected to the node dimension:
+`1vX` posterior embedding, and projected to the node dimension:
 
-```text
-identity:      [B, 10, 96]
-1vX phi:       [B, 10, 64]
-concat:        [B, 10, 160]
-node_init MLP: 160 -> 96 -> 96
-LayerNorm:     [B, 10, 96]
-```
+| Tensor | Shape |
+| --- | --- |
+| identity | `[B, 10, 96]` |
+| `1vX` phi | `[B, 10, 64]` |
+| concat | `[B, 10, 160]` |
+| node output | `[B, 10, 96]` |
 
-`PhiEncoder` for `1vX` uses:
+`PhiEncoder` uses:
 
 ```text
 value inputs = [logit(mu), variance, confidence, log_count, missing]
@@ -130,21 +145,19 @@ phi = sigmoid(gate_mlp(gate inputs)) * value_mlp(value inputs)
 
 Logits are clipped to `[-5, 5]`.
 
-## Team Readout And Heads
-
-Each team is read out from its five nodes:
+Each team is read out from five nodes:
 
 ```text
 mean pool       [B, 96]
 max pool        [B, 96]
 attention pool  [B, 96]
 concat          [B, 288]
-team_proj       288 -> 96
+team_proj       [B, 96]
 ```
 
-This yields `a` for blue and `b` for red.
+## Heads
 
-The residual head receives direct relationship features:
+The residual head receives relationship deltas and support:
 
 ```text
 delta                 45
@@ -159,11 +172,11 @@ residual_head: 180 -> 128 -> 96
 The main head receives:
 
 ```text
-[a, b, a - b, a * b, residual_head_output]
+[blue, red, blue - red, blue * red, residual_head_output]
 480 -> 256 -> 1
 ```
 
-The prior shortcut is a direct linear logit path:
+The prior shortcut is a linear calibrated prior path:
 
 ```text
 blue 1vX logits          5
@@ -176,127 +189,66 @@ total                  105
 prior_shortcut: 105 -> 1
 ```
 
+## Context Residual
+
+Only one context residual contributes in `forward()`:
+
+| Condition | Context term |
+| --- | --- |
+| `use_identity_conditioned_context=true` and `identity_context_raw` is present | `IdentityConditionedContext` |
+| otherwise, if `identity_context_dim > 0` and `identity_context` is present | shared `_context_logit` |
+| otherwise | no context residual |
+
+Shared atlas head:
+
+```text
+feat_p = [self, enemy_mean, enemy_damage_weighted_mean, lane_opp,
+          ally_mean, products(7)]
+conf_p = support_p / (support_p + context_support_strength)
+context_logit = sum_blue conf_p * head(feat_p) - sum_red conf_p * head(feat_p)
+```
+
+Identity-conditioned head:
+
+```text
+context_feat_p  = [self, enemy_mean, enemy_weighted, lane_opp, ally_mean]
+identity_cond_p = [champion_emb, role_emb, build_emb, self_raw]
+z_id_p          = identity_conditioner(identity_cond_p)
+z_ctx_p         = context_projector(context_feat_p)
+raw_context_p   = init_scale * dot(z_id_p, z_ctx_p)
+context_logit   = sum_blue conf_p * raw_context_p - sum_red conf_p * raw_context_p
+```
+
+Production uses `identity_context_source=raw`, rank `16`, hidden dim `64`, and
+validation threshold-accuracy checkpointing. This is intentionally the naive
+semantic context implementation: the model receives a wide historical identity
+descriptor and a narrow learned context interaction, without champion-specific
+rules.
+
+Both terms are support-gated, antisymmetric under team swap, zero-initialized as
+opt-in residuals, and draft-safe. A missing identity with zero context/support
+contributes zero.
+
 Final prediction:
 
 ```text
-final_logit = main_head_logit + prior_shortcut_logit + detail_logit + profile_logit
+final_logit = main_head_logit + prior_shortcut_logit + context_logit
 P(blue wins) = sigmoid(final_logit)
 ```
 
-Default source model size with `n_champions=951` and `n_builds=11` is `331,465`
-parameters.
+## Classification Inputs
 
-## Classification-Feature Integration
+The classification pipeline supplies pre-game identity descriptors keyed by
+`(championid, teamposition, build)`.
 
-The classification pipeline can supply three extra per-game arrays:
-`identity_semantic` (`[10, 64]` dense identity descriptors), `m1v1_detail`
-(`[25, 16]` historic 1v1 pressure) and `s2vx_detail` (`[20, 16]` historic 2vX
-synergy pressure). A game-level residual study (detail vs win-rate prior,
-bucketed by prior centrality) showed:
+| Output | Cache file | HGNN array | Shape |
+| --- | --- | --- | --- |
+| Context atlas | `identity_context_embedding.npz` | `identity_context` + `identity_context_support` | `[games, 10, 24]` + `[games, 10]` |
+| Raw atlas | `identity_context_embedding.npz` (`raw_embeddings`) | `identity_context_raw` | `[games, 10, 62]` |
 
-- **1v1 matchup detail is redundant** with the matchup win-rate prior — zero
-  residual correlation with the outcome, even in the central band. The
-  win-rate prior already encodes how a matchup resolves.
-- **The dense semantic identity is redundant as a broad node feature** with the
-  learned champion embedding.
-- **2vX synergy detail carries a small residual signal**, concentrated where
-  the win-rate prior is a coin-flip (the central band). Out-of-sample it lifts
-  ranking by `+0.004` AUC at `|p-0.5|<0.03` and `+0.008` at `|p-0.5|<0.02`.
-
-Feeding these as wide dense heads let the model memorise compositions
-(train AUC `0.60 -> 0.63`, test `0.5925 -> 0.5875`). The production model
-therefore consumes **only the 2vX synergy detail**, through a minimal,
-overfitting-resistant term:
-
-```text
-team_diff = mean(blue synergy detail) - mean(red synergy detail)   # [B, 16]
-detail_logit_raw = Linear(16 -> 1, no bias)(team_diff)             # antisymmetric
-centrality = 4 * p * (1 - p)        # p = sigmoid(pre-detail logit), detached
-detail_logit = detail_gate * centrality * detail_logit_raw         # gate init 0
-```
-
-`team_diff` flips sign under team swap, so the term is exactly antisymmetric
-(no capacity spent learning the mirror). `centrality` restricts the nudge to
-coin-flip matchups where the signal lives; the zero-init `detail_gate` makes the
-whole term opt-in on top of the win-rate model. `_hgnn_config_from_meta` sets
-`identity_semantic_dim=0` and `m1v1_detail_dim=0`; the semantic descriptor is
-used only by the low-rank profile-v2 conditioning path described below.
-
-## Cross-Team Matchup-Profile Interaction
-
-The win-rate prior and the pairwise `1v1`/`2vX` priors all marginalize over the
-*whole-enemy-team damage composition*: the `1vX` prior is a single scalar per
-identity, and pairwise priors never see the enemy team's aggregate damage-type
-mix. So a relationship like "an armor-stacked tank gains win rate as the enemy
-team's physical-damage share rises" is invisible by construction. Measured
-example: Malphite (`54`) `ar_tank` rises from ~50.0% win rate at enemy physical
-share `<50%` to ~58% at `>80%`, while every prior the model sees for that
-identity is constant across enemy comps.
-
-To expose this, the classification pipeline writes a 9-dim **matchup profile**
-per identity (`identity_profile_embedding.npz`, built by
-`python -m app.classification.embeddings.dense`), all axes in `[0, 1]`:
-
-```text
-phys_offense_share   physicaldamagedealttochampions_share
-magic_offense_share  magicdamagedealttochampions_share
-true_offense_share   truedamagedealttochampions_share
-armor_resist_frac    armor / (armor + magicresist)
-mr_resist_frac       magicresist / (armor + magicresist)
-champion_damage_pressure  robust-scaled totaldamagedealttochampions
-phys_damage_pressure      champion_damage_pressure * phys_offense_share
-magic_damage_pressure     champion_damage_pressure * magic_offense_share
-true_damage_pressure      champion_damage_pressure * true_offense_share
-```
-
-These are raw smoothed identity values (not the standardized dense-embedding
-features), so the share/fraction semantics survive. The model consumes them
-through a per-player antisymmetric interaction term:
-
-```text
-blue, red = identity_profile[:, :5], identity_profile[:, 5:]   # [B, 5, 9]
-enemy_weighted = weighted_mean(enemy[:, :3], weight=enemy[:, 5])
-products = [self_armor * enemy_phys, self_mr * enemy_magic, ...]
-fwd = sum_blue  profile_head([player, red_team_mean, red_weighted, products, context])
-rev = sum_red   profile_head([player, blue_team_mean, blue_weighted, products, context])
-profile_logit = fwd - rev
-profile_head: Linear(29 -> 24) -> ReLU -> Linear(24 -> 1), zero-init final layer
-```
-
-Each player is scored against the *opposing* team's mean profile, then summed
-over the team; `fwd - rev` flips sign under team swap so the term is exactly
-antisymmetric. Scoring per-player (rather than on team-mean profiles) keeps a
-single extreme champion — e.g. one armor tank against a fully physical enemy —
-from being diluted by its four teammates. The final layer is zero-initialized so
-the term is opt-in on top of the win-rate model.
-
-The production profile-v2 path keeps the broad semantic descriptor out of
-node initialization, but uses it as a tiny **rank-4 conditioning bottleneck**
-inside the profile head. It also appends a deterministic damage-weighted enemy
-offense context and four explicit resistance × enemy-offense products, so the
-head does not need to infer the core multiplication from raw axes:
-
-```text
-identity_semantic: [B, 10, 64] historical dense identity descriptor
-profile_context = tanh(Linear(LayerNorm(identity_semantic))): [B, 10, 4]
-profile_head input = [
-    player_profile, enemy_team_profile_mean,
-    enemy_damage_weighted_offense, resistance_products, profile_context,
-]
-                   = 9 + 9 + 3 + 4 + 4 dims
-profile_head: Linear(29 -> 24) -> ReLU -> Linear(24 -> 1), zero-init final layer
-```
-
-This lets historical, pregame-estimable identity tendencies condition the
-profile response without becoming a wide standalone memorizer. It does **not**
-consume the current match's realized damage dealt, damage taken, mitigation, or
-item effects.
-
-On the Malphite `ar_tank` evaluation, the selected profile-v2 checkpoint moves the
-all-role low-to-high enemy physical-share response from `+5.41pp` to `+7.60pp`
-(actual `+8.43pp`) and TOP-only from `+5.27pp` to `+7.53pp` (actual `+7.24pp`).
-Overall held-out quality improves versus the current profile model: test AUC
-`0.5942`, NLL `0.6773`, Brier `0.2422`.
+The 24-dim atlas is `[14 interpretable axes || 10 PCA axes]`. The 62-dim raw
+atlas is `[same 14 interpretable axes || 48 median/MAD-standardized metrics]`.
+No `participant_challenges` or `challenge_*` metrics are allowed.
 
 ## Training
 
@@ -313,7 +265,7 @@ with:
 | learning rate | 0.001 |
 | weight decay | 0.001 |
 | gradient clip | 1.0 |
-| checkpoint metric | `val_auc` |
+| checkpoint metric | `val_threshold_accuracy` |
 | checkpoint min delta | 0.0005 |
 
 Each batch is trained twice: original blue/red order with label `y`, and a
@@ -324,32 +276,37 @@ loss = 0.5 * BCE(original_logit, y)
      + 0.5 * BCE(swapped_logit, 1 - y)
 ```
 
-This encourages `P(A beats B) ~= 1 - P(B beats A)`.
-
 Training saves `structured_winrate_model.pt` with `model_type`, `model_config`,
-`confidence_strength`, and `state_dict`. Legacy artifacts may contain removed
-config/state keys; `load_hgnn_model()` keeps only current config keys and loads
-matching weights.
+`confidence_strength`, and `state_dict`. `load_hgnn_model()` ignores removed
+config keys and loads matching weights, so older artifacts can still be read
+when their current-shape weights match.
 
-The production rank-4 profile-v2 artifact (`app/ml/data/structured_winrate_model.pt`)
-has test accuracy `0.5693`, threshold accuracy `0.5722`, AUC `0.5942`, NLL
-`0.6773`, Brier `0.2422`, and ECE `0.0221`, with a train-test AUC gap of
-`0.0095`. Absolute numbers are not comparable to runs on earlier caches: the
-current filtered dataset is smaller (1.15M vs 1.56M train games).
+## Current Results
+
+Metrics are from the current filtered dataset (`1.15M` train games).
+
+| Artifact | Context term | Test Acc | Test Thr Acc | Test AUC | Test NLL | Test Brier | Test ECE |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `structured_winrate_model.pt` | raw identity-conditioned atlas, threshold-tuned | 0.5717 | 0.5743 | 0.5972 | 0.6763 | 0.2418 | 0.0222 |
+| `experiments/identity_conditioned/cond_raw.pt` | raw identity-conditioned atlas, AUC-selected reference | 0.5714 | 0.5751 | 0.5979 | 0.6762 | 0.2417 | 0.0244 |
+| previous `structured_winrate_model.pt` | shared 24-dim atlas | 0.5703 | 0.5735 | 0.5953 | 0.6770 | 0.2421 | 0.0244 |
+
+The threshold-tuned identity-conditioned checkpoint is the production artifact.
+The shared atlas remains available for baseline runs with `--shared-context`.
 
 ## Runtime Prediction
 
-`load_predictor()` loads the saved HGNN artifact, prior tables, and nested-pooling
-strengths from `cache_meta.json`.
+`load_predictor()` loads the HGNN artifact, prior tables, context lookups, and
+nested-pooling strengths from `cache_meta.json`.
 
 For each draft state:
 
 ```text
 champions + roles + build ids
 -> blue/red (champion, role, build) tuples
--> prior table lookups
--> same smoothing/nested pooling as training
--> raw arrays matching the model contract
+-> prior table lookups and smoothing
+-> identity_context/support lookup
+-> identity_context_raw lookup when the artifact needs it
 -> champion/build embedding ids
 -> build_hgnn_inputs()
 -> HGNNWinModel.forward()

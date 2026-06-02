@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -11,13 +11,17 @@ import numpy as np
 from app.classification.embeddings.config import (
     DENSE_IDENTITY_CACHE_PATH,
     DENSE_IDENTITY_DIM,
+    IDENTITY_CONTEXT_CACHE_PATH,
+    IDENTITY_CONTEXT_DIM,
+    IDENTITY_CONTEXT_RAW_DIM,
     IDENTITY_PROFILE_CACHE_PATH,
     IDENTITY_PROFILE_DIM,
     RELATIONSHIP_DETAIL_CACHE_DIR,
-    RELATIONSHIP_DETAIL_DIM,
 )
 from app.core.utils.common import TEAM_PAIRS
 from app.core.utils.smoothing import build_group_for
+
+DEFAULT_RELATIONSHIP_DETAIL_DIM = 16
 
 
 def _empty(dim: int) -> np.ndarray:
@@ -97,6 +101,107 @@ class IdentityProfileLookup:
 
 
 @dataclass(frozen=True)
+class IdentityContextLookup:
+    """Per-identity context-atlas descriptor, keyed like the matchup profile, plus
+    per-identity support (`matchups`).
+
+    Two descriptor views are exposed:
+
+    * ``values`` — the compressed descriptor ``[interpretable axes || low-rank PCA
+      tail]`` consumed by the shared context head (the "none" baseline).
+    * ``raw`` — the wide RAW block ``[interpretable axes || standardised extra
+      metrics]``, the primary interaction source for the identity-conditioned
+      head. Empty for legacy artifacts written before the raw block existed.
+
+    Missing identities default to a zero vector and zero support, which both heads
+    map to no contribution."""
+
+    values: dict[tuple[int, str, str], np.ndarray]
+    support: dict[tuple[int, str, str], float]
+    raw: dict[tuple[int, str, str], np.ndarray] = field(default_factory=dict)
+    dim: int = IDENTITY_CONTEXT_DIM
+    interpretable_dim: int = 0
+    raw_dim: int = IDENTITY_CONTEXT_RAW_DIM
+
+    @classmethod
+    def load(cls, path: Path = IDENTITY_CONTEXT_CACHE_PATH) -> "IdentityContextLookup":
+        if not path.exists():
+            return cls(values={}, support={}, dim=IDENTITY_CONTEXT_DIM)
+        with np.load(path, allow_pickle=True) as payload:
+            embeddings = payload["embeddings"].astype(np.float32)
+            keys = payload["keys"]
+            dim = int(payload["dim"].item()) if "dim" in payload.files else embeddings.shape[1]
+            interpretable_dim = (
+                int(payload["interpretable_dim"].item())
+                if "interpretable_dim" in payload.files
+                else 0
+            )
+            matchups = (
+                payload["matchups"].astype(np.float32)
+                if "matchups" in payload.files
+                else np.zeros(len(keys), dtype=np.float32)
+            )
+            raw_embeddings = (
+                payload["raw_embeddings"].astype(np.float32)
+                if "raw_embeddings" in payload.files
+                else None
+            )
+            raw_dim = (
+                int(payload["raw_dim"].item())
+                if "raw_dim" in payload.files
+                else (
+                    raw_embeddings.shape[1]
+                    if raw_embeddings is not None
+                    else IDENTITY_CONTEXT_RAW_DIM
+                )
+            )
+        values = {
+            (int(key[0]), str(key[1]), str(key[2])): embeddings[i]
+            for i, key in enumerate(keys)
+        }
+        support = {
+            (int(key[0]), str(key[1]), str(key[2])): float(matchups[i])
+            for i, key in enumerate(keys)
+        }
+        raw = (
+            {
+                (int(key[0]), str(key[1]), str(key[2])): raw_embeddings[i]
+                for i, key in enumerate(keys)
+            }
+            if raw_embeddings is not None
+            else {}
+        )
+        return cls(
+            values=values,
+            support=support,
+            raw=raw,
+            dim=dim,
+            interpretable_dim=interpretable_dim,
+            raw_dim=raw_dim,
+        )
+
+    def lookup_players(self, tuples: Iterable[tuple[int, str, str]]) -> np.ndarray:
+        default = _empty(self.dim)
+        return np.stack(
+            [self.values.get((int(c), str(p), str(b)), default) for c, p, b in tuples],
+            axis=0,
+        ).astype(np.float32)
+
+    def lookup_raw(self, tuples: Iterable[tuple[int, str, str]]) -> np.ndarray:
+        default = _empty(self.raw_dim)
+        return np.stack(
+            [self.raw.get((int(c), str(p), str(b)), default) for c, p, b in tuples],
+            axis=0,
+        ).astype(np.float32)
+
+    def lookup_support(self, tuples: Iterable[tuple[int, str, str]]) -> np.ndarray:
+        return np.array(
+            [self.support.get((int(c), str(p), str(b)), 0.0) for c, p, b in tuples],
+            dtype=np.float32,
+        )
+
+
+@dataclass(frozen=True)
 class RelationshipDetailLookup:
     exact: dict[tuple, np.ndarray]
     exact_counts: dict[tuple, float]
@@ -106,11 +211,11 @@ class RelationshipDetailLookup:
     nobuild_counts: dict[tuple, float]
     champion: dict[tuple, np.ndarray]
     champion_counts: dict[tuple, float]
-    dim: int = RELATIONSHIP_DETAIL_DIM
+    dim: int = DEFAULT_RELATIONSHIP_DETAIL_DIM
     threshold: float = 50.0
 
     @classmethod
-    def empty(cls, dim: int = RELATIONSHIP_DETAIL_DIM) -> "RelationshipDetailLookup":
+    def empty(cls, dim: int = DEFAULT_RELATIONSHIP_DETAIL_DIM) -> "RelationshipDetailLookup":
         return cls({}, {}, {}, {}, {}, {}, {}, {}, dim=dim)
 
     @classmethod
@@ -125,7 +230,11 @@ class RelationshipDetailLookup:
         if not path.exists():
             return cls.empty()
         with np.load(path, allow_pickle=True) as payload:
-            dim = int(payload["dim"].item()) if "dim" in payload.files else RELATIONSHIP_DETAIL_DIM
+            dim = (
+                int(payload["dim"].item())
+                if "dim" in payload.files
+                else DEFAULT_RELATIONSHIP_DETAIL_DIM
+            )
             kwargs = {}
             for level in ("exact", "build_group", "nobuild", "champion"):
                 kwargs[level] = _rows_to_dict(payload[f"{level}_keys"], payload[f"{level}_values"])

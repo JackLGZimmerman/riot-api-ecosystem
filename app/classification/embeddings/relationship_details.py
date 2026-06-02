@@ -14,11 +14,8 @@ import numpy as np
 from app.classification.embeddings.config import (
     ITEM_VALUE_TOTALS_TABLE,
     ML_GAME_SPLIT_TABLE,
-    PARTICIPANT_CHALLENGES_TABLE,
     PARTICIPANT_STATS_TABLE,
     RELATIONSHIP_DETAIL_CACHE_DIR,
-    RELATIONSHIP_DETAIL_DIM,
-    RELATIONSHIP_DETAIL_FEATURES,
 )
 from app.core.logging.logger import setup_logging_config
 from app.core.utils.common import (
@@ -31,6 +28,27 @@ from app.core.utils.smoothing import build_group_for
 from database.clickhouse.client import get_client
 
 logger = logging.getLogger(__name__)
+
+_RELATIONSHIP_DETAIL_RAW_SCHEMA = "stats_only_v2"
+_RELATIONSHIP_DETAIL_FEATURES: tuple[str, ...] = (
+    "gold_diff_mean",
+    "gold_adv_2k_net_rate",
+    "gold_adv_5k_net_rate",
+    "cs_diff_mean",
+    "cs_adv_50_net_rate",
+    "xp_diff_mean",
+    "champion_damage_diff_mean",
+    "damage_adv_20k_net_rate",
+    "damage_taken_diff_mean",
+    "objective_damage_diff_mean",
+    "structure_damage_diff_mean",
+    "vision_score_diff_mean",
+    "ally_support_diff_mean",
+    "cc_time_diff_mean",
+    "damage_mitigated_diff_mean",
+    "self_heal_diff_mean",
+)
+_RELATIONSHIP_DETAIL_DIM = len(_RELATIONSHIP_DETAIL_FEATURES)
 
 
 @dataclass(frozen=True)
@@ -48,8 +66,6 @@ filtered_players AS (
         ps.matchid AS matchid,
         ps.participantid AS participantid,
         ps.teamid AS teamid,
-        ps.puuid AS puuid,
-        toUInt8(ps.win > 0) AS win,
         assumeNotNull(ps.championid) AS championid,
         toString(ps.teamposition) AS teamposition,
         toString(ivt.highest_value_label) AS build,
@@ -57,7 +73,14 @@ filtered_players AS (
         ps.champexperience AS xp,
         ps.totalminionskilled + ps.neutralminionskilled AS cs,
         ps.totaldamagedealttochampions AS champion_damage,
-        ps.totaldamagetaken AS damage_taken
+        ps.totaldamagetaken AS damage_taken,
+        ps.damagedealttoobjectives AS objective_damage,
+        ps.damagedealttobuildings + ps.damagedealttoturrets AS structure_damage,
+        ps.visionscore AS vision_score,
+        ps.totalhealsonteammates + ps.totaldamageshieldedonteammates AS ally_support,
+        ps.timeccingothers AS cc_time,
+        ps.damageselfmitigated AS damage_mitigated,
+        greatest(ps.totalheal - ps.totalhealsonteammates, 0) AS self_heal
     FROM {PARTICIPANT_STATS_TABLE} AS ps
     INNER JOIN {ML_GAME_SPLIT_TABLE} AS s
         ON ps.matchid = s.matchid
@@ -69,27 +92,11 @@ filtered_players AS (
         AND toString(ps.teamposition) != 'UNKNOWN'
         {where_extra}
 ),
-challenges AS (
-    SELECT
-        ch.matchid AS matchid,
-        ch.puuid AS puuid,
-        ch.solokills AS solokills,
-        ch.maxcsadvantageonlaneopponent AS maxcsadvantageonlaneopponent,
-        ch.maxlevelleadlaneopponent AS maxlevelleadlaneopponent,
-        ch.turretplatestaken AS turretplatestaken
-    FROM {PARTICIPANT_CHALLENGES_TABLE} AS ch
-    ANY INNER JOIN (
-        SELECT matchid, puuid
-        FROM filtered_players
-    ) AS fp
-        ON ch.matchid = fp.matchid AND ch.puuid = fp.puuid
-),
 players AS (
     SELECT
         fp.matchid AS matchid,
         fp.participantid AS participantid,
         fp.teamid AS teamid,
-        fp.win AS win,
         fp.championid AS championid,
         fp.teamposition AS teamposition,
         fp.build AS build,
@@ -98,15 +105,14 @@ players AS (
         fp.cs AS cs,
         fp.champion_damage AS champion_damage,
         fp.damage_taken AS damage_taken,
-        toFloat32(coalesce(ch.solokills, 0)) AS solo_kills,
-        toFloat32(coalesce(ch.maxcsadvantageonlaneopponent, 0)) AS max_cs_adv,
-        toFloat32(coalesce(ch.maxlevelleadlaneopponent, 0)) AS max_level_lead,
-        toFloat32(coalesce(ch.turretplatestaken, 0)) AS turret_plates,
-        toFloat32(0) AS gold_10,
-        toFloat32(0) AS gold_15
+        fp.objective_damage AS objective_damage,
+        fp.structure_damage AS structure_damage,
+        fp.vision_score AS vision_score,
+        fp.ally_support AS ally_support,
+        fp.cc_time AS cc_time,
+        fp.damage_mitigated AS damage_mitigated,
+        fp.self_heal AS self_heal
     FROM filtered_players AS fp
-    ANY LEFT JOIN challenges AS ch
-        ON fp.matchid = ch.matchid AND fp.puuid = ch.puuid
 )
 """
 
@@ -144,13 +150,13 @@ SELECT
     avg(signed_champion_damage) AS champion_damage_diff_mean,
     avg(signed_champion_damage >= 20000) - avg(signed_champion_damage <= -20000) AS damage_adv_20k_net_rate,
     avg(signed_damage_taken) AS damage_taken_diff_mean,
-    avg(signed_solo_kills) AS solo_kills_diff_mean,
-    avg(signed_solo_kills >= 2) - avg(signed_solo_kills <= -2) AS solo2_net_rate,
-    avg(signed_max_cs_adv) AS max_cs_adv_diff_mean,
-    avg(signed_max_level_lead) AS max_level_lead_diff_mean,
-    avg(signed_turret_plates) AS turret_plate_diff_mean,
-    avg(signed_gold_10) AS gold_diff_10_mean,
-    avg(signed_gold_15) AS gold_diff_15_mean
+    avg(signed_objective_damage) AS objective_damage_diff_mean,
+    avg(signed_structure_damage) AS structure_damage_diff_mean,
+    avg(signed_vision_score) AS vision_score_diff_mean,
+    avg(signed_ally_support) AS ally_support_diff_mean,
+    avg(signed_cc_time) AS cc_time_diff_mean,
+    avg(signed_damage_mitigated) AS damage_mitigated_diff_mean,
+    avg(signed_self_heal) AS self_heal_diff_mean
 FROM (
     SELECT
         (b.championid, b.teamposition, b.build) AS b_key,
@@ -163,12 +169,13 @@ FROM (
         sign * (toFloat64(b.xp) - toFloat64(r.xp)) AS signed_xp,
         sign * (toFloat64(b.champion_damage) - toFloat64(r.champion_damage)) AS signed_champion_damage,
         sign * (toFloat64(b.damage_taken) - toFloat64(r.damage_taken)) AS signed_damage_taken,
-        sign * (toFloat64(b.solo_kills) - toFloat64(r.solo_kills)) AS signed_solo_kills,
-        sign * (toFloat64(b.max_cs_adv) - toFloat64(r.max_cs_adv)) AS signed_max_cs_adv,
-        sign * (toFloat64(b.max_level_lead) - toFloat64(r.max_level_lead)) AS signed_max_level_lead,
-        sign * (toFloat64(b.turret_plates) - toFloat64(r.turret_plates)) AS signed_turret_plates,
-        sign * (toFloat64(b.gold_10) - toFloat64(r.gold_10)) AS signed_gold_10,
-        sign * (toFloat64(b.gold_15) - toFloat64(r.gold_15)) AS signed_gold_15
+        sign * (toFloat64(b.objective_damage) - toFloat64(r.objective_damage)) AS signed_objective_damage,
+        sign * (toFloat64(b.structure_damage) - toFloat64(r.structure_damage)) AS signed_structure_damage,
+        sign * (toFloat64(b.vision_score) - toFloat64(r.vision_score)) AS signed_vision_score,
+        sign * (toFloat64(b.ally_support) - toFloat64(r.ally_support)) AS signed_ally_support,
+        sign * (toFloat64(b.cc_time) - toFloat64(r.cc_time)) AS signed_cc_time,
+        sign * (toFloat64(b.damage_mitigated) - toFloat64(r.damage_mitigated)) AS signed_damage_mitigated,
+        sign * (toFloat64(b.self_heal) - toFloat64(r.self_heal)) AS signed_self_heal
     FROM players AS b
     INNER JOIN players AS r
         ON b.matchid = r.matchid
@@ -218,13 +225,13 @@ SELECT
     avg(pair_champion_damage) AS champion_damage_diff_mean,
     avg(pair_champion_damage >= 60000) AS damage_adv_20k_net_rate,
     avg(pair_damage_taken) AS damage_taken_diff_mean,
-    avg(pair_solo_kills) AS solo_kills_diff_mean,
-    avg(pair_solo_kills >= 4) AS solo2_net_rate,
-    avg(pair_max_cs_adv) AS max_cs_adv_diff_mean,
-    avg(pair_max_level_lead) AS max_level_lead_diff_mean,
-    avg(pair_turret_plates) AS turret_plate_diff_mean,
-    avg(pair_gold_10) AS gold_diff_10_mean,
-    avg(pair_gold_15) AS gold_diff_15_mean
+    avg(pair_objective_damage) AS objective_damage_diff_mean,
+    avg(pair_structure_damage) AS structure_damage_diff_mean,
+    avg(pair_vision_score) AS vision_score_diff_mean,
+    avg(pair_ally_support) AS ally_support_diff_mean,
+    avg(pair_cc_time) AS cc_time_diff_mean,
+    avg(pair_damage_mitigated) AS damage_mitigated_diff_mean,
+    avg(pair_self_heal) AS self_heal_diff_mean
 FROM (
     SELECT
         (a.championid, a.teamposition, a.build) AS a_key,
@@ -236,12 +243,13 @@ FROM (
         0.5 * (toFloat64(a.xp) + toFloat64(b.xp)) AS pair_xp,
         0.5 * (toFloat64(a.champion_damage) + toFloat64(b.champion_damage)) AS pair_champion_damage,
         0.5 * (toFloat64(a.damage_taken) + toFloat64(b.damage_taken)) AS pair_damage_taken,
-        0.5 * (toFloat64(a.solo_kills) + toFloat64(b.solo_kills)) AS pair_solo_kills,
-        0.5 * (toFloat64(a.max_cs_adv) + toFloat64(b.max_cs_adv)) AS pair_max_cs_adv,
-        0.5 * (toFloat64(a.max_level_lead) + toFloat64(b.max_level_lead)) AS pair_max_level_lead,
-        0.5 * (toFloat64(a.turret_plates) + toFloat64(b.turret_plates)) AS pair_turret_plates,
-        0.5 * (toFloat64(a.gold_10) + toFloat64(b.gold_10)) AS pair_gold_10,
-        0.5 * (toFloat64(a.gold_15) + toFloat64(b.gold_15)) AS pair_gold_15
+        0.5 * (toFloat64(a.objective_damage) + toFloat64(b.objective_damage)) AS pair_objective_damage,
+        0.5 * (toFloat64(a.structure_damage) + toFloat64(b.structure_damage)) AS pair_structure_damage,
+        0.5 * (toFloat64(a.vision_score) + toFloat64(b.vision_score)) AS pair_vision_score,
+        0.5 * (toFloat64(a.ally_support) + toFloat64(b.ally_support)) AS pair_ally_support,
+        0.5 * (toFloat64(a.cc_time) + toFloat64(b.cc_time)) AS pair_cc_time,
+        0.5 * (toFloat64(a.damage_mitigated) + toFloat64(b.damage_mitigated)) AS pair_damage_mitigated,
+        0.5 * (toFloat64(a.self_heal) + toFloat64(b.self_heal)) AS pair_self_heal
     FROM players AS a
     INNER JOIN players AS b
         ON a.matchid = b.matchid AND a.teamid = b.teamid
@@ -314,17 +322,20 @@ def _write_artifact(kind: str, rows: Iterable[tuple], path: Path) -> Relationshi
     exact_keys = [tuple(row[:key_width]) for row in rows]
     matchups = np.asarray([row[key_width] for row in rows], dtype=np.float32)
     raw_values = np.asarray(
-        [row[key_width + 1 : key_width + 1 + len(RELATIONSHIP_DETAIL_FEATURES)] for row in rows],
+        [
+            row[key_width + 1 : key_width + 1 + len(_RELATIONSHIP_DETAIL_FEATURES)]
+            for row in rows
+        ],
         dtype=np.float32,
     )
     levels = _weighted_levels(kind, exact_keys, raw_values, matchups)
     exact_standardised, med, mad = median_mad_standardise(levels["exact"][1])
 
     payload: dict[str, np.ndarray] = {
-        "feature_names": np.array(RELATIONSHIP_DETAIL_FEATURES, dtype=object),
+        "feature_names": np.array(_RELATIONSHIP_DETAIL_FEATURES, dtype=object),
         "median": med,
         "mad": mad,
-        "dim": np.array(RELATIONSHIP_DETAIL_DIM, dtype=np.int32),
+        "dim": np.array(_RELATIONSHIP_DETAIL_DIM, dtype=np.int32),
     }
     for level, (keys, raw, counts) in levels.items():
         payload[f"{level}_keys"] = keys
@@ -336,11 +347,16 @@ def _write_artifact(kind: str, rows: Iterable[tuple], path: Path) -> Relationshi
 
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, **payload)
-    return RelationshipDetailResult(kind=kind, path=path, exact_rows=len(rows), dim=RELATIONSHIP_DETAIL_DIM)
+    return RelationshipDetailResult(
+        kind=kind,
+        path=path,
+        exact_rows=len(rows),
+        dim=_RELATIONSHIP_DETAIL_DIM,
+    )
 
 
 def _raw_cache_path(output_dir: Path, kind: str, label: str) -> Path:
-    return output_dir / "_raw" / f"{kind}_{label}.npz"
+    return output_dir / "_raw" / f"{kind}_{_RELATIONSHIP_DETAIL_RAW_SCHEMA}_{label}.npz"
 
 
 def _save_rows(path: Path, rows: list[tuple]) -> None:

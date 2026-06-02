@@ -15,12 +15,16 @@ from app.ml.cache_layout import (
     CACHE_FORMAT,
     CACHE_META_FILE,
     DISK_DTYPES,
+    IDENTITY_CONTEXT_DIM,
+    IDENTITY_CONTEXT_RAW_DIM,
     IDENTITY_PROFILE_DIM,
     IDENTITY_SEMANTIC_DIM,
     RELATIONSHIP_DETAIL_DIM,
     array_paths,
 )
+from app.classification.embeddings.config import IDENTITY_CONTEXT_INTERP_DIM
 from app.classification.embeddings.runtime import (
+    IdentityContextLookup,
     IdentityProfileLookup,
     IdentitySemanticLookup,
     RelationshipDetailLookup,
@@ -372,14 +376,16 @@ def _classification_features(
     build_vocab: list[str],
     identity_lookup: IdentitySemanticLookup,
     profile_lookup: IdentityProfileLookup,
+    context_lookup: IdentityContextLookup,
     m1v1_detail_lookup: RelationshipDetailLookup,
-    s2vx_detail_lookup: RelationshipDetailLookup,
 ) -> dict[str, np.ndarray]:
     n = raw["champion_id"].shape[0]
     identity = np.zeros((n, 10, IDENTITY_SEMANTIC_DIM), dtype=np.float32)
     profile = np.zeros((n, 10, IDENTITY_PROFILE_DIM), dtype=np.float32)
+    context = np.zeros((n, 10, IDENTITY_CONTEXT_DIM), dtype=np.float32)
+    context_support = np.zeros((n, 10), dtype=np.float32)
+    context_raw = np.zeros((n, 10, IDENTITY_CONTEXT_RAW_DIM), dtype=np.float32)
     m1v1 = np.zeros((n, 25, RELATIONSHIP_DETAIL_DIM), dtype=np.float32)
-    s2vx = np.zeros((n, 20, RELATIONSHIP_DETAIL_DIM), dtype=np.float32)
     champions = raw["champion_id"].astype(np.int64, copy=False)
     builds = raw["build_id"].astype(np.int64, copy=False)
     for row in range(n):
@@ -388,22 +394,17 @@ def _classification_features(
         red = tuples[5:]
         identity[row] = fit_last_dim(identity_lookup.lookup_players(tuples), IDENTITY_SEMANTIC_DIM)
         profile[row] = fit_last_dim(profile_lookup.lookup_players(tuples), IDENTITY_PROFILE_DIM)
+        context[row] = fit_last_dim(context_lookup.lookup_players(tuples), IDENTITY_CONTEXT_DIM)
+        context_support[row] = context_lookup.lookup_support(tuples)
+        context_raw[row] = fit_last_dim(context_lookup.lookup_raw(tuples), IDENTITY_CONTEXT_RAW_DIM)
         m1v1[row] = fit_last_dim(m1v1_detail_lookup.lookup_1v1_blue(blue, red), RELATIONSHIP_DETAIL_DIM)
-        s2vx[row] = fit_last_dim(
-            np.concatenate(
-                [
-                    s2vx_detail_lookup.lookup_2vx_team(blue),
-                    s2vx_detail_lookup.lookup_2vx_team(red),
-                ],
-                axis=0,
-            ),
-            RELATIONSHIP_DETAIL_DIM,
-        )
     return {
         "identity_semantic": identity,
         "identity_profile": profile,
+        "identity_context": context,
+        "identity_context_support": context_support,
+        "identity_context_raw": context_raw,
         "m1v1_detail": m1v1,
-        "s2vx_detail": s2vx,
     }
 
 
@@ -509,8 +510,8 @@ def _write_split(
     key_build_expr: str,
     identity_lookup: IdentitySemanticLookup,
     profile_lookup: IdentityProfileLookup,
+    context_lookup: IdentityContextLookup,
     m1v1_detail_lookup: RelationshipDetailLookup,
-    s2vx_detail_lookup: RelationshipDetailLookup,
 ) -> int:
     written = 0
     for raw in _stream_split(
@@ -548,8 +549,8 @@ def _write_split(
                 build_vocab=build_vocab,
                 identity_lookup=identity_lookup,
                 profile_lookup=profile_lookup,
+                context_lookup=context_lookup,
                 m1v1_detail_lookup=m1v1_detail_lookup,
-                s2vx_detail_lookup=s2vx_detail_lookup,
             )
         )
         start = offset + written
@@ -626,19 +627,19 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     )
     identity_lookup = IdentitySemanticLookup.load()
     profile_lookup = IdentityProfileLookup.load()
+    context_lookup = IdentityContextLookup.load()
     m1v1_detail_lookup = RelationshipDetailLookup.load("m1v1")
-    s2vx_detail_lookup = RelationshipDetailLookup.load("s2vx")
 
     logger.info(
-        "Building cache: games=%d splits=%s n_champions=%d n_builds=%d eb_strengths=%s classification_dims=(%d,%d,%d)",
+        "Building cache: games=%d splits=%s n_champions=%d n_builds=%d eb_strengths=%s classification_dims=(sem=%d,ctx=%d,detail=%d)",
         n_games,
         counts,
         n_champions,
         n_builds,
         level_strengths,
         identity_lookup.dim,
+        context_lookup.dim,
         m1v1_detail_lookup.dim,
-        s2vx_detail_lookup.dim,
     )
     offset = 0
     for sql_split, meta_split in SPLITS:
@@ -671,8 +672,8 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             key_build_expr=key_build_expr,
             identity_lookup=identity_lookup,
             profile_lookup=profile_lookup,
+            context_lookup=context_lookup,
             m1v1_detail_lookup=m1v1_detail_lookup,
-            s2vx_detail_lookup=s2vx_detail_lookup,
         )
         if written != counts[meta_split]:
             raise RuntimeError(
@@ -697,8 +698,10 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             "classification": {
                 "identity_semantic_dim": IDENTITY_SEMANTIC_DIM,
                 "identity_profile_dim": IDENTITY_PROFILE_DIM,
+                "identity_context_dim": IDENTITY_CONTEXT_DIM,
+                "context_interpretable_dim": IDENTITY_CONTEXT_INTERP_DIM,
+                "identity_context_raw_dim": IDENTITY_CONTEXT_RAW_DIM,
                 "m1v1_detail_dim": RELATIONSHIP_DETAIL_DIM,
-                "s2vx_detail_dim": RELATIONSHIP_DETAIL_DIM,
             },
         },
         level_strengths,

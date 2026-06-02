@@ -17,8 +17,10 @@ the Python matrices, specialist labels, or singular metric scores.
 - `game_data_filtered.ml_game_split`
 - `game_data.tl_participant_stats` for final participant stat snapshots and
   checkpoint snapshots at 3, 4, 5, 7, 10, 12, 15, 20, 22, and 25 minutes
-- `game_data.participant_challenges` for lane pressure, solo-kill, damage,
-  gold/minute, and turret/plate context
+
+Challenge-derived data is forbidden in this classification path. Do not add
+`game_data.participant_challenges` joins or `challenge_*` columns to identity
+descriptors, relationship-detail artifacts, or config feature catalogues.
 
 The prior hierarchy is derived in memory from the baseline aggregate. The old
 `synergy_1vx_temporal`, `synergy_1vx_temporal_prior_*`, and
@@ -29,6 +31,7 @@ The prior hierarchy is derived in memory from the baseline aggregate. The old
 ```bash
 uv run python -m app.classification.embeddings.pipeline
 uv run python -m app.classification.embeddings.dense
+uv run python -m app.classification.embeddings.context
 uv run python -m app.classification.embeddings.relationship_details
 uv run python -m app.classification.embeddings.specialists
 uv run python -m app.classification.embeddings.singular_metrics
@@ -72,6 +75,32 @@ concatenates the low-rank semantic context above and explicit resistance × enem
 offense products to the profile-head input, without using the current game's
 realized diagnostics.
 
+### Context Atlas (production descriptor)
+
+The production HGNN enemy/ally-composition path consumes the **raw context
+atlas**,
+saved to
+`app/classification/data/embeddings/cache/identity_context_embedding.npz` and
+built by `python -m app.classification.embeddings.context`. It is keyed by
+`(championid, teamposition, build)` and passed to the HGNN as
+`identity_context_raw` with shape `(batch, 10, 62)`, plus a per-identity support
+scalar (`matchups`) for the head's support gate. The 24-dim `identity_context`
+descriptor is retained for the shared-head baseline and `raw_plus_dense`
+experiments.
+
+`identity_context = [14 interpretable natural-unit axes || 10 dense low-rank PCA
+axes]`. The first 9 interpretable axes reproduce the matchup profile exactly;
+the new axes are `damage_taken_pressure`, `heal_shield_pressure`, `cc_pressure`,
+`siege_pressure`, `scaling_pressure`. The low-rank tail is
+`identity_context_feature_set()` (every allowed metric/derived ratio) PCA'd to 10
+dims. `identity_context_raw` keeps those 14 interpretable axes and appends 48
+median/MAD-standardized allowed metrics for the threshold-tuned
+identity-conditioned head. **Challenge-derived data is excluded from this path
+entirely** (enforced by feature-set assertions and tests). It generalises the
+matchup-profile interaction to every identity plus relational 1v1/2vX context;
+see [HGNN_CONTEXT_ATLAS.md](../ml/documentation/HGNN_CONTEXT_ATLAS.md) and
+[HGNN_IDENTITY_CONDITIONED_CONTEXT.md](../ml/documentation/HGNN_IDENTITY_CONDITIONED_CONTEXT.md).
+
 ## Semantic Meaning For HGNN
 
 The classification layer gives the win model two kinds of meaning:
@@ -80,12 +109,12 @@ The classification layer gives the win model two kinds of meaning:
   the identity, such as lane pressure, damage timing, economy, durability, and
   objective pressure. This vector is intentionally compressed before HGNN uses
   it, so it can condition a decision without becoming a large memorization path.
-- An interpretable matchup profile keeps a small set of named axes in their
-  natural units. The production profile currently exposes damage-type mix,
-  resistance mix, and expected champion-damage pressure. The HGNN can then learn
-  shared rules such as "armor-heavy identities benefit against damage-weighted
-  physical enemy compositions" rather than memorizing one champion pair at a
-  time.
+- An interpretable raw context atlas keeps named axes in their natural units and
+  appends a compact set of standardized semantic metrics. The production HGNN
+  uses a low-rank identity-conditioned interaction over this raw atlas, so it can
+  learn rules such as "this armor-heavy identity benefits against
+  damage-weighted physical enemy compositions" rather than applying one shared
+  rule to every tank or memorizing one champion pair at a time.
 
 This split is the pattern for adding thousands of future contextual groups.
 Each new group should describe a reusable semantic axis of champion decisions:
@@ -103,15 +132,23 @@ match's realized damage, taken damage, mitigation, final items, or outcome. That
 keeps the model deployable at draft time while still giving it enough semantic
 texture to specialize globally across many champion/build/role contexts.
 
+## HGNN Context Contract
+
+The serving-side split between classification artifacts and contextual
+cross-team use is documented in
+[HGNN_CURRENT.md](../ml/documentation/HGNN_CURRENT.md). In short,
+classification owns the historical identity descriptors and their cache files;
+the HGNN owns how those descriptors become draft-time context, including the
+antisymmetric matchup-profile interaction against the opposing team's aggregate
+damage composition.
+
 Relationship-detail vectors are saved under
 `app/classification/data/embeddings/cache/relationship_details/`. The 1v1 file
-is directional and is passed as `m1v1_detail` with shape `(batch, 25, 16)`;
-the 2vX file is symmetric and is passed as `s2vx_detail` with shape
-`(batch, 20, 16)`. These vectors enrich the HGNN relationship residual head
-with historic gold, CS, XP, damage, solo-kill, level-lead, and plate pressure.
-Checkpoint timing is carried by the per-identity semantic descriptors, while
-relationship details let a matchup such as Sion TOP ar_tank vs Yone TOP crit
-carry its high-stomp lane profile rather than only a small win-rate edge.
+is directional and can be passed as `m1v1_detail` with shape `(batch, 25, 16)`
+for experiments. The production HGNN no longer consumes 2vX relationship-detail
+vectors. These vectors summarize historic gold, CS, XP, damage, objective
+pressure, structure pressure, vision, support, CC, mitigation, and self-heal.
+Checkpoint timing is carried by the per-identity semantic descriptors.
 
 Label numbers are identifiers, not magnitudes. Downstream models should one-hot,
 target-encode, or otherwise encode group membership, and should use singular

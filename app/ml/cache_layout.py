@@ -4,7 +4,12 @@ from pathlib import Path
 
 import numpy as np
 
-CACHE_FORMAT = "npy-memmap-v23"
+from app.classification.embeddings.config import (
+    IDENTITY_CONTEXT_DIM,
+    IDENTITY_CONTEXT_RAW_DIM,
+)
+
+CACHE_FORMAT = "npy-memmap-v26"
 CACHE_META_FILE = "cache_meta.json"
 
 WIN_RATE_FILE = "win_rate.npy"
@@ -22,8 +27,14 @@ CHAMPION_ID_FILE = "champion_id.npy"
 BUILD_ID_FILE = "build_id.npy"
 IDENTITY_SEMANTIC_FILE = "identity_semantic.npy"
 IDENTITY_PROFILE_FILE = "identity_profile.npy"
+# Context atlas (v25): per-player descriptor + per-player historical support
+# (matchups) for the HGNN's support-gated antisymmetric context head.
+IDENTITY_CONTEXT_FILE = "identity_context.npy"
+IDENTITY_CONTEXT_SUPPORT_FILE = "identity_context_support.npy"
+# Wide RAW atlas block (v26): the primary interaction source for the
+# identity-conditioned context head ([interpretable axes || standardised extra]).
+IDENTITY_CONTEXT_RAW_FILE = "identity_context_raw.npy"
 M1V1_DETAIL_FILE = "m1v1_detail.npy"
-S2VX_DETAIL_FILE = "s2vx_detail.npy"
 BLUE_WIN_FILE = "blue_win.npy"
 
 N_PLAYERS_PER_GAME = 10
@@ -46,8 +57,10 @@ ARRAY_FILES = {
     "build_id": BUILD_ID_FILE,
     "identity_semantic": IDENTITY_SEMANTIC_FILE,
     "identity_profile": IDENTITY_PROFILE_FILE,
+    "identity_context": IDENTITY_CONTEXT_FILE,
+    "identity_context_support": IDENTITY_CONTEXT_SUPPORT_FILE,
+    "identity_context_raw": IDENTITY_CONTEXT_RAW_FILE,
     "m1v1_detail": M1V1_DETAIL_FILE,
-    "s2vx_detail": S2VX_DETAIL_FILE,
     "blue_win": BLUE_WIN_FILE,
 }
 
@@ -64,8 +77,10 @@ DISK_DTYPES = {
     "build_id": np.int16,
     "identity_semantic": np.float32,
     "identity_profile": np.float32,
+    "identity_context": np.float32,
+    "identity_context_support": np.float32,
+    "identity_context_raw": np.float32,
     "m1v1_detail": np.float32,
-    "s2vx_detail": np.float32,
     "blue_win": np.uint8,
 }
 
@@ -82,8 +97,10 @@ ARRAY_SHAPES = {
     "build_id": (N_PLAYERS_PER_GAME,),
     "identity_semantic": (N_PLAYERS_PER_GAME, IDENTITY_SEMANTIC_DIM),
     "identity_profile": (N_PLAYERS_PER_GAME, IDENTITY_PROFILE_DIM),
+    "identity_context": (N_PLAYERS_PER_GAME, IDENTITY_CONTEXT_DIM),
+    "identity_context_support": (N_PLAYERS_PER_GAME,),
+    "identity_context_raw": (N_PLAYERS_PER_GAME, IDENTITY_CONTEXT_RAW_DIM),
     "m1v1_detail": (N_MATCHUPS_1V1, RELATIONSHIP_DETAIL_DIM),
-    "s2vx_detail": (N_SYNERGIES_2VX, RELATIONSHIP_DETAIL_DIM),
     "blue_win": (),
 }
 

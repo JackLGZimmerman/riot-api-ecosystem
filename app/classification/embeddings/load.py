@@ -21,13 +21,11 @@ import numpy as np
 
 from app.classification.embeddings.config import (
     ALL_METRICS,
-    CHALLENGE_AVG_METRICS,
     FINAL_SNAPSHOT_AVG_METRICS,
     ITEM_VALUE_TOTALS_TABLE,
     LARGEST_AVG_METRICS,
     LEVEL_KEY,
     ML_GAME_SPLIT_TABLE,
-    PARTICIPANT_CHALLENGES_TABLE,
     PARTICIPANT_STATS_TABLE,
     PER_MINUTE_METRICS,
     PRIOR_LEVELS,
@@ -154,6 +152,9 @@ def _load_level_rows(path: Path, level: IdentityType) -> LevelRows | None:
     if any(arr.shape != (n,) for arr in columns.values()):
         logger.warning("Ignoring malformed classification cache %s", path)
         return None
+    if any("challenge" in name.lower() for name in columns):
+        logger.warning("Ignoring challenge-derived classification cache %s", path)
+        return None
     logger.info("Loaded cached %s: %d rows", level.value, n)
     return LevelRows(
         level=level,
@@ -180,14 +181,9 @@ def _per_minute_aggs(metrics: tuple[str, ...]) -> list[str]:
     return out
 
 
-def _challenge_source(metric: str) -> str:
-    return metric.removeprefix("challenge_")
-
-
 def _participant_context_cte(
     split: str,
     *,
-    include_challenges: bool = False,
     include_stats: bool = True,
     stat_columns: tuple[str, ...] | None = None,
 ) -> str:
@@ -203,32 +199,6 @@ def _participant_context_cte(
             ",\n        "
             + ",\n        ".join(f"ps.{column} AS {column}" for column in columns)
         )
-    challenge_select = ""
-    challenge_join = ""
-    if include_challenges:
-        challenge_select = (
-            ",\n        "
-            + ",\n        ".join(
-                f"toFloat32(coalesce(ch.{_challenge_source(metric)}, 0)) AS {metric}"
-                for metric in CHALLENGE_AVG_METRICS
-                if metric != "challenge_missing"
-            )
-            + ",\n        toFloat32(coalesce(ch.matchid, '') = '') AS challenge_missing"
-        )
-        challenge_join = f"""
-    ANY LEFT JOIN (
-        SELECT
-            ch.matchid AS matchid,
-            ch.puuid AS puuid,
-            {", ".join(_challenge_source(metric) for metric in CHALLENGE_AVG_METRICS if metric != "challenge_missing")}
-        FROM {PARTICIPANT_CHALLENGES_TABLE} AS ch
-        INNER JOIN {ML_GAME_SPLIT_TABLE} AS sc
-            ON ch.matchid = sc.matchid
-        WHERE sc.split = {split}
-    ) AS ch
-        ON
-            ps.matchid = ch.matchid
-            AND ps.puuid = ch.puuid"""
     return f"""
 participant_context AS (
     SELECT
@@ -238,7 +208,6 @@ participant_context AS (
         toString(ps.teamposition) AS teamposition_str,
         toString(ivt.highest_value_label) AS build
         {stat_select}
-        {challenge_select}
     FROM {PARTICIPANT_STATS_TABLE} AS ps
     INNER JOIN {ML_GAME_SPLIT_TABLE} AS s
         ON ps.matchid = s.matchid
@@ -246,7 +215,6 @@ participant_context AS (
         ON
             ps.matchid = ivt.matchid
             AND ps.participantid = ivt.participantid
-        {challenge_join}
     WHERE
         s.split = {split}
         AND isNotNull(ps.championid)
@@ -308,33 +276,6 @@ SELECT
     ps.teamposition_str AS teamposition,
     ps.build AS build,
     {", ".join(metric_aggs)}
-FROM participant_context AS ps
-GROUP BY
-    championid,
-    teamposition,
-    build
-SETTINGS
-    max_threads = 1,
-    max_bytes_before_external_group_by = 500000000,
-    max_bytes_before_external_sort = 500000000,
-    join_algorithm = 'grace_hash'
-"""
-
-
-def _challenge_query(split: str) -> str:
-    split_sql = sql_literal(split)
-    metric_aggs = ",\n    ".join(
-        f"toFloat32(avg(ps.{metric})) AS {metric}"
-        for metric in CHALLENGE_AVG_METRICS
-    )
-    return f"""
-WITH
-{_participant_context_cte(split_sql, include_challenges=True, include_stats=False)}
-SELECT
-    ps.championid_nn AS championid,
-    ps.teamposition_str AS teamposition,
-    ps.build AS build,
-    {metric_aggs}
 FROM participant_context AS ps
 GROUP BY
     championid,
@@ -549,12 +490,6 @@ def load_baseline(cfg: EmbeddingConfig) -> LevelRows:
             metrics,
             cache_path=_raw_cache_path(cfg, f"direct_per_minute_{idx:02d}"),
         )
-    rows = _merge_identity_metrics(
-        rows,
-        _challenge_query(cfg.split),
-        CHALLENGE_AVG_METRICS,
-        cache_path=_raw_cache_path(cfg, "challenges"),
-    )
     rows = _merge_identity_metrics(
         rows,
         _timeline_final_query(cfg.split),

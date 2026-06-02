@@ -186,12 +186,16 @@ def write_identity_profile_embeddings(
 
 
 def main() -> None:
+    # Local import avoids a module-load cycle (context imports _fixed_pca here).
+    from app.classification.embeddings.context import write_identity_context_embeddings
+
     setup_logging_config()
     logging.getLogger().setLevel(logging.INFO)
     cfg = EmbeddingConfig()
     smoothed_levels = apply_hierarchical_shrinkage(load_all(cfg), cfg)
     write_dense_identity_embeddings(smoothed_levels)
     write_identity_profile_embeddings(smoothed_levels)
+    write_identity_context_embeddings(smoothed_levels)
 
 
 if __name__ == "__main__":

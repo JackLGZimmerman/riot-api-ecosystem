@@ -11,12 +11,15 @@ import numpy as np
 import torch
 
 from app.classification.embeddings.runtime import (
+    IdentityContextLookup,
     IdentityProfileLookup,
     IdentitySemanticLookup,
     RelationshipDetailLookup,
 )
 from app.ml.cache_layout import (
     CACHE_META_FILE,
+    IDENTITY_CONTEXT_DIM,
+    IDENTITY_CONTEXT_RAW_DIM,
     IDENTITY_PROFILE_DIM,
     IDENTITY_SEMANTIC_DIM,
     N_SYNERGIES_2VX,
@@ -113,8 +116,8 @@ class WinRatePredictor:
         device: str,
         identity_lookup: IdentitySemanticLookup | None = None,
         profile_lookup: IdentityProfileLookup | None = None,
+        context_lookup: IdentityContextLookup | None = None,
         m1v1_detail_lookup: RelationshipDetailLookup | None = None,
-        s2vx_detail_lookup: RelationshipDetailLookup | None = None,
     ) -> None:
         self._model = model.to(device).eval()
         self._priors = priors
@@ -130,8 +133,8 @@ class WinRatePredictor:
         self._s2vx_ladder = s2vx_ladder
         self._identity_lookup = identity_lookup or IdentitySemanticLookup.load()
         self._profile_lookup = profile_lookup or IdentityProfileLookup.load()
+        self._context_lookup = context_lookup or IdentityContextLookup.load()
         self._m1v1_detail_lookup = m1v1_detail_lookup or RelationshipDetailLookup.load("m1v1")
-        self._s2vx_detail_lookup = s2vx_detail_lookup or RelationshipDetailLookup.load("s2vx")
         self._device = device
         # Identity-embedding mapping from the trained artifact's config.
         self._n_champions = model.config.n_champions
@@ -283,13 +286,17 @@ class WinRatePredictor:
             25,
             self._m1v1_detail_lookup.dim,
         )
-        s2vx_detail = np.concatenate(
-            [
-                self._s2vx_detail_lookup.lookup_2vx_team(blue_tuples),
-                self._s2vx_detail_lookup.lookup_2vx_team(red_tuples),
-            ],
-            axis=0,
-        ).reshape(1, N_SYNERGIES_2VX, self._s2vx_detail_lookup.dim)
+        identity_context = self._context_lookup.lookup_players(tuples).reshape(
+            1,
+            10,
+            self._context_lookup.dim,
+        )
+        identity_context_support = self._context_lookup.lookup_support(tuples).reshape(1, 10)
+        identity_context_raw = self._context_lookup.lookup_raw(tuples).reshape(
+            1,
+            10,
+            self._context_lookup.raw_dim,
+        )
         champion_id = np.array(
             [[c if 0 <= c < self._n_champions else self._n_champions for c, _, _ in tuples]],
             dtype=np.int64,
@@ -310,8 +317,10 @@ class WinRatePredictor:
             strength=self._prior_strength,
             identity_semantic=fit_last_dim(identity_semantic, IDENTITY_SEMANTIC_DIM),
             identity_profile=fit_last_dim(identity_profile, IDENTITY_PROFILE_DIM),
+            identity_context=fit_last_dim(identity_context, IDENTITY_CONTEXT_DIM),
+            identity_context_support=identity_context_support,
+            identity_context_raw=fit_last_dim(identity_context_raw, IDENTITY_CONTEXT_RAW_DIM),
             m1v1_detail=fit_last_dim(m1v1_detail, RELATIONSHIP_DETAIL_DIM),
-            s2vx_detail=fit_last_dim(s2vx_detail, RELATIONSHIP_DETAIL_DIM),
             device=self._device,
         )
         with torch.no_grad():

@@ -111,8 +111,9 @@ class TrainConfig:
     device: str = "auto"
     seed: int = 0
     max_grad_norm: float | None = 1.0
-    checkpoint_metric: str = "val_auc"
+    checkpoint_metric: str = "val_threshold_accuracy"
     # Minimum checkpoint-score improvement required to reset early stopping.
-    # For the default val_auc metric, 5e-4 means tiny validation wiggles no
-    # longer keep training alive when we are looking for material movement.
+    # For the default threshold-accuracy metric, 5e-4 means tiny validation
+    # wiggles no longer keep training alive when we are looking for material
+    # movement.
     checkpoint_min_delta: float = 5e-4
