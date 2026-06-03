@@ -4,7 +4,9 @@ from pathlib import Path
 
 import numpy as np
 
-CACHE_FORMAT = "npy-memmap-v27"
+# v28 stops materialising per-game identity-encoder sidecar latents; they are
+# gathered per batch from the small frozen artifact via champion_id/build_id.
+CACHE_FORMAT = "npy-memmap-v28"
 CACHE_META_FILE = "cache_meta.json"
 
 WIN_RATE_FILE = "win_rate.npy"

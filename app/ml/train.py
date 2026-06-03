@@ -26,6 +26,7 @@ from app.core.config.settings import PROJECT_ROOT
 from app.core.logging.logger import setup_logging_config
 from app.ml.config import DatasetConfig, TrainConfig
 from app.ml.dataset import SplitData, identity_meta, load_splits
+from app.ml.encoder_sidecar import EncoderSidecarLookup, SidecarGatherTables
 from app.ml.hgnn_model import (
     HGNNConfig,
     HGNNWinModel,
@@ -66,6 +67,79 @@ def resolve_device(device: str) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+class _SidecarGatherer:
+    """Per-batch gather of frozen identity latents from the dedup'd artifact.
+
+    Replaces the materialised per-game sidecar arrays: holds the small latent
+    tables on-device and gathers ``(batch, 10, dim)`` blocks from
+    ``champion_id`` / ``build_id`` so the cache no longer stores one latent copy
+    per game-slot. The static block is champion-keyed and zeroed for identities
+    whose ``(role, build)`` row is absent, matching the artifact lookup.
+    """
+
+    def __init__(self, tables: SidecarGatherTables, *, device: str) -> None:
+        self.dense_index = torch.as_tensor(tables.dense_index, dtype=torch.long, device=device)
+        self.static_by_champion = torch.as_tensor(
+            tables.static_by_champion, dtype=torch.float32, device=device
+        )
+        self.full_game = torch.as_tensor(tables.full_game, dtype=torch.float32, device=device)
+        self.temporal = torch.as_tensor(tables.temporal, dtype=torch.float32, device=device)
+        self.support = torch.as_tensor(tables.support, dtype=torch.float32, device=device)
+        self.slot_role = torch.as_tensor(tables.slot_role, dtype=torch.long, device=device)
+        self.n_champions = int(tables.n_champions)
+        self.n_builds = int(tables.n_builds)
+        self.pad_row = int(tables.pad_row)
+
+    def gather(self, champion_id: torch.Tensor, build_id: torch.Tensor) -> dict[str, torch.Tensor]:
+        champ = champion_id.clamp(0, self.n_champions)
+        build = build_id.clamp(0, self.n_builds)
+        role = self.slot_role.view(1, -1).expand_as(champ)
+        row = self.dense_index[champ, role, build]
+        present = (row != self.pad_row).unsqueeze(-1).to(torch.float32)
+        return {
+            "identity_static_sidecar": self.static_by_champion[champ] * present,
+            "identity_full_game_sidecar": self.full_game[row],
+            "identity_temporal_sidecar": self.temporal[row],
+            "identity_encoder_support": self.support[row],
+        }
+
+
+def _model_uses_sidecar(config: HGNNConfig) -> bool:
+    return bool(
+        config.use_identity_static_sidecar
+        or config.use_identity_full_game_sidecar
+        or config.use_identity_temporal_sidecar
+        or config.use_identity_semantic_context_head
+    )
+
+
+def _build_sidecar_gatherer(
+    dataset_cfg: DatasetConfig,
+    meta: dict[str, Any],
+    config: HGNNConfig,
+    *,
+    device: str,
+) -> _SidecarGatherer:
+    """Load the frozen sidecar artifact and precompute on-device gather tables."""
+    path = dataset_cfg.encoder_sidecar_path
+    if path is None:
+        sidecar_meta = meta.get("identity_encoder_sidecar")
+        recorded = sidecar_meta.get("path") if isinstance(sidecar_meta, dict) else None
+        if not recorded:
+            raise ValueError(
+                "Model uses identity-encoder sidecars but the cache has no per-game "
+                "sidecar arrays and no encoder_sidecar_path. Pass --encoder-sidecar-path "
+                "or rebuild the cache (v28) with the artifact recorded in its meta."
+            )
+        path = Path(recorded)
+    tables = EncoderSidecarLookup.load(path).gather_tables(
+        build_vocab=list(config.build_vocab),
+        n_champions=int(config.n_champions),
+        n_builds=int(config.n_builds),
+    )
+    return _SidecarGatherer(tables, device=device)
+
+
 def _project_relative(path: Path) -> str:
     try:
         return str(path.resolve().relative_to(PROJECT_ROOT))
@@ -103,34 +177,35 @@ def _drop_unused_model_arrays(split: SplitData, config: HGNNConfig) -> SplitData
     )
     context_enabled = bool(config.use_identity_semantic_context_head)
     if context_enabled:
-        missing = [
-            name
-            for name in (
-                "identity_static_sidecar",
-                "identity_full_game_sidecar",
-                "identity_temporal_sidecar",
-                "identity_encoder_support",
-            )
-            if getattr(split, name) is None
-        ]
-        if missing:
+        sidecar_names = (
+            "identity_static_sidecar",
+            "identity_full_game_sidecar",
+            "identity_temporal_sidecar",
+            "identity_encoder_support",
+        )
+        present = [name for name in sidecar_names if getattr(split, name) is not None]
+        # All absent => latents are gathered per batch from the frozen artifact
+        # (v28 cache). Partial presence means a corrupt or legacy cache: fail early.
+        if present and len(present) < len(sidecar_names):
+            missing = [name for name in sidecar_names if getattr(split, name) is None]
             raise ValueError(
                 "semantic context head requires cache arrays: "
                 + ", ".join(missing)
                 + ". Rebuild the dataset cache with encoder_sidecar_path set "
                 "to a valid three-latent sidecar artifact."
             )
-        for name in (
-            "identity_static_sidecar",
-            "identity_full_game_sidecar",
-            "identity_temporal_sidecar",
-        ):
-            value = getattr(split, name)
-            if value.ndim != 3 or value.shape[1] != 10 or value.shape[2] <= 0:
-                raise ValueError(f"semantic context head requires non-empty {name} [games, 10, dim]")
-        support = split.identity_encoder_support
-        if support.ndim != 2 or support.shape[1] != 10:
-            raise ValueError("semantic context head requires identity_encoder_support [games, 10]")
+        if len(present) == len(sidecar_names):
+            for name in (
+                "identity_static_sidecar",
+                "identity_full_game_sidecar",
+                "identity_temporal_sidecar",
+            ):
+                value = getattr(split, name)
+                if value.ndim != 3 or value.shape[1] != 10 or value.shape[2] <= 0:
+                    raise ValueError(f"semantic context head requires non-empty {name} [games, 10, dim]")
+            support = split.identity_encoder_support
+            if support.ndim != 2 or support.shape[1] != 10:
+                raise ValueError("semantic context head requires identity_encoder_support [games, 10]")
     drop: dict[str, bool] = {
         "matchup_1v1": not config.use_relationship_integrations,
         "synergy_2vx": not config.use_relationship_integrations,
@@ -618,6 +693,7 @@ def _hgnn_inputs_from_raw(
     *,
     strength: float,
     device: str,
+    gatherer: _SidecarGatherer | None = None,
 ) -> dict[str, torch.Tensor]:
     if raw.champion_id is None or raw.build_id is None:
         raise ValueError("HGNN inputs require champion_id/build_id; rebuild the cache (v17).")
@@ -627,6 +703,18 @@ def _hgnn_inputs_from_raw(
         and raw.m1v1_cnt is not None
         and raw.s2vx_cnt is not None
     )
+    # v28 caches omit per-game sidecar arrays; gather them from the frozen table
+    # using the batch's identity ids. Legacy caches that still carry per-game
+    # arrays are used directly.
+    if gatherer is not None and raw.identity_static_sidecar is None:
+        sidecar = gatherer.gather(raw.champion_id, raw.build_id)
+    else:
+        sidecar = {
+            "identity_static_sidecar": raw.identity_static_sidecar,
+            "identity_full_game_sidecar": raw.identity_full_game_sidecar,
+            "identity_temporal_sidecar": raw.identity_temporal_sidecar,
+            "identity_encoder_support": raw.identity_encoder_support,
+        }
     return build_hgnn_inputs(
         champion_id=raw.champion_id,
         build_id=raw.build_id,
@@ -637,12 +725,9 @@ def _hgnn_inputs_from_raw(
         synergy_2vx=raw.synergy_2vx,
         m1v1_cnt=raw.m1v1_cnt,
         s2vx_cnt=raw.s2vx_cnt,
-        identity_static_sidecar=raw.identity_static_sidecar,
-        identity_full_game_sidecar=raw.identity_full_game_sidecar,
-        identity_temporal_sidecar=raw.identity_temporal_sidecar,
-        identity_encoder_support=raw.identity_encoder_support,
         include_relationship_features=include_relationship_features,
         device=device,
+        **sidecar,
     )
 
 
@@ -653,6 +738,7 @@ def _predict_hgnn_logits(
     batch_size: int,
     strength: float,
     device: str,
+    gatherer: _SidecarGatherer | None = None,
 ) -> np.ndarray:
     return _predict_hgnn_outputs(
         model,
@@ -660,6 +746,7 @@ def _predict_hgnn_logits(
         batch_size=batch_size,
         strength=strength,
         device=device,
+        gatherer=gatherer,
     )["final_logit"]
 
 
@@ -670,6 +757,7 @@ def _predict_hgnn_outputs(
     batch_size: int,
     strength: float,
     device: str,
+    gatherer: _SidecarGatherer | None = None,
 ) -> dict[str, np.ndarray]:
     model.eval()
     out: dict[str, list[np.ndarray]] = {
@@ -681,7 +769,9 @@ def _predict_hgnn_outputs(
         n_rows = split.blue_win.numel()
         for start in range(0, n_rows, batch_size):
             raw_batch = _raw_batch(split, slice(start, start + batch_size))
-            inputs = _hgnn_inputs_from_raw(raw_batch, strength=strength, device=device)
+            inputs = _hgnn_inputs_from_raw(
+                raw_batch, strength=strength, device=device, gatherer=gatherer
+            )
             outputs = model(**inputs)
             for key in out:
                 value = outputs[key]
@@ -720,6 +810,7 @@ def _predict_hgnn(
     batch_size: int,
     strength: float,
     device: str,
+    gatherer: _SidecarGatherer | None = None,
 ) -> np.ndarray:
     return _sigmoid_np(
         _predict_hgnn_logits(
@@ -728,6 +819,7 @@ def _predict_hgnn(
             batch_size=batch_size,
             strength=strength,
             device=device,
+            gatherer=gatherer,
         )
     )
 
@@ -752,9 +844,18 @@ def train(
     meta = identity_meta(dataset_cfg)
     model_config = _hgnn_config_from_meta(meta, overrides=model_overrides)
 
-    splits = {
-        name: _drop_unused_model_arrays(_limit_split(split, dataset_cfg.max_games), model_config)
+    loaded_splits = {
+        name: _limit_split(split, dataset_cfg.max_games)
         for name, split in load_splits(dataset_cfg, require_counts=True).items()
+    }
+    # v28 caches omit per-game sidecar arrays; build the on-device gather table
+    # from the frozen artifact when the model consumes identity latents.
+    gatherer = None
+    if _model_uses_sidecar(model_config) and loaded_splits["train"].identity_static_sidecar is None:
+        gatherer = _build_sidecar_gatherer(dataset_cfg, meta, model_config, device=device)
+    splits = {
+        name: _drop_unused_model_arrays(split, model_config)
+        for name, split in loaded_splits.items()
     }
     _validate_split_targets(splits)
     if splits["train"].blue_win.size == 0:
@@ -809,7 +910,9 @@ def train(
                 tensor_splits["train"],
                 torch.as_tensor(batch_idx, dtype=torch.long, device=device),
             )
-            inputs = _hgnn_inputs_from_raw(raw_batch, strength=strength, device=device)
+            inputs = _hgnn_inputs_from_raw(
+                raw_batch, strength=strength, device=device, gatherer=gatherer
+            )
             labels = raw_batch.blue_win
             # Team-swap augmentation (design §8/§9): train on the match and its
             # mirror with the flipped label, enforcing approximate antisymmetry.
@@ -847,6 +950,7 @@ def train(
             batch_size=train_cfg.batch_size,
             strength=strength,
             device=device,
+            gatherer=gatherer,
         )
         val_predictions = _sigmoid_np(val_logits)
         train_nll = train_loss_sum / max(train_seen, 1)
@@ -912,6 +1016,7 @@ def train(
             batch_size=train_cfg.batch_size,
             strength=strength,
             device=device,
+            gatherer=gatherer,
         )
         for split_name, tensor_split in tensor_splits.items()
     }

@@ -56,7 +56,15 @@ Three standalone identity autoencoders produce latents that can be injected as
 node-level sidecars in `HGNNWinModel`. The sidecar artifact is one row per
 `(champion, role, build)` identity; the static block is champion-level and is
 joined/repeated onto those rows, while full-game and temporal latents are native
-to the full identity grain:
+to the full identity grain.
+
+The latents are **not** materialised per game-slot. The cache (`v28`) records the
+artifact path/dims only; `app/ml/train.py` builds an on-device gather table
+(`EncoderSidecarLookup.gather_tables`) and gathers `(batch, 10, dim)` blocks per
+batch from `champion_id`/`build_id` — the static block is keyed by champion. This
+collapses the sidecar cache from tens of GB to the few-MB frozen artifact. The
+draft-time predictor already gathered the same way. Legacy caches that still hold
+per-game sidecar arrays continue to load and are used directly.
 
 | Sidecar | Encoder module | Config flag (default `False`) |
 | --- | --- | --- |
@@ -72,10 +80,19 @@ default; the ablation surface lives in
 `HGNNConfig.use_identity_semantic_context_head=True` enables a separate
 zero-initialised context logit over the frozen static, full-game, and temporal
 blocks. For each slot it projects the concatenated latents, builds support-
-weighted summaries of the other four allies and five enemies, scores the shared
-`own / ally / enemy` interaction, and adds `context_logit` to `base_logit`.
-The model returns all three columns: `base_logit`, `context_logit`, and
-`final_logit`.
+weighted **mean** summaries of the other four allies and five enemies plus
+**extremity (max)** summaries, scores the shared `own / ally / enemy`
+interaction, and adds `context_logit` to `base_logit`. The max summaries preserve
+convex composition signal ("3 burst threats") that mean pooling averages away. A
+learned scalar `context_scale` (init 1.0, a no-op at init because the score head
+is zero-initialised) lets the optimiser grow the context correction, countering
+the systematic effect-shrinkage seen in the audit. The model returns all three
+columns: `base_logit`, `context_logit`, and `final_logit`.
+
+Two report-only tuning knobs target the same audit gap without per-grouping
+fitting: `--auc-ranking-loss-weight` (ranking loss that weights rare extreme
+contexts equally with the common middle) and `--semantic-context-support-strength`
+(lower to amplify context magnitude). Both default off/30.
 
 ### Semantic Context Plan
 
@@ -112,8 +129,8 @@ flowchart TD
 | File | Purpose |
 | --- | --- |
 | [../hgnn_model.py](../hgnn_model.py) | HGNN model, input builder, swap invariants, and relationship gate. |
-| [../encoder_sidecar.py](../encoder_sidecar.py) | Identity-encoder latent loading and sidecar tensor assembly. |
-| [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and optional relationship arrays. |
+| [../encoder_sidecar.py](../encoder_sidecar.py) | Identity-encoder latent loading, per-game lookup, and dedup gather tables. |
+| [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and optional relationship arrays (records the sidecar artifact; does not materialise it). |
 | [../dataset.py](../dataset.py) | Cache loader and split dataclass. |
 | [../train.py](../train.py) | Production training and validation/report-only calibration diagnostics. |
 | [../predictor.py](../predictor.py) | Draft-time runtime bridge. |

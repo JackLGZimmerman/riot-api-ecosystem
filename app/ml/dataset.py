@@ -25,6 +25,7 @@ LEGACY_CACHE_FORMATS = frozenset(
         "npy-memmap-v24",
         "npy-memmap-v25",
         "npy-memmap-v26",
+        "npy-memmap-v27",
     }
 )
 COUNT_ARRAY_NAMES = ("p1_cnt", "m1v1_cnt", "s2vx_cnt")

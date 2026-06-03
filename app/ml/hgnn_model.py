@@ -401,6 +401,12 @@ class AttnPool(nn.Module):
         return (x * weights).sum(dim=1)
 
 
+# own / ally / enemy semantic feature blocks scored per slot. The first seven
+# are means/interactions; the last three add order-statistics (max) so convex
+# composition signal ("3 burst threats") is not averaged away by mean pooling.
+N_SEMANTIC_FEATURE_BLOCKS = 10
+
+
 class IdentitySemanticContextHead(nn.Module):
     """Slot-level own/ally/enemy latent interaction over the three encoder blocks."""
 
@@ -435,7 +441,7 @@ class IdentitySemanticContextHead(nn.Module):
             nn.LayerNorm(context_dim),
         )
         self.score = _mlp(
-            context_dim * 7,
+            context_dim * N_SEMANTIC_FEATURE_BLOCKS,
             tuple(int(dim) for dim in config.semantic_context_hidden),
             1,
             dropout=float(config.semantic_context_dropout),
@@ -444,6 +450,11 @@ class IdentitySemanticContextHead(nn.Module):
         if isinstance(last, nn.Linear):
             nn.init.zeros_(last.weight)
             nn.init.zeros_(last.bias)
+        # Learned amplitude on the (zero-initialised) context residual. Starts at
+        # 1.0 and stays a no-op at init because the score head is zero-init; it
+        # lets the optimiser grow the context correction without fighting the
+        # score head's weight decay, countering the systematic effect-shrinkage.
+        self.context_scale = nn.Parameter(torch.ones(()))
 
     def _confidence(self, support: torch.Tensor) -> torch.Tensor:
         strength = max(self.support_strength, 0.0)
@@ -456,20 +467,39 @@ class IdentitySemanticContextHead(nn.Module):
         denom = weights.sum(dim=1, keepdim=True).clamp_min(1.0e-12)
         return weighted.sum(dim=1) / denom
 
+    @staticmethod
+    def _leave_one_out_max(own: torch.Tensor) -> torch.Tensor:
+        """Per-slot max over the other four own-team slots (extremity, LOO).
+
+        Uses top-2 over the team so the focus slot is excluded without a Python
+        loop: if a slot is its own argmax, it falls back to the runner-up.
+        """
+        top2 = own.topk(2, dim=1)
+        max1 = top2.values[:, 0]
+        max2 = top2.values[:, 1]
+        argmax0 = top2.indices[:, 0]
+        slot_ids = torch.arange(own.shape[1], device=own.device).view(1, -1, 1)
+        focus_is_argmax = argmax0.unsqueeze(1) == slot_ids
+        return torch.where(focus_is_argmax, max2.unsqueeze(1), max1.unsqueeze(1))
+
     def _side_contexts(
         self,
         own: torch.Tensor,
         enemy: torch.Tensor,
         own_conf: torch.Tensor,
         enemy_conf: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         own_sum = (own * own_conf.unsqueeze(-1)).sum(dim=1, keepdim=True)
         own_den = own_conf.sum(dim=1, keepdim=True).clamp_min(1.0e-12)
         ally_num = own_sum - own * own_conf.unsqueeze(-1)
         ally_den = (own_den - own_conf).clamp_min(1.0e-12).unsqueeze(-1)
         ally_context = ally_num / ally_den
         enemy_context = self._weighted_mean(enemy, enemy_conf).unsqueeze(1).expand_as(own)
-        return ally_context, enemy_context
+        # Extremity (max) summaries preserve the convex composition signal that
+        # the support-weighted mean averages away (e.g. "3 burst threats").
+        ally_max = self._leave_one_out_max(own)
+        enemy_max = enemy.max(dim=1).values.unsqueeze(1).expand_as(own)
+        return ally_context, enemy_context, ally_max, enemy_max
 
     def forward(
         self,
@@ -496,11 +526,17 @@ class IdentitySemanticContextHead(nn.Module):
 
         blue, red = semantic[:, :5], semantic[:, 5:]
         blue_conf, red_conf = confidence[:, :5], confidence[:, 5:]
-        blue_ally, blue_enemy = self._side_contexts(blue, red, blue_conf, red_conf)
-        red_ally, red_enemy = self._side_contexts(red, blue, red_conf, blue_conf)
+        blue_ally, blue_enemy, blue_ally_max, blue_enemy_max = self._side_contexts(
+            blue, red, blue_conf, red_conf
+        )
+        red_ally, red_enemy, red_ally_max, red_enemy_max = self._side_contexts(
+            red, blue, red_conf, blue_conf
+        )
         own = torch.cat([blue, red], dim=1)
         ally = torch.cat([blue_ally, red_ally], dim=1)
         enemy = torch.cat([blue_enemy, red_enemy], dim=1)
+        ally_max = torch.cat([blue_ally_max, red_ally_max], dim=1)
+        enemy_max = torch.cat([blue_enemy_max, red_enemy_max], dim=1)
         features = torch.cat(
             [
                 own,
@@ -510,11 +546,15 @@ class IdentitySemanticContextHead(nn.Module):
                 own * enemy,
                 ally * enemy,
                 enemy - ally,
+                ally_max,
+                enemy_max,
+                own * enemy_max,
             ],
             dim=-1,
         )
         slot_scores = self.score(features).squeeze(-1) * confidence
-        return slot_scores[:, :5].mean(dim=1) - slot_scores[:, 5:].mean(dim=1)
+        context = slot_scores[:, :5].mean(dim=1) - slot_scores[:, 5:].mean(dim=1)
+        return self.context_scale * context
 
 
 class HGNNWinModel(nn.Module):

@@ -21,7 +21,6 @@ from app.ml.cache_layout import (
 from app.ml.config import (
     DatasetConfig,
     MATCHUP_1V1_LEVEL_TABLES,
-    POSITIONS,
     SYNERGY_2VX_LEVEL_TABLES,
 )
 from app.ml.encoder_sidecar import EncoderSidecarLookup
@@ -191,12 +190,7 @@ def _split_counts(cfg: DatasetConfig) -> dict[str, int]:
     }
 
 
-def _open_arrays(
-    n_games: int,
-    cache_dir: Path,
-    *,
-    sidecar_lookup: EncoderSidecarLookup | None = None,
-) -> dict[str, np.ndarray]:
+def _open_arrays(n_games: int, cache_dir: Path) -> dict[str, np.ndarray]:
     paths = array_paths(cache_dir)
     arrays: dict[str, np.ndarray] = {}
     for name, path in paths.items():
@@ -204,27 +198,17 @@ def _open_arrays(
         arrays[name] = np.lib.format.open_memmap(
             path, mode="w+", dtype=DISK_DTYPES[name], shape=shape
         )
-    if sidecar_lookup is not None:
-        sidecar_paths = sidecar_array_paths(cache_dir)
-        dims = sidecar_lookup.dims
-        for name, dim in (
-            ("identity_static_sidecar", dims.static),
-            ("identity_full_game_sidecar", dims.full_game),
-            ("identity_temporal_sidecar", dims.temporal),
-        ):
-            arrays[name] = np.lib.format.open_memmap(
-                sidecar_paths[name],
-                mode="w+",
-                dtype=np.float32,
-                shape=(n_games, 10, int(dim)),
-            )
-        arrays["identity_encoder_support"] = np.lib.format.open_memmap(
-            sidecar_paths["identity_encoder_support"],
-            mode="w+",
-            dtype=np.float32,
-            shape=(n_games, 10),
-        )
     return arrays
+
+
+def _remove_stale_sidecar_arrays(cache_dir: Path) -> None:
+    """Drop any per-game sidecar arrays left by an older (<=v27) cache build.
+
+    v28 gathers latents per batch from the frozen artifact, so stale per-game
+    arrays must not linger or the loader would silently prefer them.
+    """
+    for path in sidecar_array_paths(cache_dir).values():
+        path.unlink(missing_ok=True)
 
 
 # Outer-SELECT columns of _CHUNK_QUERY_TEMPLATE, by position (matchid trails them).
@@ -372,45 +356,6 @@ def _smoothed_features(
     }
 
 
-def _sidecar_features(
-    raw: dict[str, np.ndarray],
-    *,
-    sidecar_lookup: EncoderSidecarLookup,
-    build_vocab: list[str],
-) -> dict[str, np.ndarray]:
-    champion_id = raw["champion_id"].astype(np.int64, copy=False)
-    build_id = raw["build_id"].astype(np.int64, copy=False)
-    if champion_id.ndim != 2 or champion_id.shape[1] != 10:
-        raise ValueError("champion_id must have shape [games, 10] for sidecar lookup")
-    roles = tuple(POSITIONS) + tuple(POSITIONS)
-    flat: list[tuple[int, str, str]] = []
-    for champ_row, build_row in zip(champion_id, build_id, strict=True):
-        for slot, (champion, build_idx) in enumerate(zip(champ_row, build_row, strict=True)):
-            build_label = (
-                build_vocab[int(build_idx)]
-                if 0 <= int(build_idx) < len(build_vocab)
-                else ""
-            )
-            flat.append((int(champion), roles[slot], build_label))
-    blocks, support = sidecar_lookup.lookup_blocks(flat)
-    n_rows = int(champion_id.shape[0])
-    dims = sidecar_lookup.dims
-    return {
-        "identity_static_sidecar": blocks["static"].reshape(n_rows, 10, dims.static),
-        "identity_full_game_sidecar": blocks["full_game"].reshape(
-            n_rows,
-            10,
-            dims.full_game,
-        ),
-        "identity_temporal_sidecar": blocks["temporal"].reshape(
-            n_rows,
-            10,
-            dims.temporal,
-        ),
-        "identity_encoder_support": support.reshape(n_rows, 10),
-    }
-
-
 def _fetch_chunk_rows(query: str, attempts: int = 4) -> list:
     """Run a chunk query, retrying on the intermittent ClickHouse StreamFailureError.
     A stream failure can leave the thread-local connection unusable, so drop it and
@@ -510,8 +455,6 @@ def _write_split(
     build_vocab_sql: str,
     n_builds: int,
     key_build_expr: str,
-    sidecar_lookup: EncoderSidecarLookup | None,
-    build_vocab: list[str],
 ) -> int:
     written = 0
     for raw in _stream_split(
@@ -543,14 +486,6 @@ def _write_split(
             nested_pooling=nested_pooling,
             level_strengths=level_strengths,
         )
-        if sidecar_lookup is not None:
-            block.update(
-                _sidecar_features(
-                    raw,
-                    sidecar_lookup=sidecar_lookup,
-                    build_vocab=build_vocab,
-                )
-            )
         start = offset + written
         for name, data in block.items():
             arrays[name][start : start + len(data)] = data
@@ -631,12 +566,16 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     counts = _split_counts(cfg)
     n_games = sum(counts.values())
     n_champions, build_vocab = _identity_meta(cfg)
+    # The frozen sidecar artifact is loaded only to validate it and record its
+    # path/dims in the cache meta; v28 gathers latents per batch from it instead
+    # of materialising one copy per game-slot (≈3000x smaller on disk).
     sidecar_lookup = (
         EncoderSidecarLookup.load(cfg.encoder_sidecar_path)
         if cfg.encoder_sidecar_path is not None
         else None
     )
-    arrays = _open_arrays(n_games, cfg.cache_dir, sidecar_lookup=sidecar_lookup)
+    _remove_stale_sidecar_arrays(cfg.cache_dir)
+    arrays = _open_arrays(n_games, cfg.cache_dir)
     n_builds = len(build_vocab)
     build_vocab_sql = "[" + ",".join(f"'{b}'" for b in build_vocab) + "]"
     key_build_expr = (
@@ -685,8 +624,6 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             build_vocab_sql=build_vocab_sql,
             n_builds=n_builds,
             key_build_expr=key_build_expr,
-            sidecar_lookup=sidecar_lookup,
-            build_vocab=build_vocab,
         )
         if written != counts[meta_split]:
             raise RuntimeError(

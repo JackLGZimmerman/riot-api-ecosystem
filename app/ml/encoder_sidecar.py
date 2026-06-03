@@ -16,6 +16,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from app.core.utils.common import POSITIONS
+
 N_PLAYERS = 10
 SIDE_CAR_BLOCKS = ("static", "full_game", "temporal")
 LATENT_KEYS = {
@@ -79,6 +81,30 @@ class EncoderSidecarDims:
             "temporal": int(self.temporal),
             "total": int(self.total),
         }
+
+
+@dataclass(frozen=True)
+class SidecarGatherTables:
+    """Dense lookup tables for per-batch sidecar gathering (no per-game cache).
+
+    ``dense_index[champion, role, build_id]`` resolves to the identity-row index
+    used for the full-game / temporal / support tables; absent identities map to
+    ``pad_row`` (a trailing zero row). The static block is champion-level, so it
+    is keyed by champion only — ``static_by_champion[champion]`` — and zeroed at
+    gather time for identities whose ``(role, build)`` row is absent, matching the
+    zero-on-miss contract of ``EncoderSidecarLookup.lookup_blocks``.
+    """
+
+    dense_index: np.ndarray  # int32 [n_champions+1, n_roles, n_builds+1]
+    static_by_champion: np.ndarray  # float32 [n_champions+1, static_dim]
+    full_game: np.ndarray  # float32 [n_rows+1, full_game_dim]
+    temporal: np.ndarray  # float32 [n_rows+1, temporal_dim]
+    support: np.ndarray  # float32 [n_rows+1]
+    slot_role: np.ndarray  # int64 [N_PLAYERS]
+    dims: EncoderSidecarDims
+    n_champions: int
+    n_builds: int
+    pad_row: int
 
 
 class EncoderSidecarLookup:
@@ -181,6 +207,59 @@ class EncoderSidecarLookup:
         return (
             {name: values.reshape(1, N_PLAYERS, values.shape[1]) for name, values in blocks.items()},
             support.reshape(1, N_PLAYERS),
+        )
+
+    def gather_tables(
+        self,
+        *,
+        build_vocab: list[str],
+        n_champions: int,
+        n_builds: int,
+    ) -> SidecarGatherTables:
+        """Build dense gather tables keyed by the cache's integer slot ids.
+
+        The cache stores ``champion_id`` (raw id) and ``build_id`` (index into
+        ``build_vocab``) per slot; role is the slot position in ``POSITIONS``.
+        This precomputes the dense identity-row index plus the champion-keyed
+        static table once so training can gather latents per batch instead of
+        materialising one copy per game-slot.
+        """
+        n_rows = int(self.champion_id.shape[0])
+        pad_row = n_rows
+        roles = list(POSITIONS)
+        n_roles = len(roles)
+        role_to_idx = {role: idx for idx, role in enumerate(roles)}
+        build_to_idx = {str(label): idx for idx, label in enumerate(build_vocab)}
+
+        dense_index = np.full((n_champions + 1, n_roles, n_builds + 1), pad_row, dtype=np.int32)
+        static_by_champion = np.zeros((n_champions + 1, self.dims.static), dtype=np.float32)
+        champion_seen = np.zeros(n_champions + 1, dtype=bool)
+        for row in range(n_rows):
+            champion = int(self.champion_id[row])
+            if not 0 <= champion < n_champions:
+                continue
+            role = role_to_idx.get(str(self.teamposition[row]))
+            if role is None:
+                continue
+            build_idx = build_to_idx.get(str(self.build[row]), n_builds)
+            dense_index[champion, role, build_idx] = row
+            if not champion_seen[champion]:
+                static_by_champion[champion] = self.static_latents[row]
+                champion_seen[champion] = True
+
+        zero_full = np.zeros((1, self.dims.full_game), dtype=np.float32)
+        zero_temporal = np.zeros((1, self.dims.temporal), dtype=np.float32)
+        return SidecarGatherTables(
+            dense_index=dense_index,
+            static_by_champion=static_by_champion,
+            full_game=np.vstack([self.full_game_latents, zero_full]),
+            temporal=np.vstack([self.temporal_latents, zero_temporal]),
+            support=np.concatenate([self.support, np.zeros(1, dtype=np.float32)]),
+            slot_role=np.tile(np.arange(n_roles, dtype=np.int64), 2)[:N_PLAYERS],
+            dims=self.dims,
+            n_champions=int(n_champions),
+            n_builds=int(n_builds),
+            pad_row=int(pad_row),
         )
 
 
@@ -344,6 +423,7 @@ def _as_latents(name: str, values: np.ndarray, n_rows: int) -> np.ndarray:
 __all__ = [
     "EncoderSidecarDims",
     "EncoderSidecarLookup",
+    "SidecarGatherTables",
     "LATENT_KEYS",
     "REQUIRED_SIDECAR_ARRAYS",
     "SIDE_CAR_BLOCKS",

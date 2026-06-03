@@ -16,8 +16,9 @@ import torch
 
 from app.classification.embeddings.static_champion import load_static_by_id
 from app.ml.config import DatasetConfig
-from app.ml.dataset import SplitData, load_splits
+from app.ml.dataset import SplitData, identity_meta, load_splits
 from app.ml.hgnn_model import HGNNWinModel, build_hgnn_inputs, load_hgnn_model, resolve_device
+from app.ml.train import _SidecarGatherer, _build_sidecar_gatherer, _model_uses_sidecar
 
 DEFAULT_CONTEXT_CACHE_DIR = Path("app/ml/data/cache")
 DEFAULT_MODEL_CACHE_DIR = Path("app/ml/data/experiments/semantic_context_compact_cache")
@@ -389,11 +390,27 @@ def predict_blue_probabilities(
     device: str,
 ) -> np.ndarray:
     device = resolve_device(device)
-    model, _config, strength = load_hgnn_model(model_path, device=device)
+    model, config, strength = load_hgnn_model(model_path, device=device)
     model.eval()
-    splits = load_splits(DatasetConfig(cache_dir=cache_dir), require_counts=True)
+    dataset_cfg = DatasetConfig(cache_dir=cache_dir)
+    splits = load_splits(dataset_cfg, require_counts=True)
+    gatherer = None
+    if _model_uses_sidecar(config) and splits["train"].identity_static_sidecar is None:
+        gatherer = _build_sidecar_gatherer(
+            dataset_cfg,
+            identity_meta(dataset_cfg),
+            config,
+            device=device,
+        )
     outputs = [
-        _predict_split(model, split, batch_size=batch_size, strength=strength, device=device)
+        _predict_split(
+            model,
+            split,
+            batch_size=batch_size,
+            strength=strength,
+            device=device,
+            gatherer=gatherer,
+        )
         for split in (splits["train"], splits["val"], splits["test"])
     ]
     return np.concatenate(outputs).astype(np.float64)
@@ -406,15 +423,44 @@ def _predict_split(
     batch_size: int,
     strength: float,
     device: str,
+    gatherer: _SidecarGatherer | None = None,
 ) -> np.ndarray:
     out: list[np.ndarray] = []
     with torch.no_grad():
         n_rows = int(split.blue_win.size)
         for start in range(0, n_rows, batch_size):
             rows = slice(start, min(start + batch_size, n_rows))
+            champion_id = split.champion_id[rows]
+            build_id = split.build_id[rows]
+            gathered_sidecar = (
+                None
+                if gatherer is None or split.identity_static_sidecar is not None
+                else gatherer.gather(
+                    torch.as_tensor(np.array(champion_id, copy=True), dtype=torch.long, device=device),
+                    torch.as_tensor(np.array(build_id, copy=True), dtype=torch.long, device=device),
+                )
+            )
+            if gathered_sidecar is None:
+                identity_static_sidecar = (
+                    None if split.identity_static_sidecar is None else split.identity_static_sidecar[rows]
+                )
+                identity_full_game_sidecar = (
+                    None if split.identity_full_game_sidecar is None else split.identity_full_game_sidecar[rows]
+                )
+                identity_temporal_sidecar = (
+                    None if split.identity_temporal_sidecar is None else split.identity_temporal_sidecar[rows]
+                )
+                identity_encoder_support = (
+                    None if split.identity_encoder_support is None else split.identity_encoder_support[rows]
+                )
+            else:
+                identity_static_sidecar = gathered_sidecar["identity_static_sidecar"]
+                identity_full_game_sidecar = gathered_sidecar["identity_full_game_sidecar"]
+                identity_temporal_sidecar = gathered_sidecar["identity_temporal_sidecar"]
+                identity_encoder_support = gathered_sidecar["identity_encoder_support"]
             inputs = build_hgnn_inputs(
-                champion_id=split.champion_id[rows],
-                build_id=split.build_id[rows],
+                champion_id=champion_id,
+                build_id=build_id,
                 win_rate=split.win_rate[rows],
                 p1_cnt=split.p1_cnt[rows],
                 strength=strength,
@@ -422,18 +468,10 @@ def _predict_split(
                 synergy_2vx=split.synergy_2vx[rows],
                 m1v1_cnt=split.m1v1_cnt[rows],
                 s2vx_cnt=split.s2vx_cnt[rows],
-                identity_static_sidecar=(
-                    None if split.identity_static_sidecar is None else split.identity_static_sidecar[rows]
-                ),
-                identity_full_game_sidecar=(
-                    None if split.identity_full_game_sidecar is None else split.identity_full_game_sidecar[rows]
-                ),
-                identity_temporal_sidecar=(
-                    None if split.identity_temporal_sidecar is None else split.identity_temporal_sidecar[rows]
-                ),
-                identity_encoder_support=(
-                    None if split.identity_encoder_support is None else split.identity_encoder_support[rows]
-                ),
+                identity_static_sidecar=identity_static_sidecar,
+                identity_full_game_sidecar=identity_full_game_sidecar,
+                identity_temporal_sidecar=identity_temporal_sidecar,
+                identity_encoder_support=identity_encoder_support,
                 include_relationship_features=bool(model.config.use_relationship_integrations),
                 device=device,
             )

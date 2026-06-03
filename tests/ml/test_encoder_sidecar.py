@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 
+from app.core.utils.common import POSITIONS
 from app.ml.encoder_sidecar import (
     EncoderSidecarLookup,
     build_encoder_sidecar_metadata,
@@ -16,6 +17,7 @@ from app.ml.experiments.context_ablation import (
     sidecar_variant_overrides,
 )
 from app.ml.hgnn_model import HGNNConfig, HGNNWinModel, build_hgnn_inputs, swap_hgnn_inputs
+from app.ml.train import _SidecarGatherer
 
 
 def _save_tiny_sidecar(path):
@@ -281,6 +283,67 @@ def test_hgnn_semantic_context_team_swap_flips_context_sign() -> None:
 
     assert torch.isfinite(direct["context_logit"]).all()
     assert torch.allclose(direct["context_logit"], -mirrored["context_logit"], atol=1.0e-5)
+
+
+def test_sidecar_gather_matches_artifact_lookup(tmp_path) -> None:
+    """The per-batch gather must reproduce the artifact's per-game lookup."""
+    lookup = EncoderSidecarLookup.load(_save_tiny_sidecar(tmp_path / "sidecar.npz"))
+    build_vocab = ["a", "b"]
+    n_champions, n_builds = 5, 2
+    gatherer = _SidecarGatherer(
+        lookup.gather_tables(
+            build_vocab=build_vocab, n_champions=n_champions, n_builds=n_builds
+        ),
+        device="cpu",
+    )
+
+    # slot 0: (champ 1, TOP, "a") and slot 1: (champ 2, JUNGLE, "b") are present;
+    # the rest miss (wrong role/build or champ 0) and must come back zeroed.
+    champ = np.zeros((1, 10), dtype=np.int64)
+    build = np.zeros((1, 10), dtype=np.int64)
+    champ[0, 0], build[0, 0] = 1, 0
+    champ[0, 1], build[0, 1] = 2, 1
+    champ[0, 2], build[0, 2] = 1, 0  # champ 1 at MIDDLE -> miss
+    champ[0, 3], build[0, 3] = 2, 2  # unknown build -> miss
+
+    tuples = [
+        (
+            int(champ[0, slot]),
+            POSITIONS[slot % 5],
+            build_vocab[int(build[0, slot])] if int(build[0, slot]) < n_builds else "",
+        )
+        for slot in range(10)
+    ]
+    ref_blocks, ref_support = lookup.lookup_game_blocks(tuples)
+
+    gathered = gatherer.gather(torch.as_tensor(champ), torch.as_tensor(build))
+    name_map = {
+        "identity_static_sidecar": "static",
+        "identity_full_game_sidecar": "full_game",
+        "identity_temporal_sidecar": "temporal",
+    }
+    for tensor_name, block_name in name_map.items():
+        assert np.allclose(gathered[tensor_name].numpy()[0], ref_blocks[block_name][0])
+    assert np.allclose(gathered["identity_encoder_support"].numpy()[0], ref_support[0])
+    # Spot-check the present/missing contract explicitly.
+    assert np.allclose(gathered["identity_static_sidecar"].numpy()[0, 0], [1.0, 2.0])
+    assert gathered["identity_encoder_support"].numpy()[0, 0] == 50.0
+    assert np.allclose(gathered["identity_static_sidecar"].numpy()[0, 2], 0.0)
+    assert gathered["identity_encoder_support"].numpy()[0, 2] == 0.0
+
+
+def test_semantic_context_scale_amplifies_context_logit() -> None:
+    inputs = _semantic_hgnn_inputs(batch_size=3, seed=5)
+    model = HGNNWinModel(_semantic_context_config(semantic_context_hidden=())).eval()
+    _make_context_score_nonzero(model)
+
+    with torch.no_grad():
+        base = model(**inputs)["context_logit"]
+        model.identity_semantic_context.context_scale.mul_(2.0)
+        scaled = model(**inputs)["context_logit"]
+
+    assert float(base.abs().sum()) > 0.0
+    assert torch.allclose(scaled, 2.0 * base, atol=1.0e-5)
 
 
 def test_context_ablation_registry_exposes_three_encoder_variants() -> None:
