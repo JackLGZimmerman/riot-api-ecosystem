@@ -10,13 +10,22 @@ from app.classification.embeddings import load
 
 
 def test_feature_name_layout() -> None:
-    assert len(C.TEAM_SHARE_FEATURE_NAMES) == 21
-    assert len(C.CONCENTRATION_FEATURE_NAMES) == 4  # HHI of the 4 share metrics
-    assert len(C.TEAM_FEATURE_NAMES) == 25
-    assert len(C.MATCHUP_FEATURE_NAMES) == 30  # 11 raw + 4 share, each diff+adv
-    assert len(C.CONTEXT_FEATURE_NAMES) == 55
-    assert len(set(C.CONTEXT_FEATURE_NAMES)) == 55
+    assert len(C.TEAM_SHARE_FEATURE_NAMES) == 22
+    assert len(C.CONCENTRATION_FEATURE_NAMES) == 6  # HHI of the 6 concentration metrics
+    assert len(C.TEAM_FEATURE_NAMES) == 28
+    assert len(C.MATCHUP_FEATURE_NAMES) == 32  # 12 raw + 4 share, each diff+adv
+    assert len(C.CONTEXT_FEATURE_NAMES) == 60
+    assert len(set(C.CONTEXT_FEATURE_NAMES)) == 60
     assert "champion_damage_team_concentration" in C.CONTEXT_FEATURE_NAMES
+    # Added families: cc participation, kills/damage-taken carry concentration,
+    # and the lane-farm (CS) laning matchup.
+    assert "cc_team_share" in C.TEAM_SHARE_FEATURE_NAMES
+    assert "kills_team_concentration" in C.CONCENTRATION_FEATURE_NAMES
+    assert "damage_taken_team_concentration" in C.CONCENTRATION_FEATURE_NAMES
+    assert "lane_farm_vs_role_opponent_diff" in C.MATCHUP_FEATURE_NAMES
+    assert "lane_farm_vs_role_opponent_advantage" in C.MATCHUP_FEATURE_NAMES
+    # Concentration HHI normalises by the team total, only emitted for shares.
+    assert set(C.CONCENTRATION_METRICS).issubset(C.TEAM_SHARE_METRICS)
 
 
 def test_math_mirrors() -> None:
@@ -36,14 +45,21 @@ def test_sql_hygiene() -> None:
         assert "participant_stats" in sql
         assert "count() AS cnt" in sql
         assert "cityHash64(ps.matchid) % 8 = 3" in sql  # shard predicate
-        assert len(names) in (25, 30)
+        assert len(names) in (28, 32)
     # team query emits the Herfindahl concentration columns
     ts, ts_names = C.team_share_query("train")
     assert "champion_damage_team_concentration" in ts
     assert "champion_damage_team_concentration" in ts_names
+    # Added participation + concentration features resolve to real raw columns.
+    assert "cc_team_share" in ts and "cc_team_share" in ts_names
+    assert "timeccingothers" in ts  # cc participation reads the raw CC column
+    assert "kills_team_concentration" in ts_names
+    assert "damage_taken_team_concentration" in ts_names
     # opponent uses the pair-sum identity, not a participant self-join
-    mu, _ = C.matchup_query("train")
+    mu, mu_names = C.matchup_query("train")
     assert "HAVING count() = 2" in mu
+    # Added lane-farm (CS) laning matchup.
+    assert "lane_farm_vs_role_opponent_diff" in mu_names
 
 
 def test_context_included_in_loader_queries_when_enabled() -> None:
@@ -59,7 +75,14 @@ def test_context_included_in_loader_queries_when_enabled() -> None:
     for col in C.CONTEXT_FEATURE_NAMES:
         assert col in base_cols and col in prior_cols
 
-    # Off by default: no context join leaks into the standard path.
-    off_sql, off_cols = load._baseline_query(config.EmbeddingConfig())
+    # On by default: the full-game encoder surface uses all 215 metrics.
+    default_sql, default_cols = load._baseline_query(config.EmbeddingConfig())
+    assert "cnt_team" in default_sql
+    assert all(c in default_cols for c in C.CONTEXT_FEATURE_NAMES)
+
+    # Legacy profile-only builds can still opt out explicitly.
+    off_sql, off_cols = load._baseline_query(
+        config.EmbeddingConfig(include_context_features=False)
+    )
     assert "cnt_team" not in off_sql
     assert not any(c in off_cols for c in C.CONTEXT_FEATURE_NAMES)

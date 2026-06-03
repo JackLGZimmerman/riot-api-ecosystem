@@ -31,7 +31,7 @@ def run(cfg: EmbeddingConfig | None = None) -> dict[IdentityType, LevelMatrix]:
     matrices = build_metric_matrices(cfg)
     for level, matrix in matrices.items():
         logger.info(
-            "%s raw/derived matrix: rows=%d features=%d",
+            "%s metric matrix: rows=%d features=%d",
             level.value,
             matrix.matrix.shape[0],
             matrix.matrix.shape[1],

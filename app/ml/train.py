@@ -54,12 +54,10 @@ class RawTensorSplit:
     synergy_2vx: torch.Tensor | None = None
     m1v1_cnt: torch.Tensor | None = None
     s2vx_cnt: torch.Tensor | None = None
-    identity_semantic: torch.Tensor | None = None
-    identity_profile: torch.Tensor | None = None
-    identity_context: torch.Tensor | None = None
-    identity_context_support: torch.Tensor | None = None
-    identity_context_raw: torch.Tensor | None = None
-    m1v1_detail: torch.Tensor | None = None
+    identity_static_sidecar: torch.Tensor | None = None
+    identity_full_game_sidecar: torch.Tensor | None = None
+    identity_temporal_sidecar: torch.Tensor | None = None
+    identity_encoder_support: torch.Tensor | None = None
 
 
 def resolve_device(device: str) -> str:
@@ -96,37 +94,54 @@ def _limit_split(split: SplitData, max_games: int | None) -> SplitData:
 
 
 def _drop_unused_model_arrays(split: SplitData, config: HGNNConfig) -> SplitData:
-    """Null out per-player classification arrays the configured model never reads.
-
-    Production uses the threshold-tuned identity-conditioned raw context head as
-    the naive semantic-context implementation. Direct 1v1/2vX integrations are
-    retained as explicit research/legacy capacity but disabled by default, so
-    their tables stay loader-visible without entering the active tensor pipeline.
-    The legacy semantic / profile / 1v1-detail node paths remain disabled, and
-    the two context heads are mutually exclusive, so this keeps multiple GB of
-    unused tensors off the GPU without changing active model output
-    (build_hgnn_inputs only forwards present arrays)."""
-    conditioned = (
-        config.use_identity_conditioned_context
-        and config.identity_context_conditioning_type in {"low_rank", "film"}
-        and config.identity_context_raw_dim > 0
+    """Null out optional relationship arrays when the configured model ignores them."""
+    sidecar_enabled = (
+        config.use_identity_static_sidecar
+        or config.use_identity_full_game_sidecar
+        or config.use_identity_temporal_sidecar
+        or config.use_identity_semantic_context_head
     )
+    context_enabled = bool(config.use_identity_semantic_context_head)
+    if context_enabled:
+        missing = [
+            name
+            for name in (
+                "identity_static_sidecar",
+                "identity_full_game_sidecar",
+                "identity_temporal_sidecar",
+                "identity_encoder_support",
+            )
+            if getattr(split, name) is None
+        ]
+        if missing:
+            raise ValueError(
+                "semantic context head requires cache arrays: "
+                + ", ".join(missing)
+                + ". Rebuild the dataset cache with encoder_sidecar_path set "
+                "to a valid three-latent sidecar artifact."
+            )
+        for name in (
+            "identity_static_sidecar",
+            "identity_full_game_sidecar",
+            "identity_temporal_sidecar",
+        ):
+            value = getattr(split, name)
+            if value.ndim != 3 or value.shape[1] != 10 or value.shape[2] <= 0:
+                raise ValueError(f"semantic context head requires non-empty {name} [games, 10, dim]")
+        support = split.identity_encoder_support
+        if support.ndim != 2 or support.shape[1] != 10:
+            raise ValueError("semantic context head requires identity_encoder_support [games, 10]")
     drop: dict[str, bool] = {
-        "identity_semantic": config.identity_semantic_dim <= 0,
-        "identity_profile": config.identity_profile_dim <= 0,
-        "m1v1_detail": config.m1v1_detail_dim <= 0,
-        # raw block: only the conditioned head consumes it.
-        "identity_context_raw": not conditioned,
-        # 24-dim descriptor: the shared head always needs it; the conditioned head
-        # needs it only for the raw_plus_dense source's dense tail.
-        "identity_context": config.identity_context_dim <= 0
-        or (conditioned and config.identity_context_source != "raw_plus_dense"),
         "matchup_1v1": not config.use_relationship_integrations,
         "synergy_2vx": not config.use_relationship_integrations,
         "m1v1_cnt": not config.use_relationship_integrations,
         "s2vx_cnt": not config.use_relationship_integrations,
         "m1v1_eff_n": not config.use_relationship_integrations,
         "s2vx_eff_n": not config.use_relationship_integrations,
+        "identity_static_sidecar": not (config.use_identity_static_sidecar or context_enabled),
+        "identity_full_game_sidecar": not (config.use_identity_full_game_sidecar or context_enabled),
+        "identity_temporal_sidecar": not (config.use_identity_temporal_sidecar or context_enabled),
+        "identity_encoder_support": not sidecar_enabled,
     }
     overrides = {name: None for name, unused in drop.items() if unused}
     if not overrides:
@@ -134,6 +149,33 @@ def _drop_unused_model_arrays(split: SplitData, config: HGNNConfig) -> SplitData
     return type(split)(
         **{f.name: overrides.get(f.name, getattr(split, f.name)) for f in fields(split)}
     )
+
+
+def _validate_split_targets(splits: dict[str, SplitData]) -> None:
+    for split_name in ("train", "val", "test"):
+        labels = np.asarray(splits[split_name].blue_win)
+        if labels.ndim != 1:
+            raise ValueError(
+                f"{split_name} split blue_win labels must be one-dimensional; "
+                "rebuild the dataset cache."
+            )
+        if labels.size == 0:
+            continue
+        unique = np.unique(labels)
+        if not np.isin(unique, [0.0, 1.0]).all():
+            raise ValueError(
+                f"{split_name} split blue_win labels must be binary; "
+                "rebuild the dataset cache."
+            )
+        positives = int(np.count_nonzero(labels > 0.5))
+        negatives = int(labels.size - positives)
+        if positives == 0 or negatives == 0:
+            raise ValueError(
+                f"{split_name} split has degenerate blue_win labels "
+                f"(positives={positives}, negatives={negatives}, n={labels.size}); "
+                "rebuild the dataset cache. This usually means the cache split "
+                "metadata/ranges do not match the array contents."
+            )
 
 
 def _binary_auc(scores: np.ndarray, targets: np.ndarray) -> float:
@@ -338,32 +380,15 @@ CHECKPOINT_METRICS = frozenset(
 )
 
 
-AUTO_HGNN_OVERRIDE_DIMS = frozenset(
-    {
-        "identity_semantic_dim",
-        "identity_profile_dim",
-        "m1v1_detail_dim",
-        "identity_context_dim",
-        "context_interpretable_dim",
-        "identity_context_raw_dim",
-    }
-)
-
-
 def _resolve_hgnn_overrides_from_meta(
     overrides: dict[str, Any],
-    classification: dict[str, Any],
 ) -> dict[str, Any]:
     resolved: dict[str, Any] = {}
     for key, value in overrides.items():
         if value != "auto":
             resolved[key] = value
             continue
-        if key not in AUTO_HGNN_OVERRIDE_DIMS:
-            raise ValueError(f"{key} does not support auto HGNN override resolution")
-        if key not in classification:
-            raise ValueError(f"{key}=auto requires classification.{key} in cache metadata")
-        resolved[key] = int(classification[key])
+        raise ValueError(f"{key} does not support auto HGNN override resolution")
     return resolved
 
 
@@ -422,9 +447,6 @@ def _support_bucket_metrics(scores: np.ndarray, split: SplitData) -> dict[str, o
     prior_support = _prior_1vx_support_metrics(scores, split)
     if prior_support is not None:
         out["prior_1vx_support"] = prior_support
-    context_support = _identity_context_support_metrics(scores, split)
-    if context_support is not None:
-        out["identity_context_support"] = context_support
     return out
 
 
@@ -516,195 +538,6 @@ def _prior_1vx_support_metrics(
     }
 
 
-CONTEXT_SUPPORT_RISK_BUCKETS: tuple[str, ...] = (
-    "zero_player",
-    "min_1_29",
-    "mean_30_199",
-    "mean_200_plus",
-)
-
-
-def _identity_context_support_arrays(
-    split: SplitData,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    if split.identity_context_support is None:
-        return None
-    support = np.asarray(split.identity_context_support, dtype=np.float64)
-    if support.ndim != 2 or support.shape[0] != split.blue_win.size:
-        raise ValueError(
-            "identity_context_support must have shape [games, players] for diagnostics"
-        )
-    mean_support = support.mean(axis=1)
-    min_support = _min_non_missing_support(support)
-    zero_players = (support <= 0.0).sum(axis=1).astype(np.float64, copy=False)
-    return mean_support, min_support, zero_players
-
-
-def _identity_context_support_bucket_ids(split: SplitData) -> np.ndarray | None:
-    arrays = _identity_context_support_arrays(split)
-    if arrays is None:
-        return None
-    mean_support, min_support, zero_players = arrays
-    bucket = np.full(mean_support.shape, 3, dtype=np.int64)
-    has_zero = zero_players > 0.0
-    bucket[has_zero] = 0
-    no_zero = ~has_zero
-    bucket[no_zero & (min_support < 30.0)] = 1
-    bucket[no_zero & (min_support >= 30.0) & (mean_support < 200.0)] = 2
-    return bucket
-
-
-def _context_support_risk_bucket_rows(
-    bucket_ids: np.ndarray,
-    scores: np.ndarray,
-    targets: np.ndarray,
-    *,
-    mean_support: np.ndarray,
-    min_support: np.ndarray,
-    zero_players: np.ndarray,
-) -> dict[str, dict[str, float | int]]:
-    rows: dict[str, dict[str, float | int]] = {}
-    for idx, label in enumerate(CONTEXT_SUPPORT_RISK_BUCKETS):
-        mask = bucket_ids == idx
-        row = _metric_values(scores[mask], targets[mask])
-        row["mean_identity_context_support"] = (
-            float(np.mean(mean_support[mask])) if np.any(mask) else float("nan")
-        )
-        row["min_identity_context_support"] = (
-            float(np.mean(min_support[mask])) if np.any(mask) else float("nan")
-        )
-        row["mean_zero_context_players"] = (
-            float(np.mean(zero_players[mask])) if np.any(mask) else float("nan")
-        )
-        rows[label] = row
-    return rows
-
-
-def _identity_context_support_metrics(
-    scores: np.ndarray,
-    split: SplitData,
-) -> dict[str, object] | None:
-    arrays = _identity_context_support_arrays(split)
-    if arrays is None:
-        return None
-    mean_support, min_support, zero_players = arrays
-    targets = split.blue_win.astype(np.float64, copy=False)
-    bucket_ids = _identity_context_support_bucket_ids(split)
-    if bucket_ids is None:
-        return None
-    return {
-        "mean_support_bucket": _bucket_rows(mean_support, scores, targets),
-        "min_support_bucket": _bucket_rows(min_support, scores, targets),
-        "risk_bucket": _context_support_risk_bucket_rows(
-            bucket_ids,
-            scores,
-            targets,
-            mean_support=mean_support,
-            min_support=min_support,
-            zero_players=zero_players,
-        ),
-    }
-
-
-def _fit_context_support_temperatures(
-    logits: np.ndarray,
-    targets: np.ndarray,
-    bucket_ids: np.ndarray,
-    *,
-    min_bucket_size: int,
-) -> tuple[list[dict[str, object]], dict[int, float], float]:
-    global_temperature = _fit_temperature(logits, targets)
-    rows: list[dict[str, object]] = []
-    temperatures: dict[int, float] = {}
-    y = targets.astype(np.float64, copy=False)
-    for idx, label in enumerate(CONTEXT_SUPPORT_RISK_BUCKETS):
-        mask = bucket_ids == idx
-        n = int(mask.sum())
-        has_two_classes = np.unique(y[mask] > 0.5).size == 2 if n else False
-        if n >= min_bucket_size and has_two_classes:
-            temperature = _fit_temperature(logits[mask], y[mask])
-            source = "bucket_val"
-        else:
-            temperature = global_temperature
-            source = "global_val_fallback"
-        temperatures[idx] = temperature
-        rows.append(
-            {
-                "bucket": label,
-                "n_val": n,
-                "temperature": temperature,
-                "fit_source": source,
-            }
-        )
-    return rows, temperatures, global_temperature
-
-
-def _apply_context_support_temperatures(
-    logits: np.ndarray,
-    bucket_ids: np.ndarray,
-    temperatures: dict[int, float],
-) -> np.ndarray:
-    scaled = np.empty_like(logits, dtype=np.float64)
-    for idx in range(len(CONTEXT_SUPPORT_RISK_BUCKETS)):
-        mask = bucket_ids == idx
-        if np.any(mask):
-            scaled[mask] = _sigmoid_np(logits[mask], temperature=temperatures[idx])
-    return scaled
-
-
-def _context_support_temperature_report(
-    prediction_logits: dict[str, np.ndarray],
-    splits: dict[str, SplitData],
-    *,
-    min_bucket_size: int,
-) -> tuple[dict[str, object], dict[str, dict[str, float | int]]]:
-    val_bucket_ids = _identity_context_support_bucket_ids(splits["val"])
-    if val_bucket_ids is None:
-        return {
-            "available": False,
-            "reason": "identity_context_support is unavailable",
-            "fit_split": "val",
-            "report_only": True,
-        }, {}
-    fit_rows, temperatures, global_temperature = _fit_context_support_temperatures(
-        prediction_logits["val"],
-        splits["val"].blue_win,
-        val_bucket_ids,
-        min_bucket_size=min_bucket_size,
-    )
-    report: dict[str, object] = {
-        "available": True,
-        "fit_split": "val",
-        "report_only": True,
-        "bucket_key": "identity_context_support.risk_bucket",
-        "min_bucket_size": min_bucket_size,
-        "global_temperature": global_temperature,
-        "buckets": fit_rows,
-    }
-    split_reports: dict[str, dict[str, float | int]] = {}
-    split_details: dict[str, object] = {}
-    for split_name in ("train", "val", "test"):
-        bucket_ids = _identity_context_support_bucket_ids(splits[split_name])
-        if bucket_ids is None:
-            continue
-        scaled = _apply_context_support_temperatures(
-            prediction_logits[split_name],
-            bucket_ids,
-            temperatures,
-        )
-        metrics = _evaluate_predictions(scaled, splits[split_name])
-        support_metrics = _identity_context_support_metrics(scaled, splits[split_name])
-        if support_metrics is not None:
-            metrics["identity_context_support"] = support_metrics
-        split_reports[split_name] = metrics
-        split_details[split_name] = {
-            "overall": metrics,
-            "identity_context_support": support_metrics,
-        }
-    report["splits"] = split_details
-    return report, split_reports
-
-
 def _select_threshold(scores: np.ndarray, targets: np.ndarray) -> tuple[float, float]:
     if scores.size == 0:
         return 0.5, float("nan")
@@ -747,10 +580,6 @@ def _validate_train_config(train_cfg: TrainConfig) -> None:
         raise ValueError(
             f"checkpoint_metric must be one of: {', '.join(sorted(CHECKPOINT_METRICS))}"
         )
-    if train_cfg.context_support_calibration_min_bucket < 1:
-        raise ValueError("context_support_calibration_min_bucket must be >= 1")
-    if train_cfg.context_auxiliary_loss_weight < 0.0:
-        raise ValueError("context_auxiliary_loss_weight must be >= 0")
     if train_cfg.auc_ranking_loss_weight < 0.0:
         raise ValueError("auc_ranking_loss_weight must be >= 0")
     if train_cfg.auc_ranking_loss_pairs < 1:
@@ -762,47 +591,25 @@ def _hgnn_config_from_meta(
     *,
     overrides: dict[str, Any] | None = None,
 ) -> HGNNConfig:
-    classification = meta.get("classification", {}) if isinstance(meta, dict) else {}
-    # Production classification context is the threshold-tuned raw-atlas
-    # identity-conditioned head. It is the first deliberately naive semantic
-    # context implementation: give every (champion, role, build) a draft-safe raw
-    # semantic descriptor, then let a low-rank bottleneck learn which ally/enemy
-    # context interactions matter for that identity. The shared 24-dim atlas head
-    # remains available as an explicit baseline, but production uses the raw head
-    # because the win-rate prior marginalises over enemy/ally composition and the
-    # shared head under-fits identity-specific tails (armor tank vs physical
-    # enemy, MR tank vs magic enemy, low-damage team vs enemy heal/shield, etc.).
-    # The head is antisymmetric, support-gated, and zero-initialised, so it is
-    # opt-in on top of the win-rate model.
     base = dict(
         n_champions=int(meta["n_champions"]),
         n_builds=int(meta["n_builds"]),
         build_vocab=tuple(meta["build_vocab"]),
-        identity_semantic_dim=0,
-        identity_profile_dim=0,
-        m1v1_detail_dim=0,
         use_relationship_integrations=False,
-        identity_context_dim=int(classification.get("identity_context_dim", 0)),
-        context_interpretable_dim=int(classification.get("context_interpretable_dim", 14)),
-        context_head_hidden=(32,),
-        context_support_strength=30.0,
-        context_include_ally=True,
-        context_include_relational=True,
-        identity_context_raw_dim=int(classification.get("identity_context_raw_dim", 0)),
-        use_identity_conditioned_context=True,
-        identity_context_conditioning_type="low_rank",
-        identity_context_source="raw",
-        identity_context_rank=16,
-        identity_context_hidden_dim=64,
-        identity_context_emb_dim=16,
-        identity_context_init_scale=0.01,
-        identity_context_dropout=0.0,
-        identity_context_use_residual_mlp=False,
-        identity_context_include_products=False,
-        identity_context_include_support_features=False,
     )
+    sidecar = meta.get("identity_encoder_sidecar")
+    if isinstance(sidecar, dict):
+        dims = sidecar.get("dims", {})
+        if isinstance(dims, dict):
+            base.update(
+                {
+                    "identity_static_sidecar_dim": int(dims.get("static", 0)),
+                    "identity_full_game_sidecar_dim": int(dims.get("full_game", 0)),
+                    "identity_temporal_sidecar_dim": int(dims.get("temporal", 0)),
+                }
+            )
     if overrides:
-        base.update(_resolve_hgnn_overrides_from_meta(overrides, classification))
+        base.update(_resolve_hgnn_overrides_from_meta(overrides))
     return HGNNConfig(**base)
 
 
@@ -830,13 +637,11 @@ def _hgnn_inputs_from_raw(
         synergy_2vx=raw.synergy_2vx,
         m1v1_cnt=raw.m1v1_cnt,
         s2vx_cnt=raw.s2vx_cnt,
+        identity_static_sidecar=raw.identity_static_sidecar,
+        identity_full_game_sidecar=raw.identity_full_game_sidecar,
+        identity_temporal_sidecar=raw.identity_temporal_sidecar,
+        identity_encoder_support=raw.identity_encoder_support,
         include_relationship_features=include_relationship_features,
-        identity_semantic=raw.identity_semantic,
-        identity_profile=raw.identity_profile,
-        identity_context=raw.identity_context,
-        identity_context_support=raw.identity_context_support,
-        identity_context_raw=raw.identity_context_raw,
-        m1v1_detail=raw.m1v1_detail,
         device=device,
     )
 
@@ -868,9 +673,9 @@ def _predict_hgnn_outputs(
 ) -> dict[str, np.ndarray]:
     model.eval()
     out: dict[str, list[np.ndarray]] = {
-        "final_logit": [],
         "base_logit": [],
         "context_logit": [],
+        "final_logit": [],
     }
     with torch.no_grad():
         n_rows = split.blue_win.numel()
@@ -879,47 +684,9 @@ def _predict_hgnn_outputs(
             inputs = _hgnn_inputs_from_raw(raw_batch, strength=strength, device=device)
             outputs = model(**inputs)
             for key in out:
-                value = outputs.get(key)
-                if value is None:
-                    value = outputs["final_logit"].new_zeros(outputs["final_logit"].shape)
+                value = outputs[key]
                 out[key].append(value.detach().cpu().numpy())
     return {key: np.concatenate(values).astype(np.float64) for key, values in out.items()}
-
-
-def _context_residual_metrics(context_logits: np.ndarray) -> dict[str, float]:
-    values = np.asarray(context_logits, dtype=np.float64)
-    abs_values = np.abs(values)
-    if values.size == 0:
-        return {
-            "mean_logit": float("nan"),
-            "mean_abs_logit": float("nan"),
-            "rms_logit": float("nan"),
-            "p95_abs_logit": float("nan"),
-            "max_abs_logit": float("nan"),
-        }
-    return {
-        "mean_logit": float(values.mean()),
-        "mean_abs_logit": float(abs_values.mean()),
-        "rms_logit": float(np.sqrt(np.mean(np.square(values)))),
-        "p95_abs_logit": float(np.quantile(abs_values, 0.95)),
-        "max_abs_logit": float(abs_values.max()),
-    }
-
-
-def _context_auxiliary_loss(
-    outputs: dict[str, torch.Tensor],
-    labels: torch.Tensor,
-    loss_fn: nn.Module,
-    weight: float,
-) -> torch.Tensor:
-    if weight <= 0.0:
-        return outputs["final_logit"].new_zeros(())
-    context_logit = outputs.get("context_logit")
-    base_logit = outputs.get("base_logit")
-    if context_logit is None or base_logit is None:
-        return outputs["final_logit"].new_zeros(())
-    context_only_logit = base_logit.detach() + context_logit
-    return float(weight) * loss_fn(context_only_logit, labels)
 
 
 def _auc_ranking_loss(
@@ -989,6 +756,7 @@ def train(
         name: _drop_unused_model_arrays(_limit_split(split, dataset_cfg.max_games), model_config)
         for name, split in load_splits(dataset_cfg, require_counts=True).items()
     }
+    _validate_split_targets(splits)
     if splits["train"].blue_win.size == 0:
         raise ValueError("Training split is empty; rebuild the cache with train games.")
     tensor_splits = {
@@ -997,10 +765,6 @@ def train(
     }
 
     model = HGNNWinModel(model_config).to(device)
-    if train_cfg.context_auxiliary_loss_weight > 0.0 and not (
-        model.identity_conditioned_context_enabled or model.context_enabled
-    ):
-        raise ValueError("context_auxiliary_loss_weight requires an enabled context head")
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=train_cfg.learning_rate,
@@ -1033,7 +797,6 @@ def train(
     for epoch in range(1, train_cfg.max_epochs + 1):
         model.train()
         train_loss_sum = 0.0
-        train_aux_loss_sum = 0.0
         train_rank_loss_sum = 0.0
         train_seen = 0
         for batch_idx in _batch_indices(
@@ -1053,45 +816,28 @@ def train(
             optimizer.zero_grad(set_to_none=True)
             direct_outputs = model(**inputs)
             direct_loss = loss_fn(direct_outputs["final_logit"], labels)
-            direct_aux_loss = _context_auxiliary_loss(
-                direct_outputs,
-                labels,
-                loss_fn,
-                train_cfg.context_auxiliary_loss_weight,
-            )
             direct_rank_loss = _auc_ranking_loss(
                 direct_outputs["final_logit"],
                 labels,
                 weight=train_cfg.auc_ranking_loss_weight,
                 max_pairs=train_cfg.auc_ranking_loss_pairs,
             )
-            (0.5 * (direct_loss + direct_aux_loss + direct_rank_loss)).backward()
+            (0.5 * (direct_loss + direct_rank_loss)).backward()
             swapped_outputs = model(**swap_hgnn_inputs(inputs))
             swapped_loss = loss_fn(swapped_outputs["final_logit"], 1.0 - labels)
-            swapped_aux_loss = _context_auxiliary_loss(
-                swapped_outputs,
-                1.0 - labels,
-                loss_fn,
-                train_cfg.context_auxiliary_loss_weight,
-            )
             swapped_rank_loss = _auc_ranking_loss(
                 swapped_outputs["final_logit"],
                 1.0 - labels,
                 weight=train_cfg.auc_ranking_loss_weight,
                 max_pairs=train_cfg.auc_ranking_loss_pairs,
             )
-            (0.5 * (swapped_loss + swapped_aux_loss + swapped_rank_loss)).backward()
-            reg_loss = model.context_regularization_loss()
-            if reg_loss.requires_grad:
-                reg_loss.backward()
+            (0.5 * (swapped_loss + swapped_rank_loss)).backward()
             loss = 0.5 * (direct_loss.detach() + swapped_loss.detach())
-            aux_loss = 0.5 * (direct_aux_loss.detach() + swapped_aux_loss.detach())
             rank_loss = 0.5 * (direct_rank_loss.detach() + swapped_rank_loss.detach())
             if train_cfg.max_grad_norm is not None and train_cfg.max_grad_norm > 0.0:
                 nn.utils.clip_grad_norm_(model.parameters(), train_cfg.max_grad_norm)
             optimizer.step()
             train_loss_sum += float(loss.cpu().item()) * labels.numel() * 2
-            train_aux_loss_sum += float(aux_loss.cpu().item()) * labels.numel() * 2
             train_rank_loss_sum += float(rank_loss.cpu().item()) * labels.numel() * 2
             train_seen += int(labels.numel() * 2)
 
@@ -1104,7 +850,6 @@ def train(
         )
         val_predictions = _sigmoid_np(val_logits)
         train_nll = train_loss_sum / max(train_seen, 1)
-        train_context_auxiliary_loss = train_aux_loss_sum / max(train_seen, 1)
         train_auc_ranking_loss = train_rank_loss_sum / max(train_seen, 1)
         val_metrics = _evaluate_predictions(val_predictions, splits["val"])
         val_nll = float(val_metrics["nll"])
@@ -1128,15 +873,13 @@ def train(
                 "val_threshold": val_threshold,
                 "val_threshold_accuracy": val_threshold_accuracy,
                 "checkpoint_score": checkpoint_score,
-                "train_context_auxiliary_loss": train_context_auxiliary_loss,
                 "train_auc_ranking_loss": train_auc_ranking_loss,
             }
         )
         logger.info(
-            "epoch=%s train_nll=%.5f aux=%.5f rank=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
+            "epoch=%s train_nll=%.5f rank=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
             epoch,
             train_nll,
-            train_context_auxiliary_loss,
             train_auc_ranking_loss,
             val_nll,
             val_metrics["accuracy"],
@@ -1199,31 +942,12 @@ def train(
             predictions[split_name],
             splits[split_name],
         )
-        split_metrics[split_name]["context_residual"] = _context_residual_metrics(
-            prediction_outputs[split_name]["context_logit"]
-        )
         calibrated = _evaluate_predictions(calibrated_predictions[split_name], splits[split_name])
         calibrated["support_buckets"] = _support_bucket_metrics(
             calibrated_predictions[split_name],
             splits[split_name],
         )
         split_metrics[split_name]["temperature_scaled"] = calibrated
-    context_support_temperature_scaling: dict[str, object] = {
-        "available": False,
-        "report_only": True,
-        "reason": "disabled",
-    }
-    if train_cfg.report_context_support_calibration:
-        (
-            context_support_temperature_scaling,
-            context_support_scaled_metrics,
-        ) = _context_support_temperature_report(
-            prediction_logits,
-            splits,
-            min_bucket_size=train_cfg.context_support_calibration_min_bucket,
-        )
-        for split_name, calibrated in context_support_scaled_metrics.items():
-            split_metrics[split_name]["context_support_temperature_scaled"] = calibrated
     metrics = {
         "model_type": "hgnn",
         "dataset_config": asdict(dataset_cfg),
@@ -1243,7 +967,6 @@ def train(
             "fit_split": "val",
             "report_only": True,
         },
-        "context_support_temperature_scaling": context_support_temperature_scaling,
         "elapsed_seconds": time.monotonic() - started,
         "history": history,
         "train": split_metrics["train"],
@@ -1272,34 +995,21 @@ def train(
     return train_cfg.model_path
 
 
-def _parse_quantiles(value: str) -> tuple[float, ...]:
-    if not value:
-        return ()
-    return tuple(float(part) for part in value.split(",") if part.strip())
-
-
 def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    """HGNNConfig overrides for production semantic context or its baselines."""
-    conditioning_type = "none" if args.shared_context else args.identity_context_conditioning_type
+    """HGNNConfig overrides exposed by the training CLI."""
+    use_all_sidecars = bool(args.use_all_identity_sidecars)
     return {
-        "use_identity_conditioned_context": conditioning_type != "none",
-        "identity_context_conditioning_type": conditioning_type,
-        "identity_context_source": args.identity_context_source,
-        "identity_context_rank": args.identity_context_rank,
-        "identity_context_hidden_dim": args.identity_context_hidden_dim,
-        "identity_context_emb_dim": args.identity_context_emb_dim,
-        "identity_context_init_scale": args.identity_context_init_scale,
-        "identity_context_dropout": args.identity_context_dropout,
-        "identity_context_use_residual_mlp": args.identity_context_residual_mlp,
-        "identity_context_include_products": args.identity_context_products,
-        "identity_context_film_regularization": args.identity_context_film_regularization,
-        "context_set_encoder_type": args.context_set_encoder,
-        "context_set_encoder_dim": args.context_set_encoder_dim,
-        "context_set_encoder_heads": args.context_set_encoder_heads,
-        "context_summary_topk": args.context_summary_topk,
-        "context_summary_quantiles": _parse_quantiles(args.context_summary_quantiles),
         "structural_antisymmetry": args.structural_antisymmetry,
         "structural_antisymmetry_scale": args.structural_antisymmetry_scale,
+        "use_identity_static_sidecar": bool(args.use_identity_static_sidecar or use_all_sidecars),
+        "use_identity_full_game_sidecar": bool(args.use_identity_full_game_sidecar or use_all_sidecars),
+        "use_identity_temporal_sidecar": bool(args.use_identity_temporal_sidecar or use_all_sidecars),
+        "identity_encoder_sidecar_support_strength": args.identity_encoder_sidecar_support_strength,
+        "identity_encoder_sidecar_dropout": args.identity_encoder_sidecar_dropout,
+        "use_identity_semantic_context_head": args.use_identity_semantic_context_head,
+        "semantic_context_dim": args.semantic_context_dim,
+        "semantic_context_dropout": args.semantic_context_dropout,
+        "semantic_context_support_strength": args.semantic_context_support_strength,
     }
 
 
@@ -1309,6 +1019,7 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", type=Path, default=dataset_defaults.cache_dir)
     parser.add_argument("--max-games", type=int, default=dataset_defaults.max_games)
+    parser.add_argument("--encoder-sidecar-path", type=Path, default=dataset_defaults.encoder_sidecar_path)
     parser.add_argument("--model-path", type=Path, default=train_defaults.model_path)
     parser.add_argument("--metrics-path", type=Path, default=train_defaults.metrics_path)
     parser.add_argument("--batch-size", type=int, default=train_defaults.batch_size)
@@ -1326,28 +1037,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         default=train_defaults.checkpoint_min_delta,
     )
     parser.add_argument(
-        "--report-context-support-calibration",
-        action="store_true",
-        help=(
-            "Fit validation-only temperature diagnostics by identity-context "
-            "support bucket; report-only, does not affect served probabilities."
-        ),
-    )
-    parser.add_argument(
-        "--context-support-calibration-min-bucket",
-        type=int,
-        default=train_defaults.context_support_calibration_min_bucket,
-    )
-    parser.add_argument(
-        "--context-auxiliary-loss-weight",
-        type=float,
-        default=train_defaults.context_auxiliary_loss_weight,
-        help=(
-            "Experimental training-only weight for BCE on detached base_logit + "
-            "context_logit, so gradients from this term update only the context residual."
-        ),
-    )
-    parser.add_argument(
         "--auc-ranking-loss-weight",
         type=float,
         default=train_defaults.auc_ranking_loss_weight,
@@ -1362,59 +1051,33 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         default=train_defaults.auc_ranking_loss_pairs,
         help="Maximum sampled positive/negative pairs per direct or swapped batch.",
     )
-    parser.add_argument(
-        "--identity-conditioned",
-        action="store_true",
-        help=(
-            "Deprecated no-op: the low-rank identity-conditioned raw context "
-            "head is now the production default."
-        ),
-    )
-    parser.add_argument(
-        "--shared-context",
-        action="store_true",
-        help="Use the legacy shared 24-dim context-atlas head instead of production semantic context.",
-    )
-    parser.add_argument(
-        "--context-set-encoder",
-        default="mean",
-        choices=("mean", "deepsets", "set_transformer", "attention", "summary_stats"),
-        help="Permutation-invariant encoder for unordered ally/enemy context sets.",
-    )
-    parser.add_argument("--context-set-encoder-dim", type=int, default=32)
-    parser.add_argument("--context-set-encoder-heads", type=int, default=4)
-    parser.add_argument("--context-summary-topk", type=int, default=2)
-    parser.add_argument("--context-summary-quantiles", default="0.25,0.5,0.75")
-    parser.add_argument(
-        "--identity-context-conditioning-type",
-        default="low_rank",
-        choices=("none", "low_rank", "film"),
-    )
-    parser.add_argument(
-        "--identity-context-source",
-        default="raw",
-        choices=("raw", "raw_plus_dense"),
-    )
-    parser.add_argument("--identity-context-rank", type=int, default=16)
-    parser.add_argument("--identity-context-hidden-dim", type=int, default=64)
-    parser.add_argument("--identity-context-emb-dim", type=int, default=16)
-    parser.add_argument("--identity-context-init-scale", type=float, default=0.01)
-    parser.add_argument("--identity-context-dropout", type=float, default=0.0)
-    parser.add_argument("--identity-context-residual-mlp", action="store_true")
-    parser.add_argument(
-        "--identity-context-products",
-        action="store_true",
-        help=(
-            "Append global interpretable context products to the "
-            "identity-conditioned context projector."
-        ),
-    )
-    parser.add_argument("--identity-context-film-regularization", type=float, default=1.0e-3)
     parser.add_argument("--structural-antisymmetry", action="store_true")
     parser.add_argument("--structural-antisymmetry-scale", type=float, default=0.5)
+    parser.add_argument("--use-identity-static-sidecar", action="store_true")
+    parser.add_argument("--use-identity-full-game-sidecar", action="store_true")
+    parser.add_argument("--use-identity-temporal-sidecar", action="store_true")
+    parser.add_argument(
+        "--use-all-identity-sidecars",
+        action="store_true",
+        help="Enable static, full-game, and temporal frozen encoder sidecar blocks.",
+    )
+    parser.add_argument("--identity-encoder-sidecar-support-strength", type=float, default=30.0)
+    parser.add_argument("--identity-encoder-sidecar-dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--use-identity-semantic-context-head",
+        action="store_true",
+        help="Enable own/ally/enemy latent-context interaction over all three identity sidecars.",
+    )
+    parser.add_argument("--semantic-context-dim", type=int, default=96)
+    parser.add_argument("--semantic-context-dropout", type=float, default=0.0)
+    parser.add_argument("--semantic-context-support-strength", type=float, default=30.0)
     args = parser.parse_args()
     return (
-        DatasetConfig(cache_dir=args.cache_dir, max_games=args.max_games),
+        DatasetConfig(
+            cache_dir=args.cache_dir,
+            max_games=args.max_games,
+            encoder_sidecar_path=args.encoder_sidecar_path,
+        ),
         TrainConfig(
             model_path=args.model_path,
             metrics_path=args.metrics_path,
@@ -1428,9 +1091,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
             max_grad_norm=args.max_grad_norm,
             checkpoint_metric=args.checkpoint_metric,
             checkpoint_min_delta=args.checkpoint_min_delta,
-            report_context_support_calibration=args.report_context_support_calibration,
-            context_support_calibration_min_bucket=args.context_support_calibration_min_bucket,
-            context_auxiliary_loss_weight=args.context_auxiliary_loss_weight,
             auc_ranking_loss_weight=args.auc_ranking_loss_weight,
             auc_ranking_loss_pairs=args.auc_ranking_loss_pairs,
         ),

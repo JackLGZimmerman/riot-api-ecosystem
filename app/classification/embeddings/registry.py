@@ -515,6 +515,38 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
         d["totalhealsonteammates"] + d["totaldamageshieldedonteammates"],
         d["deaths"],
     ),
+    # Damage taken composition (defensive damage profile)
+    "physicaldamagetaken_share": lambda d: _safe_divide(
+        d["physicaldamagetaken"],
+        d["totaldamagetaken"],
+    ),
+    "magicdamagetaken_share": lambda d: _safe_divide(
+        d["magicdamagetaken"],
+        d["totaldamagetaken"],
+    ),
+    "truedamagetaken_share": lambda d: _safe_divide(
+        d["truedamagetaken"],
+        d["totaldamagetaken"],
+    ),
+    # Combat trade (damage output vs intake)
+    "champion_damage_to_damage_taken_ratio": lambda d: _safe_divide(
+        d["totaldamagedealttochampions"],
+        d["totaldamagetaken"],
+    ),
+    "net_combat_damage": lambda d: (
+        d["totaldamagedealttochampions"] - d["totaldamagetaken"]
+    ).astype(np.float32),
+    "net_kills": lambda d: (d["kills"] - d["deaths"]).astype(np.float32),
+    # Crit reliance
+    "largestcriticalstrike_to_attackdamage_ratio": lambda d: _safe_divide(
+        d["largestcriticalstrike"],
+        d["attackdamage"],
+    ),
+    # Economy at risk
+    "goldearned_to_deaths_ratio": lambda d: _safe_divide(
+        d["goldearned"],
+        d["deaths"],
+    ),
 }
 
 

@@ -866,8 +866,8 @@ def apply_hierarchical_shrinkage(levels: Mapping[Any, Any], cfg: Any) -> dict[An
                 0,
             )
         }
-    # Phase 3 context features (when loaded) smooth as MATCHUPS-evidence rate-like
-    # metrics. Absent by default, so the standard path is unchanged.
+    # Context features smooth as MATCHUPS-evidence rate-like metrics when loaded.
+    # Legacy profile-only builds can disable the context block explicitly.
     context: tuple[str, ...] = ()
     if getattr(cfg, "include_context_features", False):
         from app.classification.embeddings.context_features import (

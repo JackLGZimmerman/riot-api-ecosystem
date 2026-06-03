@@ -1,282 +1,114 @@
 # HGNN Context Examples Audit
 
-Updated: 2026-06-02. Audit target:
-`app/ml/data/structured_winrate_model.pt`.
+Updated: 2026-06-03.
 
-Production semantic context is the threshold-tuned raw identity-conditioned
-context head: `use_identity_conditioned_context=true`,
-`identity_context_source=raw`, rank `16`, hidden dim `64`, checkpointed by
-validation threshold accuracy. This is the naive semantic-context baseline: a
-wide draft-safe identity atlas, a small low-rank context interaction, and no
-manual champion-specific rules.
+This audit joins the empirical focus-side context examples to the trained semantic HGNN predictions for the same cached games. Each bin reports `n / empirical WR / HGNN WR / gap`, where gap is `HGNN WR - empirical WR`. Zero gap is the target.
 
-Reproducer file: [../context_examples_audit.py](../context_examples_audit.py)
+## Scope And Threshold Definitions
 
-Reproduce:
+- Context source: `app/ml/data/cache` side-row arrays, all splits combined.
+- HGNN model: `app/ml/data/experiments/semantic_context_compact_run/model.pt`.
+- HGNN cache: `app/ml/data/experiments/semantic_context_compact_cache`.
+- HGNN WR uses raw `final_logit` probabilities; report-only temperature scaling is not applied.
+- Side rows audited: 2,862,626.
+- Model-alignment rows score blue slots with `P(blue wins)` and red slots with `1 - P(blue wins)`.
+- Continuous thresholds are global side-row team-average percentiles.
+- Count thresholds use explicit enemy-team counts.
+- WR, effects, and gaps are focus-side win-rate percentage points.
+- Selected-enchanter probe uses Sona, Karma, Lulu, and Zilean in `UTILITY` with `utility_enchanter` or `utility_protection`.
+- Low own-damage probe is anchored once per team side, then compared against the enemy heal/shield context.
 
-```bash
-.venv/bin/python -m app.ml.context_examples_audit --model-path app/ml/data/structured_winrate_model.pt
-```
+| Axis | Low threshold | High threshold | Notes |
+|---|---|---|---|
+| Physical share | `<= 0.387` | `>= 0.557` | Team-average identity-context physical share. |
+| Magic share | `<= 0.373` | `>= 0.549` | Team-average identity-context magic share. |
+| Damage pressure | `<= 0.739` | `>= 0.813` | Team-average champion damage pressure. |
+| Damage-taken pressure | `<= 0.639` | `>= 0.721` | Team-average damage-taken pressure. |
+| Heal/shield pressure | `<= 0.028` | `>= 0.202` | Team-average ally heal/shield pressure. |
+| CC pressure | `<= 0.374` | `>= 0.539` | Team-average crowd-control pressure. |
+| Siege pressure | `<= 0.441` | `>= 0.530` | Team-average siege and structure pressure. |
+| Scaling pressure | `<= 0.829` | `>= 0.863` | Team-average scaling pressure. |
+| Burst-proxy count | `0` | `>= 3` | Enemy slots with slot damage pressure `>= 0.952` and a non-tank build. |
+| Hard-CC count | `0` | `>= 3` | Enemy slots with slot CC pressure `>= 0.696`. |
+| Tank/frontline count | `0` | `>= 3` | Enemy builds in `ar_tank`, `mr_tank`, `ad_off_tank`, or `ap_off_tank`. |
+| Heavy damage-taken count | `0` | `>= 3` | Enemy slots with slot damage-taken pressure `>= 0.822`. |
+| High-HP count | `0` | `>= 3` | Enemy champions with static level-18 HP `>= 2478.5`. |
+| Focus HP tier | `<= 2309.0` | `>= 2478.5` | Static champion level-18 HP. |
+| Ranged count | `<= 1` | `>= 4` | Static `attackRange_flat > 250` as ranged. |
+| Same-role range | `<= 250` | `> 250` | Static attack range for the lane opponent. |
+| Skirmish-ally count | `0` | `>= 2` | Gwen, Jax, Irelia, Fiora, Udyr, and XinZhao on the focus team. |
 
-The audit is model-aligned: bins use draft-time `identity_context` values that
-the model can see. It covers all train/val/test side rows (`2,862,626` rows).
-Post-game realized damage-share slices are excluded because the cache has no
-match id or post-game damage columns to join back to predictions.
+## Gap Summary
 
-## Production Metrics
+| Section | Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE |
+|---|---:|---:|---:|---:|---:|
+| Headline Trajectory Audit Tables | 9 | 43 | 1.28 pp | 5.49 pp | 3.01 pp^2 |
+| Richer Composition Trajectory Tables | 13 | 52 | 1.41 pp | 6.90 pp | 4.08 pp^2 |
+| Retained Prior And User-Requested Trajectory Tables | 12 | 53 | 1.01 pp | 5.51 pp | 2.17 pp^2 |
+| Inspected Lower-Signal Trajectory Tables | 4 | 16 | 0.72 pp | 4.39 pp | 1.74 pp^2 |
 
-| Split | Accuracy | Threshold Acc | AUC | NLL | Brier | ECE |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| train | 0.5735 | 0.5710 | 0.6038 | 0.6747 | 0.2410 | 0.0037 |
-| val | 0.5750 | 0.5779 | 0.6014 | 0.6749 | 0.2411 | 0.0252 |
-| test | 0.5717 | 0.5743 | 0.5972 | 0.6763 | 0.2418 | 0.0222 |
+## Headline Trajectory Audit Tables
 
-Selected checkpoint: epoch `3`, validation threshold `0.528`.
+| Audit | Bin 1 | Bin 2 | Bin 3 | Bin 4 | Bin 5 | Empirical effect | HGNN effect | Read |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Yone TOP `on_hit` vs enemy siege | `<= 0.441`<br/>n=1,184<br/>emp=41.72%<br/>HGNN=40.69%<br/>gap=-1.04 pp | `0.441-0.471`<br/>n=956<br/>emp=35.88%<br/>HGNN=35.48%<br/>gap=-0.40 pp | `0.471-0.499`<br/>n=949<br/>emp=32.56%<br/>HGNN=32.99%<br/>gap=+0.43 pp | `0.499-0.530`<br/>n=830<br/>emp=33.01%<br/>HGNN=31.04%<br/>gap=-1.97 pp | `>= 0.530`<br/>n=845<br/>emp=25.92%<br/>HGNN=28.84%<br/>gap=+2.92 pp | -15.81 pp | -11.85 pp | Melee carry into siege and poke. |
+| Graves JUNGLE `lethality` vs enemy damage | `<= 0.739`<br/>n=4,165<br/>emp=40.67%<br/>HGNN=38.67%<br/>gap=-2.00 pp | `0.739-0.764`<br/>n=3,431<br/>emp=32.96%<br/>HGNN=33.07%<br/>gap=+0.11 pp | `0.764-0.785`<br/>n=2,953<br/>emp=29.90%<br/>HGNN=31.43%<br/>gap=+1.53 pp | `0.785-0.813`<br/>n=2,842<br/>emp=28.68%<br/>HGNN=30.29%<br/>gap=+1.62 pp | `>= 0.813`<br/>n=2,284<br/>emp=26.05%<br/>HGNN=29.09%<br/>gap=+3.04 pp | -14.62 pp | -9.59 pp | Burst jungler into high enemy damage. |
+| Yone MIDDLE `on_hit` vs enemy siege | `<= 0.441`<br/>n=1,349<br/>emp=42.92%<br/>HGNN=41.04%<br/>gap=-1.88 pp | `0.441-0.471`<br/>n=1,094<br/>emp=35.01%<br/>HGNN=35.34%<br/>gap=+0.33 pp | `0.471-0.499`<br/>n=1,139<br/>emp=32.92%<br/>HGNN=32.94%<br/>gap=+0.02 pp | `0.499-0.530`<br/>n=989<br/>emp=29.22%<br/>HGNN=31.67%<br/>gap=+2.45 pp | `>= 0.530`<br/>n=968<br/>emp=28.82%<br/>HGNN=29.57%<br/>gap=+0.75 pp | -14.10 pp | -11.47 pp | Same melee-carry pattern across lane. |
+| Swain UTILITY `ap_off_tank` vs enemy scaling | `<= 0.829`<br/>n=1,151<br/>emp=50.48%<br/>HGNN=51.67%<br/>gap=+1.19 pp | `0.829-0.841`<br/>n=1,023<br/>emp=44.87%<br/>HGNN=46.45%<br/>gap=+1.58 pp | `0.841-0.852`<br/>n=988<br/>emp=44.74%<br/>HGNN=44.09%<br/>gap=-0.65 pp | `0.852-0.863`<br/>n=901<br/>emp=40.40%<br/>HGNN=42.90%<br/>gap=+2.50 pp | `>= 0.863`<br/>n=839<br/>emp=37.19%<br/>HGNN=42.68%<br/>gap=+5.49 pp | -13.29 pp | -8.99 pp | Drain support into scaling enemies. |
+| Nautilus UTILITY `mr_tank` with ally damage | `<= 0.739`<br/>n=7,027<br/>emp=44.46%<br/>HGNN=45.18%<br/>gap=+0.72 pp | `0.739-0.764`<br/>n=7,616<br/>emp=47.65%<br/>HGNN=47.34%<br/>gap=-0.31 pp | `0.764-0.785`<br/>n=7,512<br/>emp=49.52%<br/>HGNN=49.05%<br/>gap=-0.47 pp | `0.785-0.813`<br/>n=7,393<br/>emp=50.90%<br/>HGNN=50.27%<br/>gap=-0.63 pp | `>= 0.813`<br/>n=2,888<br/>emp=55.16%<br/>HGNN=52.67%<br/>gap=-2.49 pp | +10.70 pp | +7.50 pp | Engage support with damage behind it. |
+| Galio MIDDLE `mr_tank` vs enemy magic | `<= 0.373`<br/>n=2,045<br/>emp=38.63%<br/>HGNN=42.61%<br/>gap=+3.98 pp | `0.373-0.423`<br/>n=2,734<br/>emp=41.51%<br/>HGNN=43.14%<br/>gap=+1.63 pp | `0.423-0.486`<br/>n=3,300<br/>emp=41.52%<br/>HGNN=43.65%<br/>gap=+2.14 pp | `0.486-0.549`<br/>n=4,798<br/>emp=43.41%<br/>HGNN=43.41%<br/>gap=-0.00 pp | `>= 0.549`<br/>n=6,179<br/>emp=47.74%<br/>HGNN=47.58%<br/>gap=-0.16 pp | +9.11 pp | +4.97 pp | Anti-magic tank itemization. |
+| Malphite TOP `ar_tank` vs enemy physical | `<= 0.387`<br/>n=7,668<br/>emp=44.98%<br/>HGNN=47.13%<br/>gap=+2.15 pp | `0.387-0.448`<br/>n=9,238<br/>emp=46.83%<br/>HGNN=47.48%<br/>gap=+0.65 pp | `0.448-0.508`<br/>n=12,809<br/>emp=49.44%<br/>HGNN=49.64%<br/>gap=+0.19 pp | `0.508-0.557`<br/>n=15,162<br/>emp=51.35%<br/>HGNN=51.37%<br/>gap=+0.02 pp | `>= 0.557`<br/>n=16,773<br/>emp=54.30%<br/>HGNN=53.98%<br/>gap=-0.31 pp | +9.32 pp | +6.85 pp | Armor tank into AD-heavy enemies. |
+| Swain MIDDLE any build vs enemy range | `<= 1`<br/>n=1,802<br/>emp=57.77%<br/>HGNN=56.83%<br/>gap=-0.94 pp | `2`<br/>n=6,414<br/>emp=52.15%<br/>HGNN=53.34%<br/>gap=+1.19 pp | `3`<br/>n=7,056<br/>emp=50.35%<br/>HGNN=51.01%<br/>gap=+0.65 pp | `>= 4`<br/>n=1,717<br/>emp=48.51%<br/>HGNN=49.25%<br/>gap=+0.74 pp | N/A | -9.25 pp | -7.58 pp | Static range pressure on short-range battlemage. |
+| Nilah BOTTOM any build vs enemy range | `<= 1`<br/>n=2,368<br/>emp=58.99%<br/>HGNN=56.81%<br/>gap=-2.18 pp | `2`<br/>n=9,098<br/>emp=54.21%<br/>HGNN=54.17%<br/>gap=-0.04 pp | `3`<br/>n=10,090<br/>emp=52.77%<br/>HGNN=52.68%<br/>gap=-0.09 pp | `>= 4`<br/>n=2,476<br/>emp=50.53%<br/>HGNN=52.16%<br/>gap=+1.63 pp | N/A | -8.47 pp | -4.66 pp | Melee bot lane into range-heavy teams. |
 
-## Conventions
+## Richer Composition Trajectory Tables
 
-| Term | Definition |
-| --- | --- |
-| `Band` | Global side-row quintile band for the continuous context axis: `0-20`, `20-40`, `40-60`, `60-80`, or `80-100`. |
-| `Emp WR` | Actual focus-side win rate. |
-| `Model WR` | Mean predicted focus-side win probability. |
-| `Base WR` | Mean model probability with the context residual removed. |
-| `Gap` | `Model WR - Emp WR`. |
-| `Effect` | `80-100` band WR minus `0-20` band WR unless the table says `low-high`. |
-| `Delta gap` | `Model effect - Emp effect`. |
+| Audit | Bin 1 | Bin 2 | Bin 3 | Bin 4 | Bin 5 | Empirical effect | HGNN effect | Read |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Swain BOTTOM `ability_power` vs enemy frontline count | `0`<br/>n=5,420<br/>emp=47.79%<br/>HGNN=49.33%<br/>gap=+1.55 pp | `1`<br/>n=9,537<br/>emp=50.98%<br/>HGNN=51.71%<br/>gap=+0.73 pp | `2`<br/>n=5,157<br/>emp=54.59%<br/>HGNN=54.94%<br/>gap=+0.35 pp | `>= 3`<br/>n=1,127<br/>emp=61.22%<br/>HGNN=59.71%<br/>gap=-1.52 pp | N/A | +13.44 pp | +10.38 pp | Swain gets better as enemies add durable targets. |
+| Swain MIDDLE any build vs enemy frontline count | `0`<br/>n=4,318<br/>emp=47.99%<br/>HGNN=49.81%<br/>gap=+1.83 pp | `1`<br/>n=7,532<br/>emp=50.50%<br/>HGNN=51.54%<br/>gap=+1.03 pp | `2`<br/>n=4,221<br/>emp=55.86%<br/>HGNN=54.80%<br/>gap=-1.07 pp | `>= 3`<br/>n=918<br/>emp=58.61%<br/>HGNN=59.28%<br/>gap=+0.67 pp | N/A | +10.62 pp | +9.47 pp | Same Swain anti-frontline pattern mid. |
+| Swain UTILITY any build vs enemy frontline count | `0`<br/>n=5,620<br/>emp=45.02%<br/>HGNN=46.14%<br/>gap=+1.13 pp | `1`<br/>n=9,781<br/>emp=46.98%<br/>HGNN=47.56%<br/>gap=+0.58 pp | `2`<br/>n=5,060<br/>emp=49.82%<br/>HGNN=49.98%<br/>gap=+0.16 pp | `>= 3`<br/>n=959<br/>emp=54.43%<br/>HGNN=54.01%<br/>gap=-0.42 pp | N/A | +9.41 pp | +7.86 pp | Support Swain also improves into frontline-heavy teams. |
+| Lillia JUNGLE `ap_off_tank` vs enemy frontline count | `0`<br/>n=3,887<br/>emp=43.74%<br/>HGNN=45.04%<br/>gap=+1.30 pp | `1`<br/>n=7,222<br/>emp=46.36%<br/>HGNN=47.38%<br/>gap=+1.02 pp | `2`<br/>n=4,009<br/>emp=51.01%<br/>HGNN=50.42%<br/>gap=-0.59 pp | `>= 3`<br/>n=811<br/>emp=56.60%<br/>HGNN=54.93%<br/>gap=-1.66 pp | N/A | +12.86 pp | +9.90 pp | Sustained AP skirmisher into beefy teams. |
+| Morgana UTILITY `ability_power` vs enemy frontline count | `0`<br/>n=6,554<br/>emp=45.65%<br/>HGNN=45.98%<br/>gap=+0.33 pp | `1`<br/>n=11,385<br/>emp=48.34%<br/>HGNN=47.74%<br/>gap=-0.60 pp | `2`<br/>n=5,581<br/>emp=51.98%<br/>HGNN=50.17%<br/>gap=-1.81 pp | `>= 3`<br/>n=1,081<br/>emp=56.71%<br/>HGNN=54.06%<br/>gap=-2.65 pp | N/A | +11.06 pp | +8.08 pp | Zone and control support benefits when enemies walk into space. |
+| Vayne BOTTOM `on_hit` vs enemy frontline count | `0`<br/>n=6,867<br/>emp=48.45%<br/>HGNN=49.25%<br/>gap=+0.80 pp | `1`<br/>n=13,525<br/>emp=49.47%<br/>HGNN=50.56%<br/>gap=+1.09 pp | `2`<br/>n=7,822<br/>emp=52.26%<br/>HGNN=52.11%<br/>gap=-0.15 pp | `>= 3`<br/>n=1,685<br/>emp=59.29%<br/>HGNN=55.04%<br/>gap=-4.25 pp | N/A | +10.84 pp | +5.78 pp | Classic anti-tank marksman pattern. |
+| Alistar UTILITY `ar_tank` vs enemy burst count | `0`<br/>n=7,064<br/>emp=53.67%<br/>HGNN=52.95%<br/>gap=-0.72 pp | `1`<br/>n=14,117<br/>emp=51.77%<br/>HGNN=51.69%<br/>gap=-0.08 pp | `2`<br/>n=5,754<br/>emp=50.16%<br/>HGNN=49.86%<br/>gap=-0.30 pp | `>= 3`<br/>n=791<br/>emp=40.96%<br/>HGNN=47.87%<br/>gap=+6.90 pp | N/A | -12.71 pp | -5.08 pp | Durable engage support punished by multiple burst threats. |
+| Sion TOP `mr_tank` vs enemy burst count | `0`<br/>n=3,307<br/>emp=51.22%<br/>HGNN=51.44%<br/>gap=+0.22 pp | `1`<br/>n=6,146<br/>emp=49.77%<br/>HGNN=49.60%<br/>gap=-0.17 pp | `2`<br/>n=3,263<br/>emp=47.20%<br/>HGNN=47.36%<br/>gap=+0.17 pp | `>= 3`<br/>n=581<br/>emp=41.82%<br/>HGNN=45.36%<br/>gap=+3.53 pp | N/A | -9.40 pp | -6.08 pp | High-HP tank loses into concentrated burst threats. |
+| Qiyana JUNGLE `lethality` vs enemy burst count | `0`<br/>n=10,534<br/>emp=49.17%<br/>HGNN=47.64%<br/>gap=-1.53 pp | `1`<br/>n=19,199<br/>emp=47.47%<br/>HGNN=46.27%<br/>gap=-1.20 pp | `2`<br/>n=7,731<br/>emp=45.62%<br/>HGNN=44.98%<br/>gap=-0.64 pp | `>= 3`<br/>n=1,021<br/>emp=39.37%<br/>HGNN=43.47%<br/>gap=+4.10 pp | N/A | -9.80 pp | -4.17 pp | Assassin jungler into enemy burst stacking. |
+| Rell UTILITY `utility_protection` vs enemy burst count | `0`<br/>n=8,589<br/>emp=54.94%<br/>HGNN=53.69%<br/>gap=-1.26 pp | `1`<br/>n=15,585<br/>emp=51.69%<br/>HGNN=52.18%<br/>gap=+0.49 pp | `2`<br/>n=6,396<br/>emp=51.09%<br/>HGNN=50.86%<br/>gap=-0.24 pp | `>= 3`<br/>n=883<br/>emp=45.64%<br/>HGNN=48.96%<br/>gap=+3.32 pp | N/A | -9.30 pp | -4.73 pp | All-in support punished by burst-heavy enemies. |
+| Corki BOTTOM `crit` vs enemy burst count | `0`<br/>n=10,342<br/>emp=54.27%<br/>HGNN=53.12%<br/>gap=-1.15 pp | `1`<br/>n=20,817<br/>emp=51.80%<br/>HGNN=51.70%<br/>gap=-0.11 pp | `2`<br/>n=9,139<br/>emp=49.94%<br/>HGNN=50.15%<br/>gap=+0.21 pp | `>= 3`<br/>n=1,285<br/>emp=45.37%<br/>HGNN=48.25%<br/>gap=+2.88 pp | N/A | -8.90 pp | -4.87 pp | Fragile carry into burst-heavy enemies. |
+| Malphite TOP `ar_tank` vs heavy damage-taken count | `0`<br/>n=15,788<br/>emp=53.19%<br/>HGNN=52.87%<br/>gap=-0.32 pp | `1`<br/>n=29,695<br/>emp=50.09%<br/>HGNN=50.65%<br/>gap=+0.56 pp | `2`<br/>n=14,524<br/>emp=48.42%<br/>HGNN=48.57%<br/>gap=+0.15 pp | `>= 3`<br/>n=1,643<br/>emp=42.42%<br/>HGNN=46.16%<br/>gap=+3.74 pp | N/A | -10.76 pp | -6.71 pp | Armor tank loses into teams with multiple high-soak targets. |
+| Poppy JUNGLE any build vs enemy high-HP count | `0`<br/>n=1,048<br/>emp=46.37%<br/>HGNN=48.59%<br/>gap=+2.22 pp | `1`<br/>n=2,200<br/>emp=48.55%<br/>HGNN=49.96%<br/>gap=+1.41 pp | `2`<br/>n=1,751<br/>emp=46.60%<br/>HGNN=51.10%<br/>gap=+4.50 pp | `>= 3`<br/>n=679<br/>emp=56.70%<br/>HGNN=52.62%<br/>gap=-4.09 pp | N/A | +10.33 pp | +4.03 pp | Anti-dash/control jungler into high-HP enemy teams. |
 
-Continuous bands are computed globally before identity/build filters are
-applied. Discrete count axes keep count bins such as `0`, `1`, and `>=2`. WR,
-gaps, and effects are percentage points.
+## Retained Prior And User-Requested Trajectory Tables
 
-## Summary
+| Audit | Bin 1 | Bin 2 | Bin 3 | Bin 4 | Bin 5 | Empirical effect | HGNN effect | Read |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Malphite all roles `ar_tank` vs enemy physical | `<= 0.387`<br/>n=10,529<br/>emp=45.48%<br/>HGNN=47.48%<br/>gap=+2.00 pp | `0.387-0.448`<br/>n=13,017<br/>emp=46.88%<br/>HGNN=47.60%<br/>gap=+0.72 pp | `0.448-0.508`<br/>n=16,829<br/>emp=49.06%<br/>HGNN=49.78%<br/>gap=+0.71 pp | `0.508-0.557`<br/>n=19,526<br/>emp=50.86%<br/>HGNN=51.34%<br/>gap=+0.48 pp | `>= 0.557`<br/>n=22,143<br/>emp=54.42%<br/>HGNN=54.04%<br/>gap=-0.38 pp | +8.94 pp | +6.56 pp | Original armor-stack audit, retained beyond TOP-only. |
+| Galio all roles `mr_tank` vs enemy magic | `<= 0.373`<br/>n=2,182<br/>emp=39.05%<br/>HGNN=42.97%<br/>gap=+3.92 pp | `0.373-0.423`<br/>n=2,969<br/>emp=41.93%<br/>HGNN=43.50%<br/>gap=+1.57 pp | `0.423-0.486`<br/>n=3,637<br/>emp=42.10%<br/>HGNN=44.18%<br/>gap=+2.09 pp | `0.486-0.549`<br/>n=5,566<br/>emp=43.96%<br/>HGNN=44.04%<br/>gap=+0.07 pp | `>= 0.549`<br/>n=7,642<br/>emp=48.59%<br/>HGNN=48.47%<br/>gap=-0.12 pp | +9.54 pp | +5.50 pp | Original anti-magic tank family, broader than MIDDLE-only. |
+| Chogath all roles `mr_tank` vs enemy magic | `<= 0.373`<br/>n=486<br/>emp=46.30%<br/>HGNN=50.40%<br/>gap=+4.11 pp | `0.373-0.423`<br/>n=665<br/>emp=44.96%<br/>HGNN=50.47%<br/>gap=+5.51 pp | `0.423-0.486`<br/>n=1,133<br/>emp=49.78%<br/>HGNN=50.47%<br/>gap=+0.69 pp | `0.486-0.549`<br/>n=2,076<br/>emp=49.47%<br/>HGNN=50.45%<br/>gap=+0.98 pp | `>= 0.549`<br/>n=3,353<br/>emp=53.50%<br/>HGNN=53.54%<br/>gap=+0.04 pp | +7.21 pp | +3.14 pp | Smaller support, but unique scaling-tank anti-magic case. |
+| Nautilus all roles `ar_tank` vs enemy physical | `<= 0.387`<br/>n=10,135<br/>emp=46.82%<br/>HGNN=47.53%<br/>gap=+0.71 pp | `0.387-0.448`<br/>n=14,076<br/>emp=46.57%<br/>HGNN=46.79%<br/>gap=+0.22 pp | `0.448-0.508`<br/>n=18,450<br/>emp=48.50%<br/>HGNN=48.57%<br/>gap=+0.06 pp | `0.508-0.557`<br/>n=19,707<br/>emp=49.60%<br/>HGNN=49.22%<br/>gap=-0.37 pp | `>= 0.557`<br/>n=21,520<br/>emp=51.56%<br/>HGNN=50.78%<br/>gap=-0.78 pp | +4.74 pp | +3.25 pp | Physical-heavy enemy teams remain a support-tank check. |
+| Darius TOP any build vs enemy range count | `<= 1`<br/>n=7,151<br/>emp=52.38%<br/>HGNN=52.17%<br/>gap=-0.22 pp | `2`<br/>n=28,731<br/>emp=49.50%<br/>HGNN=50.37%<br/>gap=+0.88 pp | `3`<br/>n=30,943<br/>emp=49.41%<br/>HGNN=49.24%<br/>gap=-0.17 pp | `>= 4`<br/>n=7,690<br/>emp=47.71%<br/>HGNN=48.18%<br/>gap=+0.47 pp | N/A | -4.67 pp | -3.98 pp | Static team range pressure, stronger than lane-only range. |
+| Darius TOP any build vs same-role range | `<= 250`<br/>n=63,492<br/>emp=49.98%<br/>HGNN=50.06%<br/>gap=+0.07 pp | `> 250`<br/>n=11,023<br/>emp=47.09%<br/>HGNN=48.67%<br/>gap=+1.57 pp | N/A | N/A | N/A | -2.89 pp | -1.39 pp | User-requested static melee/ranged lane audit. |
+| MasterYi JUNGLE any build vs enemy hard CC | `0`<br/>n=17,755<br/>emp=53.24%<br/>HGNN=54.12%<br/>gap=+0.88 pp | `1`<br/>n=27,265<br/>emp=52.22%<br/>HGNN=52.87%<br/>gap=+0.65 pp | `2`<br/>n=12,667<br/>emp=51.29%<br/>HGNN=51.84%<br/>gap=+0.55 pp | `>= 3`<br/>n=2,544<br/>emp=50.63%<br/>HGNN=51.86%<br/>gap=+1.23 pp | N/A | -2.61 pp | -2.26 pp | User-requested low-CC audit; unique even though gap is modest. |
+| Selected enchanters UTILITY with skirmish allies | `0`<br/>n=382,693<br/>emp=50.30%<br/>HGNN=50.68%<br/>gap=+0.37 pp | `1`<br/>n=73,328<br/>emp=52.24%<br/>HGNN=52.06%<br/>gap=-0.18 pp | `>= 2`<br/>n=3,338<br/>emp=52.97%<br/>HGNN=53.00%<br/>gap=+0.03 pp | N/A | N/A | +2.66 pp | +2.32 pp | Original enchanter-with-skirmishers synergy probe. |
+| Low own-damage teams vs enemy heal/shield | `<= 0.028`<br/>n=114,704<br/>emp=49.67%<br/>HGNN=50.44%<br/>gap=+0.76 pp | `0.028-0.077`<br/>n=116,203<br/>emp=48.25%<br/>HGNN=48.88%<br/>gap=+0.63 pp | `0.077-0.200`<br/>n=111,021<br/>emp=47.38%<br/>HGNN=47.54%<br/>gap=+0.16 pp | `0.200-0.202`<br/>n=120,704<br/>emp=47.52%<br/>HGNN=47.55%<br/>gap=+0.03 pp | `>= 0.202`<br/>n=117,404<br/>emp=47.48%<br/>HGNN=47.72%<br/>gap=+0.23 pp | -2.19 pp | -2.72 pp | Original low-damage into sustain audit. |
+| Sion TOP `ad_off_tank` vs enemy damage | `<= 0.739`<br/>n=956<br/>emp=55.33%<br/>HGNN=53.09%<br/>gap=-2.24 pp | `0.739-0.764`<br/>n=938<br/>emp=53.94%<br/>HGNN=51.83%<br/>gap=-2.11 pp | `0.764-0.785`<br/>n=912<br/>emp=51.86%<br/>HGNN=51.24%<br/>gap=-0.62 pp | `0.785-0.813`<br/>n=1,090<br/>emp=51.19%<br/>HGNN=51.91%<br/>gap=+0.72 pp | `>= 0.813`<br/>n=1,022<br/>emp=53.91%<br/>HGNN=52.39%<br/>gap=-1.53 pp | -1.42 pp | -0.71 pp | Retained as a tank-into-damage pressure sanity check. |
+| DrMundo all roles `ad_off_tank` vs enemy magic | `<= 0.373`<br/>n=1,390<br/>emp=62.37%<br/>HGNN=60.62%<br/>gap=-1.75 pp | `0.373-0.423`<br/>n=1,467<br/>emp=60.67%<br/>HGNN=60.68%<br/>gap=+0.01 pp | `0.423-0.486`<br/>n=1,593<br/>emp=62.59%<br/>HGNN=60.58%<br/>gap=-2.01 pp | `0.486-0.549`<br/>n=1,855<br/>emp=58.33%<br/>HGNN=59.42%<br/>gap=+1.09 pp | `>= 0.549`<br/>n=1,701<br/>emp=63.67%<br/>HGNN=61.50%<br/>gap=-2.17 pp | +1.29 pp | +0.88 pp | Original Mundo magic-share probe, low gap but distinct champion. |
+| DrMundo all roles `mr_tank` vs enemy magic | `<= 0.373`<br/>n=1,540<br/>emp=51.23%<br/>HGNN=50.16%<br/>gap=-1.07 pp | `0.373-0.423`<br/>n=2,134<br/>emp=50.89%<br/>HGNN=50.13%<br/>gap=-0.76 pp | `0.423-0.486`<br/>n=3,101<br/>emp=49.08%<br/>HGNN=49.76%<br/>gap=+0.68 pp | `0.486-0.549`<br/>n=5,532<br/>emp=48.70%<br/>HGNN=49.75%<br/>gap=+1.05 pp | `>= 0.549`<br/>n=8,072<br/>emp=52.12%<br/>HGNN=52.99%<br/>gap=+0.87 pp | +0.88 pp | +2.83 pp | Retained to compare MR-tank Mundo against Galio/Chogath. |
 
-| Context | Axis | Direction | Low band | High band | Emp effect | Model effect | Delta gap | Read |
-| --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |
-| Malphite `ar_tank` | enemy physical share | high-low | `0-20` | `80-100` | +9.04 | +4.69 | -4.35 | under-fit, improved vs shared |
-| Malphite TOP `ar_tank` | enemy physical share | high-low | `0-20` | `80-100` | +9.47 | +4.58 | -4.89 | same pattern |
-| Low own damage into enemy heal/shield | pressure bands | high-low | `dmg0-20 heal0-20` | `dmg0-20 heal80-100` | -2.28 | -2.28 | +0.00 | captured |
-| Sion TOP `ad_off_tank` | enemy damage pressure | low-high | `0-20` | `80-100` | +1.49 | +3.13 | +1.64 | direction captured, tail over-swing |
-| DrMundo `ad_off_tank` | enemy magic share | high-low | `0-20` | `80-100` | +2.01 | +2.53 | +0.52 | captured |
-| DrMundo `mr_tank` | enemy magic share | high-low | `0-20` | `80-100` | +1.03 | +4.23 | +3.20 | over-reads top quintile |
-| Selected enchanters | skirmish allies | high-low | `0` | `>=2` | +2.67 | +2.71 | +0.04 | captured |
+## Inspected Lower-Signal Trajectory Tables
 
-## Malphite `ar_tank` Vs Enemy Physical Share
+| Audit | Bin 1 | Bin 2 | Bin 3 | Bin 4 | Bin 5 | Empirical effect | HGNN effect | Read |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Focus HP `<= 2309` vs enemy burst count | `0`<br/>n=880,508<br/>emp=51.83%<br/>HGNN=51.82%<br/>gap=-0.01 pp | `1`<br/>n=1,544,006<br/>emp=50.68%<br/>HGNN=50.81%<br/>gap=+0.12 pp | `2`<br/>n=634,311<br/>emp=49.54%<br/>HGNN=49.59%<br/>gap=+0.05 pp | `>= 3`<br/>n=85,831<br/>emp=47.62%<br/>HGNN=47.81%<br/>gap=+0.19 pp | N/A | -4.21 pp | -4.01 pp | Broad HP-vs-burst check; useful but lower signal than champion-specific rows. |
+| Focus HP `>= 2478` vs enemy burst count | `0`<br/>n=1,042,274<br/>emp=50.70%<br/>HGNN=50.49%<br/>gap=-0.21 pp | `1`<br/>n=1,844,824<br/>emp=49.44%<br/>HGNN=49.31%<br/>gap=-0.13 pp | `2`<br/>n=755,241<br/>emp=48.04%<br/>HGNN=48.13%<br/>gap=+0.09 pp | `>= 3`<br/>n=102,599<br/>emp=46.08%<br/>HGNN=46.43%<br/>gap=+0.35 pp | N/A | -4.62 pp | -4.06 pp | High-HP slots also drop into burst stacks, so champion/build specificity matters. |
+| Swain MIDDLE any build vs heavy damage-taken count | `0`<br/>n=3,997<br/>emp=51.31%<br/>HGNN=51.67%<br/>gap=+0.36 pp | `1`<br/>n=8,307<br/>emp=51.13%<br/>HGNN=51.97%<br/>gap=+0.84 pp | `2`<br/>n=4,192<br/>emp=52.91%<br/>HGNN=53.20%<br/>gap=+0.29 pp | `>= 3`<br/>n=493<br/>emp=51.93%<br/>HGNN=56.31%<br/>gap=+4.39 pp | N/A | +0.61 pp | +4.65 pp | Swain into heavy damage-taken count was inspected; tank/frontline count is much stronger. |
+| Swain BOTTOM `ability_power` vs heavy damage-taken count | `0`<br/>n=4,830<br/>emp=52.09%<br/>HGNN=51.92%<br/>gap=-0.17 pp | `1`<br/>n=10,201<br/>emp=51.17%<br/>HGNN=52.06%<br/>gap=+0.89 pp | `2`<br/>n=5,554<br/>emp=51.82%<br/>HGNN=52.84%<br/>gap=+1.03 pp | `>= 3`<br/>n=656<br/>emp=52.29%<br/>HGNN=54.64%<br/>gap=+2.35 pp | N/A | +0.20 pp | +2.72 pp | Same result bot: tank/frontline count is the better Swain audit. |
 
-Enemy physical share is the damage-weighted mean enemy `phys_offense_share`.
+## Overall Summary
 
-| Scope | Band | n | Emp WR | Model WR | Base WR | Gap |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| all roles | `0-20` | 9,871 | 45.34 | 47.22 | 48.53 | +1.88 |
-| all roles | `20-40` | 13,478 | 47.34 | 46.85 | 48.54 | -0.48 |
-| all roles | `40-60` | 16,369 | 49.16 | 48.60 | 49.46 | -0.56 |
-| all roles | `60-80` | 19,442 | 50.31 | 49.79 | 49.57 | -0.52 |
-| all roles | `80-100` | 22,884 | 54.38 | 51.91 | 49.36 | -2.47 |
-| TOP only | `0-20` | 7,161 | 44.88 | 47.32 | 48.57 | +2.44 |
-| TOP only | `20-40` | 9,695 | 47.34 | 46.92 | 48.58 | -0.42 |
-| TOP only | `40-60` | 12,449 | 49.47 | 48.72 | 49.56 | -0.75 |
-| TOP only | `60-80` | 15,076 | 50.76 | 49.95 | 49.73 | -0.81 |
-| TOP only | `80-100` | 17,269 | 54.35 | 51.90 | 49.38 | -2.44 |
+| Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE |
+|---:|---:|---:|---:|---:|
+| 38 | 164 | 1.18 pp | 6.90 pp | 2.96 pp^2 |
 
-The conditioned head moves in the right direction but still under-fits Malphite
-against high-physical enemy teams.
-
-## Damage Into Enemy Heal/Shield
-
-Own damage and enemy heal/shield are mean team `identity_context` pressure axes.
-
-| Focus damage band | Enemy heal/shield band | n | Emp WR | Model WR | Base WR | Gap |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `0-20` | `0-20` | 113,731 | 49.68 | 49.44 | 51.02 | -0.24 |
-| `0-20` | `20-40` | 114,933 | 48.23 | 48.35 | 50.29 | +0.12 |
-| `0-20` | `40-60` | 113,775 | 47.58 | 47.54 | 49.58 | -0.05 |
-| `0-20` | `60-80` | 115,428 | 47.36 | 47.24 | 49.03 | -0.12 |
-| `0-20` | `80-100` | 114,658 | 47.40 | 47.16 | 49.00 | -0.24 |
-| `20-40` | `0-20` | 113,937 | 51.70 | 51.43 | 51.34 | -0.27 |
-| `20-40` | `20-40` | 114,294 | 50.26 | 50.35 | 50.64 | +0.10 |
-| `20-40` | `40-60` | 114,681 | 49.61 | 49.58 | 49.96 | -0.03 |
-| `20-40` | `60-80` | 115,002 | 49.07 | 49.13 | 49.37 | +0.06 |
-| `20-40` | `80-100` | 114,610 | 49.22 | 49.18 | 49.38 | -0.04 |
-| `40-60` | `0-20` | 114,037 | 52.26 | 52.17 | 51.48 | -0.09 |
-| `40-60` | `20-40` | 114,350 | 51.34 | 51.07 | 50.78 | -0.27 |
-| `40-60` | `40-60` | 114,937 | 50.28 | 50.33 | 50.14 | +0.06 |
-| `40-60` | `60-80` | 114,447 | 49.69 | 49.82 | 49.48 | +0.14 |
-| `40-60` | `80-100` | 114,753 | 49.88 | 49.92 | 49.54 | +0.04 |
-| `60-80` | `0-20` | 114,695 | 52.79 | 52.56 | 51.45 | -0.23 |
-| `60-80` | `20-40` | 114,250 | 51.41 | 51.43 | 50.77 | +0.02 |
-| `60-80` | `40-60` | 115,011 | 50.70 | 50.76 | 50.17 | +0.06 |
-| `60-80` | `60-80` | 113,884 | 49.86 | 50.13 | 49.43 | +0.28 |
-| `60-80` | `80-100` | 114,687 | 50.29 | 50.30 | 49.47 | +0.01 |
-| `80-100` | `0-20` | 116,125 | 51.90 | 51.91 | 50.71 | +0.01 |
-| `80-100` | `20-40` | 114,698 | 51.24 | 50.94 | 50.12 | -0.30 |
-| `80-100` | `40-60` | 114,109 | 50.05 | 50.20 | 49.50 | +0.16 |
-| `80-100` | `60-80` | 113,775 | 48.68 | 49.35 | 48.62 | +0.66 |
-| `80-100` | `80-100` | 113,819 | 49.52 | 49.70 | 48.75 | +0.18 |
-
-Low-damage teams lose `-2.28` empirical WR into the highest enemy heal/shield
-band; production predicts `-2.28`.
-
-## Sion TOP `ad_off_tank` Vs Enemy Damage Pressure
-
-Enemy damage is mean enemy `champion_damage_pressure`.
-
-| Band | n | Emp WR | Model WR | Base WR | Gap |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `0-20` | 948 | 55.49 | 54.25 | 51.47 | -1.23 |
-| `20-40` | 922 | 53.69 | 52.05 | 51.21 | -1.63 |
-| `40-60` | 946 | 52.22 | 51.50 | 51.07 | -0.72 |
-| `60-80` | 1,076 | 50.93 | 51.46 | 51.44 | +0.53 |
-| `80-100` | 1,026 | 54.00 | 51.12 | 51.67 | -2.87 |
-
-The expected Sion effect is low-high. The model captures that direction but
-over-swings the top quintile.
-
-## DrMundo Vs Enemy Magic Share
-
-Enemy magic share is the damage-weighted mean enemy `magic_offense_share`.
-
-| Build | Band | n | Emp WR | Model WR | Base WR | Gap |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `ad_off_tank` | `0-20` | 1,344 | 61.83 | 60.22 | 55.41 | -1.61 |
-| `ad_off_tank` | `20-40` | 1,526 | 60.42 | 60.20 | 56.11 | -0.22 |
-| `ad_off_tank` | `40-60` | 1,657 | 61.98 | 60.42 | 56.31 | -1.56 |
-| `ad_off_tank` | `60-80` | 1,803 | 59.29 | 60.61 | 56.08 | +1.32 |
-| `ad_off_tank` | `80-100` | 1,676 | 63.84 | 62.75 | 56.22 | -1.10 |
-| `mr_tank` | `0-20` | 1,305 | 51.03 | 49.46 | 49.01 | -1.58 |
-| `mr_tank` | `20-40` | 2,013 | 50.27 | 49.31 | 49.62 | -0.96 |
-| `mr_tank` | `40-60` | 3,329 | 48.96 | 49.91 | 50.00 | +0.94 |
-| `mr_tank` | `60-80` | 5,344 | 49.08 | 50.11 | 49.69 | +1.03 |
-| `mr_tank` | `80-100` | 8,388 | 52.06 | 53.69 | 50.22 | +1.63 |
-
-`ad_off_tank` is captured. `mr_tank` over-reads the highest enemy-magic band.
-
-## Enchanters With Skirmish-Heavy Allies
-
-Selected enchanters are Sona, Karma, Lulu, and Zilean in `UTILITY` with
-`utility_enchanter` or `utility_protection`. Skirmish-heavy allies are Gwen,
-Jax, Irelia, Fiora, Udyr, and XinZhao, counted in any focus-team role.
-
-| Support group | Skirmish allies | n | Emp WR | Model WR | Base WR | Gap |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| selected enchanters | 0 | 382,693 | 50.30 | 50.41 | 50.54 | +0.10 |
-| selected enchanters | 1 | 73,328 | 52.24 | 51.84 | 51.60 | -0.40 |
-| selected enchanters | `>=2` | 3,338 | 52.97 | 53.12 | 52.52 | +0.16 |
-| other utility supports | 0 | 1,033,024 | 50.55 | 50.52 | 50.55 | -0.02 |
-| other utility supports | 1 | 192,464 | 52.10 | 51.98 | 51.59 | -0.12 |
-| other utility supports | `>=2` | 8,392 | 52.40 | 53.42 | 52.68 | +1.03 |
-
-| Enchanter | Skirmish allies | n | Emp WR | Model WR | Base WR | Gap |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Sona | 0 | 71,304 | 53.27 | 53.12 | 52.83 | -0.15 |
-| Sona | 1 | 13,953 | 55.23 | 54.53 | 53.88 | -0.70 |
-| Sona | `>=2` | 625 | 55.04 | 55.88 | 54.79 | +0.84 |
-| Karma | 0 | 145,241 | 48.79 | 48.80 | 49.08 | +0.02 |
-| Karma | 1 | 27,958 | 50.70 | 50.20 | 50.12 | -0.51 |
-| Karma | `>=2` | 1,300 | 51.23 | 51.62 | 51.05 | +0.39 |
-| Lulu | 0 | 140,056 | 50.15 | 50.43 | 50.77 | +0.28 |
-| Lulu | 1 | 26,546 | 52.11 | 51.91 | 51.85 | -0.20 |
-| Lulu | `>=2` | 1,186 | 52.45 | 53.02 | 52.76 | +0.57 |
-| Zilean | 0 | 26,092 | 51.47 | 51.80 | 51.21 | +0.33 |
-| Zilean | 1 | 4,871 | 53.19 | 53.23 | 52.27 | +0.04 |
-| Zilean | `>=2` | 227 | 59.91 | 54.71 | 53.40 | -5.20 |
-
-## Armor Tanks Into Enemy Physical Share
-
-Enemy physical share uses global quintile bands. Rows are build `ar_tank`, all
-roles.
-
-| Champion | Band | n | Emp WR | Model WR | Base WR | Gap |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Maokai | `0-20` | 1,738 | 50.86 | 51.40 | 51.11 | +0.54 |
-| Maokai | `20-40` | 2,375 | 51.62 | 50.01 | 51.02 | -1.61 |
-| Maokai | `40-60` | 2,826 | 50.88 | 50.55 | 51.44 | -0.33 |
-| Maokai | `60-80` | 3,151 | 50.94 | 51.13 | 51.43 | +0.20 |
-| Maokai | `80-100` | 3,506 | 53.99 | 52.69 | 51.22 | -1.30 |
-| Malphite | `0-20` | 9,871 | 45.34 | 47.22 | 48.53 | +1.88 |
-| Malphite | `20-40` | 13,478 | 47.34 | 46.85 | 48.54 | -0.48 |
-| Malphite | `40-60` | 16,369 | 49.16 | 48.60 | 49.46 | -0.56 |
-| Malphite | `60-80` | 19,442 | 50.31 | 49.79 | 49.57 | -0.52 |
-| Malphite | `80-100` | 22,884 | 54.38 | 51.91 | 49.36 | -2.47 |
-| Sion | `0-20` | 8,459 | 50.07 | 49.45 | 49.90 | -0.61 |
-| Sion | `20-40` | 11,422 | 48.56 | 48.49 | 49.88 | -0.07 |
-| Sion | `40-60` | 13,123 | 49.26 | 49.08 | 50.42 | -0.19 |
-| Sion | `60-80` | 14,406 | 50.30 | 49.65 | 50.38 | -0.65 |
-| Sion | `80-100` | 15,342 | 51.54 | 50.97 | 49.95 | -0.57 |
-| Ornn | `0-20` | 7,549 | 51.87 | 50.17 | 50.95 | -1.71 |
-| Ornn | `20-40` | 10,221 | 49.56 | 49.42 | 51.07 | -0.15 |
-| Ornn | `40-60` | 12,404 | 50.96 | 50.16 | 51.63 | -0.80 |
-| Ornn | `60-80` | 13,696 | 51.38 | 50.49 | 51.34 | -0.89 |
-| Ornn | `80-100` | 13,774 | 52.66 | 51.69 | 50.85 | -0.97 |
-| Nautilus | `0-20` | 9,401 | 47.78 | 48.83 | 49.02 | +1.05 |
-| Nautilus | `20-40` | 14,275 | 46.94 | 47.72 | 48.84 | +0.78 |
-| Nautilus | `40-60` | 17,799 | 47.82 | 48.56 | 49.41 | +0.74 |
-| Nautilus | `60-80` | 20,243 | 49.88 | 49.24 | 49.43 | -0.64 |
-| Nautilus | `80-100` | 22,170 | 51.05 | 50.63 | 48.99 | -0.42 |
-| Shen | `0-20` | 5,628 | 49.02 | 48.60 | 48.46 | -0.43 |
-| Shen | `20-40` | 7,547 | 47.28 | 47.30 | 48.17 | +0.02 |
-| Shen | `40-60` | 9,420 | 48.79 | 48.12 | 48.85 | -0.67 |
-| Shen | `60-80` | 10,401 | 48.76 | 48.47 | 48.69 | -0.29 |
-| Shen | `80-100` | 11,274 | 50.51 | 49.67 | 48.22 | -0.84 |
-| Poppy | `0-20` | 4,407 | 49.65 | 50.20 | 50.47 | +0.55 |
-| Poppy | `20-40` | 5,773 | 49.64 | 49.09 | 50.51 | -0.56 |
-| Poppy | `40-60` | 6,677 | 51.10 | 49.86 | 50.94 | -1.24 |
-| Poppy | `60-80` | 7,547 | 50.87 | 50.45 | 50.93 | -0.41 |
-| Poppy | `80-100` | 8,169 | 52.76 | 51.86 | 50.50 | -0.90 |
-
-## MR Tanks Into Enemy Magic Share
-
-Enemy magic share uses global quintile bands. Rows are build `mr_tank`, all
-roles.
-
-| Champion | Band | n | Emp WR | Model WR | Base WR | Gap |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Galio | `0-20` | 1,866 | 38.69 | 42.26 | 44.96 | +3.57 |
-| Galio | `20-40` | 2,900 | 40.59 | 42.36 | 45.96 | +1.78 |
-| Galio | `40-60` | 3,754 | 41.48 | 42.78 | 46.26 | +1.30 |
-| Galio | `60-80` | 5,529 | 44.22 | 43.11 | 46.04 | -1.11 |
-| Galio | `80-100` | 7,947 | 48.91 | 47.09 | 46.94 | -1.82 |
-| Sion | `0-20` | 696 | 47.13 | 49.08 | 49.74 | +1.96 |
-| Sion | `20-40` | 1,281 | 47.23 | 48.94 | 50.58 | +1.71 |
-| Sion | `40-60` | 2,604 | 47.81 | 48.30 | 50.05 | +0.49 |
-| Sion | `60-80` | 5,052 | 48.75 | 48.48 | 49.76 | -0.28 |
-| Sion | `80-100` | 8,060 | 51.09 | 51.88 | 50.32 | +0.79 |
-| Ornn | `0-20` | 654 | 48.47 | 49.60 | 50.08 | +1.13 |
-| Ornn | `20-40` | 1,192 | 49.75 | 49.42 | 50.64 | -0.33 |
-| Ornn | `40-60` | 2,674 | 48.09 | 48.94 | 50.50 | +0.85 |
-| Ornn | `60-80` | 5,168 | 50.21 | 49.58 | 50.43 | -0.63 |
-| Ornn | `80-100` | 8,167 | 52.58 | 52.84 | 51.13 | +0.27 |
-| Chogath | `0-20` | 394 | 48.73 | 49.27 | 49.95 | +0.54 |
-| Chogath | `20-40` | 651 | 44.39 | 48.50 | 50.23 | +4.11 |
-| Chogath | `40-60` | 1,223 | 47.26 | 48.57 | 50.19 | +1.30 |
-| Chogath | `60-80` | 2,044 | 49.07 | 49.54 | 50.45 | +0.47 |
-| Chogath | `80-100` | 3,401 | 54.31 | 52.77 | 50.77 | -1.54 |
-| Shen | `0-20` | 705 | 46.81 | 47.43 | 47.11 | +0.62 |
-| Shen | `20-40` | 1,279 | 44.49 | 47.00 | 47.74 | +2.51 |
-| Shen | `40-60` | 2,544 | 46.54 | 47.31 | 48.10 | +0.77 |
-| Shen | `60-80` | 4,586 | 47.88 | 46.82 | 47.42 | -1.06 |
-| Shen | `80-100` | 7,065 | 50.09 | 50.08 | 48.11 | -0.01 |
-| Nautilus | `0-20` | 2,061 | 47.74 | 48.04 | 48.48 | +0.30 |
-| Nautilus | `20-40` | 3,839 | 48.14 | 48.06 | 49.22 | -0.08 |
-| Nautilus | `40-60` | 5,469 | 48.20 | 48.23 | 49.55 | +0.03 |
-| Nautilus | `60-80` | 8,546 | 48.17 | 47.65 | 48.77 | -0.52 |
-| Nautilus | `80-100` | 13,060 | 49.86 | 50.42 | 49.35 | +0.56 |
-| DrMundo | `0-20` | 1,305 | 51.03 | 49.46 | 49.01 | -1.58 |
-| DrMundo | `20-40` | 2,013 | 50.27 | 49.31 | 49.62 | -0.96 |
-| DrMundo | `40-60` | 3,329 | 48.96 | 49.91 | 50.00 | +0.94 |
-| DrMundo | `60-80` | 5,344 | 49.08 | 50.11 | 49.69 | +1.03 |
-| DrMundo | `80-100` | 8,388 | 52.06 | 53.69 | 50.22 | +1.63 |
-| Amumu | `0-20` | 294 | 49.66 | 49.60 | 51.56 | -0.06 |
-| Amumu | `20-40` | 512 | 49.02 | 49.67 | 52.03 | +0.65 |
-| Amumu | `40-60` | 754 | 48.01 | 48.77 | 51.62 | +0.76 |
-| Amumu | `60-80` | 1,233 | 50.12 | 48.75 | 51.22 | -1.38 |
-| Amumu | `80-100` | 2,102 | 49.86 | 51.87 | 51.49 | +2.01 |
-| Maokai | `0-20` | 231 | 49.78 | 49.29 | 49.66 | -0.49 |
-| Maokai | `20-40` | 414 | 53.14 | 49.96 | 51.08 | -3.18 |
-| Maokai | `40-60` | 689 | 50.07 | 49.30 | 50.56 | -0.77 |
-| Maokai | `60-80` | 1,170 | 49.91 | 49.30 | 50.14 | -0.61 |
-| Maokai | `80-100` | 1,918 | 51.30 | 52.60 | 50.73 | +1.30 |
-| Malphite | `0-20` | 630 | 48.89 | 46.14 | 47.23 | -2.75 |
-| Malphite | `20-40` | 1,210 | 46.12 | 45.57 | 47.59 | -0.55 |
-| Malphite | `40-60` | 2,717 | 47.00 | 44.88 | 47.51 | -2.12 |
-| Malphite | `60-80` | 5,955 | 45.10 | 44.55 | 47.10 | -0.55 |
-| Malphite | `80-100` | 10,282 | 46.90 | 46.92 | 47.27 | +0.02 |
+Gap MSE is `mean((HGNN_focus_WR - empirical_focus_WR)^2)` across populated threshold bins, rendered as percentage-points squared.

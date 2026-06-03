@@ -10,22 +10,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from app.ml.legacy_classification_runtime import (
-    IdentityContextLookup,
-    IdentityProfileLookup,
-    IdentitySemanticLookup,
-    RelationshipDetailLookup,
-)
 from app.ml.cache_layout import (
     CACHE_META_FILE,
-    IDENTITY_CONTEXT_DIM,
-    IDENTITY_CONTEXT_RAW_DIM,
-    IDENTITY_PROFILE_DIM,
-    IDENTITY_SEMANTIC_DIM,
     N_SYNERGIES_2VX,
-    RELATIONSHIP_DETAIL_DIM,
 )
 from app.ml.config import POSITIONS, DatasetConfig, TrainConfig
+from app.ml.encoder_sidecar import EncoderSidecarLookup
 from app.ml.priors import DEFAULT_MATCHUPS, DEFAULT_WIN_RATE, PriorTables, load_priors
 from app.ml.hgnn_model import (
     TEAM_PAIRS,
@@ -34,7 +24,6 @@ from app.ml.hgnn_model import (
     load_hgnn_model,
     resolve_device,
 )
-from app.core.utils.common import fit_last_dim
 from app.core.utils.smoothing import (
     smooth_rate_by_mode,
     smooth_ml_prior_features,
@@ -114,11 +103,8 @@ class WinRatePredictor:
         nested_pooling: bool,
         level_strengths: dict[str, list[float]],
         s2vx_ladder: tuple[str, ...],
+        encoder_sidecar: EncoderSidecarLookup | None,
         device: str,
-        identity_lookup: IdentitySemanticLookup | None = None,
-        profile_lookup: IdentityProfileLookup | None = None,
-        context_lookup: IdentityContextLookup | None = None,
-        m1v1_detail_lookup: RelationshipDetailLookup | None = None,
     ) -> None:
         self._model = model.to(device).eval()
         self._priors = priors
@@ -132,16 +118,8 @@ class WinRatePredictor:
         self._nested_pooling = nested_pooling
         self._level_strengths = level_strengths
         self._s2vx_ladder = s2vx_ladder
-        self._identity_lookup = identity_lookup or IdentitySemanticLookup.load()
-        self._profile_lookup = profile_lookup or IdentityProfileLookup.load()
-        self._context_lookup = context_lookup or IdentityContextLookup.load()
+        self._encoder_sidecar = encoder_sidecar
         self._use_relationship_integrations = bool(model.config.use_relationship_integrations)
-        self._use_m1v1_detail = bool(model.m1v1_detail_enabled)
-        self._m1v1_detail_lookup = (
-            m1v1_detail_lookup or RelationshipDetailLookup.load("m1v1")
-            if self._use_m1v1_detail
-            else None
-        )
         self._device = device
         # Identity-embedding mapping from the trained artifact's config.
         self._n_champions = model.config.n_champions
@@ -291,34 +269,6 @@ class WinRatePredictor:
         )
         raw = self._arrays_for_game(blue_tuples, red_tuples)
         tuples = blue_tuples + red_tuples
-        identity_semantic = self._identity_lookup.lookup_players(tuples).reshape(
-            1,
-            10,
-            self._identity_lookup.dim,
-        )
-        identity_profile = self._profile_lookup.lookup_players(tuples).reshape(
-            1,
-            10,
-            self._profile_lookup.dim,
-        )
-        m1v1_detail = None
-        if self._m1v1_detail_lookup is not None:
-            m1v1_detail = self._m1v1_detail_lookup.lookup_1v1_blue(blue_tuples, red_tuples).reshape(
-                1,
-                25,
-                self._m1v1_detail_lookup.dim,
-            )
-        identity_context = self._context_lookup.lookup_players(tuples).reshape(
-            1,
-            10,
-            self._context_lookup.dim,
-        )
-        identity_context_support = self._context_lookup.lookup_support(tuples).reshape(1, 10)
-        identity_context_raw = self._context_lookup.lookup_raw(tuples).reshape(
-            1,
-            10,
-            self._context_lookup.raw_dim,
-        )
         champion_id = np.array(
             [[c if 0 <= c < self._n_champions else self._n_champions for c, _, _ in tuples]],
             dtype=np.int64,
@@ -327,6 +277,10 @@ class WinRatePredictor:
             [[self._build_to_idx.get(b, self._n_builds) for _, _, b in tuples]],
             dtype=np.int64,
         )
+        sidecar_blocks: dict[str, np.ndarray] | None = None
+        sidecar_support: np.ndarray | None = None
+        if self._encoder_sidecar is not None:
+            sidecar_blocks, sidecar_support = self._encoder_sidecar.lookup_game_blocks(tuples)
         inputs = build_hgnn_inputs(
             champion_id=champion_id,
             build_id=build_id,
@@ -337,17 +291,17 @@ class WinRatePredictor:
             synergy_2vx=raw.get("synergy_2vx"),
             m1v1_cnt=raw.get("m1v1_cnt"),
             s2vx_cnt=raw.get("s2vx_cnt"),
-            include_relationship_features=self._use_relationship_integrations,
-            identity_semantic=fit_last_dim(identity_semantic, IDENTITY_SEMANTIC_DIM),
-            identity_profile=fit_last_dim(identity_profile, IDENTITY_PROFILE_DIM),
-            identity_context=fit_last_dim(identity_context, IDENTITY_CONTEXT_DIM),
-            identity_context_support=identity_context_support,
-            identity_context_raw=fit_last_dim(identity_context_raw, IDENTITY_CONTEXT_RAW_DIM),
-            m1v1_detail=(
-                fit_last_dim(m1v1_detail, RELATIONSHIP_DETAIL_DIM)
-                if m1v1_detail is not None
-                else None
+            identity_static_sidecar=(
+                None if sidecar_blocks is None else sidecar_blocks["static"]
             ),
+            identity_full_game_sidecar=(
+                None if sidecar_blocks is None else sidecar_blocks["full_game"]
+            ),
+            identity_temporal_sidecar=(
+                None if sidecar_blocks is None else sidecar_blocks["temporal"]
+            ),
+            identity_encoder_support=sidecar_support,
+            include_relationship_features=self._use_relationship_integrations,
             device=self._device,
         )
         with torch.no_grad():
@@ -368,6 +322,11 @@ def load_predictor(
         dataset_cfg.cache_dir,
         fallback_strength=dataset_cfg.smoothing_prior_strength,
     )
+    encoder_sidecar = (
+        EncoderSidecarLookup.load(dataset_cfg.encoder_sidecar_path)
+        if dataset_cfg.encoder_sidecar_path is not None
+        else None
+    )
 
     return WinRatePredictor(
         model,
@@ -382,5 +341,6 @@ def load_predictor(
         nested_pooling=nested_pooling,
         level_strengths=level_strengths,
         s2vx_ladder=s2vx_ladder,
+        encoder_sidecar=encoder_sidecar,
         device=device,
     )

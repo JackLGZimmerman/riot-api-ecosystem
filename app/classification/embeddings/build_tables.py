@@ -455,24 +455,31 @@ def _cmd(client, sql: str) -> None:
     client.command(sql)
 
 
+def _recreate(client, table: str, ddl: str) -> None:
+    _cmd(client, f"DROP TABLE IF EXISTS {table}")
+    _cmd(client, ddl)
+
+
 def build_classification_tables(*, include_context: bool = True) -> None:
     """(Re)materialise the full-game sufficient-statistic tables for every split."""
     client = get_client()
-    for ddl in (
-        _identity_ddl(),
-        _final_ddl(FINAL_BASE),
-        _final_ddl(_FINAL_STAGE),
-        _meta_ddl(),
+    for table, ddl in (
+        (IDENTITY_BASE, _identity_ddl()),
+        (FINAL_BASE, _final_ddl(FINAL_BASE)),
+        (_FINAL_STAGE, _final_ddl(_FINAL_STAGE)),
+        (META_TABLE, _meta_ddl()),
     ):
-        _cmd(client, ddl)
-    for table in (IDENTITY_BASE, FINAL_BASE, _FINAL_STAGE):
-        _cmd(client, f"TRUNCATE TABLE {table}")
+        _recreate(client, table, ddl)
     if include_context:
-        _cmd(client, _context_base_ddl())
-        _cmd(client, _context_stage_ddl(_TEAM_STAGE, TEAM_FEATURE_NAMES))
-        _cmd(client, _context_stage_ddl(_MATCHUP_STAGE, MATCHUP_FEATURE_NAMES))
-        for table in (CONTEXT_BASE, _TEAM_STAGE, _MATCHUP_STAGE):
-            _cmd(client, f"TRUNCATE TABLE {table}")
+        for table, ddl in (
+            (CONTEXT_BASE, _context_base_ddl()),
+            (_TEAM_STAGE, _context_stage_ddl(_TEAM_STAGE, TEAM_FEATURE_NAMES)),
+            (
+                _MATCHUP_STAGE,
+                _context_stage_ddl(_MATCHUP_STAGE, MATCHUP_FEATURE_NAMES),
+            ),
+        ):
+            _recreate(client, table, ddl)
 
     for split in SPLITS:
         logger.info("Building identity/final base for split=%s", split)
@@ -503,10 +510,12 @@ def build_classification_tables(*, include_context: bool = True) -> None:
 def build_temporal_table() -> None:
     """(Re)materialise temporal_identity_bins via staged, sharded scans."""
     client = get_client()
-    for ddl in (_bins_ddl(), _temporal_stat_ddl(_STAT_STAGE), _temporal_ev_ddl(_EV_STAGE)):
-        _cmd(client, ddl)
-    for table in (T.BINS_TABLE, _STAT_STAGE, _EV_STAGE):
-        _cmd(client, f"TRUNCATE TABLE {table}")
+    for table, ddl in (
+        (T.BINS_TABLE, _bins_ddl()),
+        (_STAT_STAGE, _temporal_stat_ddl(_STAT_STAGE)),
+        (_EV_STAGE, _temporal_ev_ddl(_EV_STAGE)),
+    ):
+        _recreate(client, table, ddl)
     bounds = _matchid_bounds(client, K_SHARDS)
     for split in SPLITS:
         logger.info("Building temporal bins for split=%s", split)

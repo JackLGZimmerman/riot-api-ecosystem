@@ -38,6 +38,7 @@ def test_default_embedding_config_uses_raw_and_derived_metrics() -> None:
     cfg = EmbeddingConfig()
 
     assert cfg.feature_set == raw_and_derived_metric_names()
+    assert cfg.include_context_features
 
 
 def test_build_level_matrix_materializes_derived_metrics_from_smoothed_sources() -> None:

@@ -15,19 +15,8 @@ from app.ml.cache_layout import (
     CACHE_FORMAT,
     CACHE_META_FILE,
     DISK_DTYPES,
-    IDENTITY_CONTEXT_DIM,
-    IDENTITY_CONTEXT_INTERP_DIM,
-    IDENTITY_CONTEXT_RAW_DIM,
-    IDENTITY_PROFILE_DIM,
-    IDENTITY_SEMANTIC_DIM,
-    RELATIONSHIP_DETAIL_DIM,
     array_paths,
-)
-from app.ml.legacy_classification_runtime import (
-    IdentityContextLookup,
-    IdentityProfileLookup,
-    IdentitySemanticLookup,
-    RelationshipDetailLookup,
+    sidecar_array_paths,
 )
 from app.ml.config import (
     DatasetConfig,
@@ -35,7 +24,8 @@ from app.ml.config import (
     POSITIONS,
     SYNERGY_2VX_LEVEL_TABLES,
 )
-from app.core.utils.common import TEAM_PAIRS, fit_last_dim
+from app.ml.encoder_sidecar import EncoderSidecarLookup
+from app.core.utils.common import TEAM_PAIRS
 from app.core.utils.smoothing import (
     build_group_sql,
     eb_strength_from_moments,
@@ -46,6 +36,7 @@ from clickhouse_connect.driver.exceptions import StreamFailureError
 from database.clickhouse.client import _local, get_client
 
 SPLITS = (("train", "train"), ("validation", "val"), ("test", "test"))
+SPLIT_ORDER = tuple(meta_split for _, meta_split in SPLITS)
 
 setup_logging_config()
 logger = logging.getLogger(__name__)
@@ -200,13 +191,38 @@ def _split_counts(cfg: DatasetConfig) -> dict[str, int]:
     }
 
 
-def _open_arrays(n_games: int, cache_dir: Path) -> dict[str, np.ndarray]:
+def _open_arrays(
+    n_games: int,
+    cache_dir: Path,
+    *,
+    sidecar_lookup: EncoderSidecarLookup | None = None,
+) -> dict[str, np.ndarray]:
     paths = array_paths(cache_dir)
     arrays: dict[str, np.ndarray] = {}
     for name, path in paths.items():
         shape = (n_games, *ARRAY_SHAPES[name])
         arrays[name] = np.lib.format.open_memmap(
             path, mode="w+", dtype=DISK_DTYPES[name], shape=shape
+        )
+    if sidecar_lookup is not None:
+        sidecar_paths = sidecar_array_paths(cache_dir)
+        dims = sidecar_lookup.dims
+        for name, dim in (
+            ("identity_static_sidecar", dims.static),
+            ("identity_full_game_sidecar", dims.full_game),
+            ("identity_temporal_sidecar", dims.temporal),
+        ):
+            arrays[name] = np.lib.format.open_memmap(
+                sidecar_paths[name],
+                mode="w+",
+                dtype=np.float32,
+                shape=(n_games, 10, int(dim)),
+            )
+        arrays["identity_encoder_support"] = np.lib.format.open_memmap(
+            sidecar_paths["identity_encoder_support"],
+            mode="w+",
+            dtype=np.float32,
+            shape=(n_games, 10),
         )
     return arrays
 
@@ -356,55 +372,42 @@ def _smoothed_features(
     }
 
 
-def _player_tuples(
-    champion_ids: np.ndarray,
-    build_ids: np.ndarray,
-    build_vocab: list[str],
-) -> list[tuple[int, str, str]]:
-    tuples: list[tuple[int, str, str]] = []
-    for idx, role in enumerate(POSITIONS * 2):
-        champion = int(champion_ids[idx])
-        build_idx = int(build_ids[idx])
-        build = build_vocab[build_idx] if 0 <= build_idx < len(build_vocab) else ""
-        tuples.append((champion, role, build))
-    return tuples
-
-
-def _classification_features(
+def _sidecar_features(
     raw: dict[str, np.ndarray],
     *,
+    sidecar_lookup: EncoderSidecarLookup,
     build_vocab: list[str],
-    identity_lookup: IdentitySemanticLookup,
-    profile_lookup: IdentityProfileLookup,
-    context_lookup: IdentityContextLookup,
-    m1v1_detail_lookup: RelationshipDetailLookup,
 ) -> dict[str, np.ndarray]:
-    n = raw["champion_id"].shape[0]
-    identity = np.zeros((n, 10, IDENTITY_SEMANTIC_DIM), dtype=np.float32)
-    profile = np.zeros((n, 10, IDENTITY_PROFILE_DIM), dtype=np.float32)
-    context = np.zeros((n, 10, IDENTITY_CONTEXT_DIM), dtype=np.float32)
-    context_support = np.zeros((n, 10), dtype=np.float32)
-    context_raw = np.zeros((n, 10, IDENTITY_CONTEXT_RAW_DIM), dtype=np.float32)
-    m1v1 = np.zeros((n, 25, RELATIONSHIP_DETAIL_DIM), dtype=np.float32)
-    champions = raw["champion_id"].astype(np.int64, copy=False)
-    builds = raw["build_id"].astype(np.int64, copy=False)
-    for row in range(n):
-        tuples = _player_tuples(champions[row], builds[row], build_vocab)
-        blue = tuples[:5]
-        red = tuples[5:]
-        identity[row] = fit_last_dim(identity_lookup.lookup_players(tuples), IDENTITY_SEMANTIC_DIM)
-        profile[row] = fit_last_dim(profile_lookup.lookup_players(tuples), IDENTITY_PROFILE_DIM)
-        context[row] = fit_last_dim(context_lookup.lookup_players(tuples), IDENTITY_CONTEXT_DIM)
-        context_support[row] = context_lookup.lookup_support(tuples)
-        context_raw[row] = fit_last_dim(context_lookup.lookup_raw(tuples), IDENTITY_CONTEXT_RAW_DIM)
-        m1v1[row] = fit_last_dim(m1v1_detail_lookup.lookup_1v1_blue(blue, red), RELATIONSHIP_DETAIL_DIM)
+    champion_id = raw["champion_id"].astype(np.int64, copy=False)
+    build_id = raw["build_id"].astype(np.int64, copy=False)
+    if champion_id.ndim != 2 or champion_id.shape[1] != 10:
+        raise ValueError("champion_id must have shape [games, 10] for sidecar lookup")
+    roles = tuple(POSITIONS) + tuple(POSITIONS)
+    flat: list[tuple[int, str, str]] = []
+    for champ_row, build_row in zip(champion_id, build_id, strict=True):
+        for slot, (champion, build_idx) in enumerate(zip(champ_row, build_row, strict=True)):
+            build_label = (
+                build_vocab[int(build_idx)]
+                if 0 <= int(build_idx) < len(build_vocab)
+                else ""
+            )
+            flat.append((int(champion), roles[slot], build_label))
+    blocks, support = sidecar_lookup.lookup_blocks(flat)
+    n_rows = int(champion_id.shape[0])
+    dims = sidecar_lookup.dims
     return {
-        "identity_semantic": identity,
-        "identity_profile": profile,
-        "identity_context": context,
-        "identity_context_support": context_support,
-        "identity_context_raw": context_raw,
-        "m1v1_detail": m1v1,
+        "identity_static_sidecar": blocks["static"].reshape(n_rows, 10, dims.static),
+        "identity_full_game_sidecar": blocks["full_game"].reshape(
+            n_rows,
+            10,
+            dims.full_game,
+        ),
+        "identity_temporal_sidecar": blocks["temporal"].reshape(
+            n_rows,
+            10,
+            dims.temporal,
+        ),
+        "identity_encoder_support": support.reshape(n_rows, 10),
     }
 
 
@@ -505,13 +508,10 @@ def _write_split(
     synergy_2vx_nobuild_dict: str,
     synergy_2vx_champ_dict: str,
     build_vocab_sql: str,
-    build_vocab: list[str],
     n_builds: int,
     key_build_expr: str,
-    identity_lookup: IdentitySemanticLookup,
-    profile_lookup: IdentityProfileLookup,
-    context_lookup: IdentityContextLookup,
-    m1v1_detail_lookup: RelationshipDetailLookup,
+    sidecar_lookup: EncoderSidecarLookup | None,
+    build_vocab: list[str],
 ) -> int:
     written = 0
     for raw in _stream_split(
@@ -543,16 +543,14 @@ def _write_split(
             nested_pooling=nested_pooling,
             level_strengths=level_strengths,
         )
-        block.update(
-            _classification_features(
-                raw,
-                build_vocab=build_vocab,
-                identity_lookup=identity_lookup,
-                profile_lookup=profile_lookup,
-                context_lookup=context_lookup,
-                m1v1_detail_lookup=m1v1_detail_lookup,
+        if sidecar_lookup is not None:
+            block.update(
+                _sidecar_features(
+                    raw,
+                    sidecar_lookup=sidecar_lookup,
+                    build_vocab=build_vocab,
+                )
             )
-        )
         start = offset + written
         for name, data in block.items():
             arrays[name][start : start + len(data)] = data
@@ -566,15 +564,36 @@ def _write_meta(
     splits: dict[str, int],
     identity: dict,
     level_strengths: dict[str, list[float]],
+    sidecar_lookup: EncoderSidecarLookup | None,
 ) -> Path:
+    split_counts = {name: int(splits[name]) for name in SPLIT_ORDER}
+    split_ranges: dict[str, dict[str, int]] = {}
+    offset = 0
+    for split_name in SPLIT_ORDER:
+        count = split_counts[split_name]
+        split_ranges[split_name] = {"start": offset, "stop": offset + count}
+        offset += count
+    if offset != int(n_games):
+        raise ValueError("Cache split counts do not match n_games; rebuild aborted.")
+
+    sidecar_meta = None
+    if sidecar_lookup is not None:
+        sidecar_meta = {
+            "path": str(cfg.encoder_sidecar_path),
+            "dims": sidecar_lookup.dims.as_dict(),
+            "metadata": sidecar_lookup.metadata,
+        }
     meta_path = cfg.cache_dir / CACHE_META_FILE
     meta_path.write_text(
         json.dumps(
             {
                 "format": CACHE_FORMAT,
                 "n_games": n_games,
-                "splits": splits,
+                "splits": split_counts,
+                "split_order": list(SPLIT_ORDER),
+                "split_ranges": split_ranges,
                 "identity": identity,
+                "identity_encoder_sidecar": sidecar_meta,
                 "smoothing": {
                     "prior_mean": cfg.smoothing_prior_mean,
                     "prior_strength": cfg.smoothing_prior_strength,
@@ -611,8 +630,13 @@ def build(cfg: DatasetConfig | None = None) -> Path:
 
     counts = _split_counts(cfg)
     n_games = sum(counts.values())
-    arrays = _open_arrays(n_games, cfg.cache_dir)
     n_champions, build_vocab = _identity_meta(cfg)
+    sidecar_lookup = (
+        EncoderSidecarLookup.load(cfg.encoder_sidecar_path)
+        if cfg.encoder_sidecar_path is not None
+        else None
+    )
+    arrays = _open_arrays(n_games, cfg.cache_dir, sidecar_lookup=sidecar_lookup)
     n_builds = len(build_vocab)
     build_vocab_sql = "[" + ",".join(f"'{b}'" for b in build_vocab) + "]"
     key_build_expr = (
@@ -625,21 +649,13 @@ def build(cfg: DatasetConfig | None = None) -> Path:
         if cfg.interaction_nested_pooling
         else {"m1v1": [cfg.smoothing_prior_strength], "s2vx": [cfg.smoothing_prior_strength]}
     )
-    identity_lookup = IdentitySemanticLookup.load()
-    profile_lookup = IdentityProfileLookup.load()
-    context_lookup = IdentityContextLookup.load()
-    m1v1_detail_lookup = RelationshipDetailLookup.load("m1v1")
-
     logger.info(
-        "Building cache: games=%d splits=%s n_champions=%d n_builds=%d eb_strengths=%s classification_dims=(sem=%d,ctx=%d,detail=%d)",
+        "Building cache: games=%d splits=%s n_champions=%d n_builds=%d eb_strengths=%s",
         n_games,
         counts,
         n_champions,
         n_builds,
         level_strengths,
-        identity_lookup.dim,
-        context_lookup.dim,
-        m1v1_detail_lookup.dim,
     )
     offset = 0
     for sql_split, meta_split in SPLITS:
@@ -667,13 +683,10 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             synergy_2vx_nobuild_dict=cfg.synergy_2vx_nobuild_dict,
             synergy_2vx_champ_dict=cfg.synergy_2vx_champ_dict,
             build_vocab_sql=build_vocab_sql,
-            build_vocab=build_vocab,
             n_builds=n_builds,
             key_build_expr=key_build_expr,
-            identity_lookup=identity_lookup,
-            profile_lookup=profile_lookup,
-            context_lookup=context_lookup,
-            m1v1_detail_lookup=m1v1_detail_lookup,
+            sidecar_lookup=sidecar_lookup,
+            build_vocab=build_vocab,
         )
         if written != counts[meta_split]:
             raise RuntimeError(
@@ -691,20 +704,9 @@ def build(cfg: DatasetConfig | None = None) -> Path:
         cfg,
         n_games,
         counts,
-        {
-            "n_champions": n_champions,
-            "n_builds": n_builds,
-            "build_vocab": build_vocab,
-            "classification": {
-                "identity_semantic_dim": IDENTITY_SEMANTIC_DIM,
-                "identity_profile_dim": IDENTITY_PROFILE_DIM,
-                "identity_context_dim": IDENTITY_CONTEXT_DIM,
-                "context_interpretable_dim": IDENTITY_CONTEXT_INTERP_DIM,
-                "identity_context_raw_dim": IDENTITY_CONTEXT_RAW_DIM,
-                "m1v1_detail_dim": RELATIONSHIP_DETAIL_DIM,
-            },
-        },
+        {"n_champions": n_champions, "n_builds": n_builds, "build_vocab": build_vocab},
         level_strengths,
+        sidecar_lookup,
     )
 
 

@@ -35,6 +35,7 @@ _BASE_COLUMNS: tuple[str, ...] = (
     "totalheal",
     "totalhealsonteammates",
     "totaldamageshieldedonteammates",
+    "timeccingothers",
     "visionscore",
     "detectorwardsplaced",
     "wardsplaced",
@@ -76,6 +77,7 @@ _EXPR: dict[str, str] = {
         " + toFloat64(totaldamagetaken))"
     ),
     "ally_support": "(totalhealsonteammates + totaldamageshieldedonteammates)",
+    "cc": "timeccingothers",
     "vision_score": "visionscore",
     "ward_actions": "(detectorwardsplaced + wardsplaced + wardskilled)",
     "objective_damage": "damagedealttoobjectives",
@@ -103,6 +105,7 @@ TEAM_SHARE_METRICS: tuple[str, ...] = (
     "self_mitigated",
     "durability_total",
     "ally_support",
+    "cc",
     "vision_score",
     "ward_actions",
     "objective_damage",
@@ -117,6 +120,7 @@ MATCHUP_RAW_METRICS: tuple[str, ...] = (
     "gold",
     "xp",
     "total_farm",
+    "lane_farm",
     "champion_damage",
     "damage_taken",
     "vision_score",
@@ -126,7 +130,16 @@ MATCHUP_RAW_METRICS: tuple[str, ...] = (
 MATCHUP_SHARE_METRICS: tuple[str, ...] = ("gold", "xp", "total_farm", "champion_damage")
 # Herfindahl concentration of a metric across the identity's five teammates:
 # HHI = sum_i (x_i / team_total)^2. High = one player carries that metric.
-CONCENTRATION_METRICS: tuple[str, ...] = MATCHUP_SHARE_METRICS
+# Must be a subset of TEAM_SHARE_METRICS (the per-team total tt_<metric> the HHI
+# normalises by is only emitted for team-share metrics).
+CONCENTRATION_METRICS: tuple[str, ...] = (
+    "gold",
+    "xp",
+    "total_farm",
+    "champion_damage",
+    "kills",
+    "damage_taken",
+)
 
 TEAM_SHARE_FEATURE_NAMES: tuple[str, ...] = tuple(
     f"{metric}_team_share" for metric in TEAM_SHARE_METRICS

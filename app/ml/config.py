@@ -60,8 +60,7 @@ class DatasetConfig:
     test_fraction: float = 0.1
     smoothing_prior_mean: float = 0.5
     smoothing_prior_strength: float = 20.0
-    # Dynamic low-sample weighting (shared with app/classification via
-    # app.core.utils.smoothing). The prior strength applied to each
+    # Dynamic low-sample weighting. The prior strength applied to each
     # identity/interaction is multiplied by sqrt(1 + amplification_threshold/max(n, 1)),
     # so under-sampled pairs shrink harder toward their composite prior while
     # well-sampled pairs keep `smoothing_prior_strength`. 0.0 disables
@@ -97,6 +96,10 @@ class DatasetConfig:
     # build label and requires matching no-build aggregate priors to exist.
     use_final_build_labels: bool = True
     draft_unknown_build_label: str = "unknown"
+    # Optional frozen three-encoder sidecar artifact. When set during cache
+    # build, per-slot static/full-game/temporal latent arrays are materialised
+    # into the HGNN cache. Existing caches without these arrays still load.
+    encoder_sidecar_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -119,14 +122,6 @@ class TrainConfig:
     # wiggles no longer keep training alive when we are looking for material
     # movement.
     checkpoint_min_delta: float = 5e-4
-    # Validation-only, report-only context support calibration diagnostic. This
-    # never changes served probabilities or checkpoint selection.
-    report_context_support_calibration: bool = False
-    context_support_calibration_min_bucket: int = 500
-    # Experimental, training-only auxiliary objective. When >0, the context
-    # residual is also trained against labels on top of a detached non-context
-    # base logit. This is opt-in and does not change served inference shape.
-    context_auxiliary_loss_weight: float = 0.0
     # Experimental, training-only pairwise ranking objective. When >0, each
     # batch samples positive/negative logit pairs and adds a soft AUC surrogate
     # to BCE. This is opt-in research behaviour and does not affect inference.

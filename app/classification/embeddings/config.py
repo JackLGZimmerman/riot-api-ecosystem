@@ -138,6 +138,8 @@ class EmbeddingConfig:
     )
     feature_set: tuple[str, ...] = field(default_factory=raw_and_derived_metric_names)
     matrix_clip_value: float | None = 8.0
-    # Opt-in feature blocks, off by default to keep the 147-feature baseline byte-stable.
+    # Optional feature blocks. Context is on by default so full-game encoders use
+    # the complete 215-column surface; disable it only for legacy profile-only
+    # 155-column matrices.
     include_static_champion: bool = False  # +47 static champion base stats
-    include_context_features: bool = False  # +55 team-share / matchup features
+    include_context_features: bool = True  # +60 team-share / matchup features

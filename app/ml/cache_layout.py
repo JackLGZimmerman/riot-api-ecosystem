@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-CACHE_FORMAT = "npy-memmap-v26"
+CACHE_FORMAT = "npy-memmap-v27"
 CACHE_META_FILE = "cache_meta.json"
 
 WIN_RATE_FILE = "win_rate.npy"
@@ -20,30 +20,15 @@ MATCHUP_1V1_EFF_N_FILE = "m1v1_eff_n.npy"
 SYNERGY_2VX_EFF_N_FILE = "s2vx_eff_n.npy"
 CHAMPION_ID_FILE = "champion_id.npy"
 BUILD_ID_FILE = "build_id.npy"
-IDENTITY_SEMANTIC_FILE = "identity_semantic.npy"
-IDENTITY_PROFILE_FILE = "identity_profile.npy"
-# Context atlas (v25): per-player descriptor + per-player historical support
-# (matchups) for the HGNN's support-gated antisymmetric context head.
-IDENTITY_CONTEXT_FILE = "identity_context.npy"
-IDENTITY_CONTEXT_SUPPORT_FILE = "identity_context_support.npy"
-# Wide RAW atlas block (v26): the primary interaction source for the
-# identity-conditioned context head ([interpretable axes || standardised extra]).
-IDENTITY_CONTEXT_RAW_FILE = "identity_context_raw.npy"
-M1V1_DETAIL_FILE = "m1v1_detail.npy"
 BLUE_WIN_FILE = "blue_win.npy"
+IDENTITY_STATIC_SIDECAR_FILE = "identity_static_sidecar.npy"
+IDENTITY_FULL_GAME_SIDECAR_FILE = "identity_full_game_sidecar.npy"
+IDENTITY_TEMPORAL_SIDECAR_FILE = "identity_temporal_sidecar.npy"
+IDENTITY_ENCODER_SUPPORT_FILE = "identity_encoder_support.npy"
 
 N_PLAYERS_PER_GAME = 10
 N_MATCHUPS_1V1 = 25
 N_SYNERGIES_2VX = 20
-IDENTITY_SEMANTIC_DIM = 64
-IDENTITY_PROFILE_DIM = 9
-IDENTITY_CONTEXT_INTERP_DIM = 14
-IDENTITY_CONTEXT_DIM = 24
-IDENTITY_CONTEXT_RAW_DIM = 62
-CONTEXT_DAMAGE_PRESSURE_INDEX = 5
-CONTEXT_HEAL_SHIELD_INDEX = 10
-RELATIONSHIP_DETAIL_DIM = 16
-
 ARRAY_FILES = {
     "win_rate": WIN_RATE_FILE,
     "matchup_1v1": MATCHUP_1V1_FILE,
@@ -55,12 +40,6 @@ ARRAY_FILES = {
     "s2vx_eff_n": SYNERGY_2VX_EFF_N_FILE,
     "champion_id": CHAMPION_ID_FILE,
     "build_id": BUILD_ID_FILE,
-    "identity_semantic": IDENTITY_SEMANTIC_FILE,
-    "identity_profile": IDENTITY_PROFILE_FILE,
-    "identity_context": IDENTITY_CONTEXT_FILE,
-    "identity_context_support": IDENTITY_CONTEXT_SUPPORT_FILE,
-    "identity_context_raw": IDENTITY_CONTEXT_RAW_FILE,
-    "m1v1_detail": M1V1_DETAIL_FILE,
     "blue_win": BLUE_WIN_FILE,
 }
 
@@ -75,12 +54,6 @@ DISK_DTYPES = {
     "s2vx_eff_n": np.float32,
     "champion_id": np.int16,
     "build_id": np.int16,
-    "identity_semantic": np.float32,
-    "identity_profile": np.float32,
-    "identity_context": np.float32,
-    "identity_context_support": np.float32,
-    "identity_context_raw": np.float32,
-    "m1v1_detail": np.float32,
     "blue_win": np.uint8,
 }
 
@@ -95,15 +68,20 @@ ARRAY_SHAPES = {
     "s2vx_eff_n": (N_SYNERGIES_2VX,),
     "champion_id": (N_PLAYERS_PER_GAME,),
     "build_id": (N_PLAYERS_PER_GAME,),
-    "identity_semantic": (N_PLAYERS_PER_GAME, IDENTITY_SEMANTIC_DIM),
-    "identity_profile": (N_PLAYERS_PER_GAME, IDENTITY_PROFILE_DIM),
-    "identity_context": (N_PLAYERS_PER_GAME, IDENTITY_CONTEXT_DIM),
-    "identity_context_support": (N_PLAYERS_PER_GAME,),
-    "identity_context_raw": (N_PLAYERS_PER_GAME, IDENTITY_CONTEXT_RAW_DIM),
-    "m1v1_detail": (N_MATCHUPS_1V1, RELATIONSHIP_DETAIL_DIM),
     "blue_win": (),
+}
+
+SIDECAR_ARRAY_FILES = {
+    "identity_static_sidecar": IDENTITY_STATIC_SIDECAR_FILE,
+    "identity_full_game_sidecar": IDENTITY_FULL_GAME_SIDECAR_FILE,
+    "identity_temporal_sidecar": IDENTITY_TEMPORAL_SIDECAR_FILE,
+    "identity_encoder_support": IDENTITY_ENCODER_SUPPORT_FILE,
 }
 
 
 def array_paths(cache_dir: Path) -> dict[str, Path]:
     return {name: cache_dir / filename for name, filename in ARRAY_FILES.items()}
+
+
+def sidecar_array_paths(cache_dir: Path) -> dict[str, Path]:
+    return {name: cache_dir / filename for name, filename in SIDECAR_ARRAY_FILES.items()}

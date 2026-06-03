@@ -1,4 +1,4 @@
-"""Champion semantic autoencoder baseline."""
+"""Full-game identity metrics autoencoder."""
 
 from __future__ import annotations
 
@@ -19,29 +19,30 @@ from app.classification.embeddings.config import (
     DERIVED_METRIC_FUNCS,
     raw_and_derived_metric_names,
 )
+from app.classification.embeddings.context_features import CONTEXT_FEATURE_NAMES
 
 _NON_PROFILE_METRIC_COLUMNS = frozenset({"matchups"})
-DEFAULT_METRICS_HIDDEN_DIMS = (224, 112)
+DEFAULT_METRICS_HIDDEN_DIMS = (320, 160)
 DEFAULT_METRIC_NOISE_STD = 0.003
 DEFAULT_LATENT_DECORRELATION_WEIGHT = 5.0e-4
-DEFAULT_LATENT_DROPOUT = 0.05
+DEFAULT_LATENT_DROPOUT = 0.10
 LatentNorm = Literal["batch", "layer", "none"]
 
 
 @dataclass(frozen=True)
-class ChampionSemanticConfig:
+class FullGameSemanticConfig:
     n_champions: int
     n_teampositions: int
     n_builds: int
     metrics_dim: int
-    latent_dim: int = 512
+    latent_dim: int = 640
     champion_embedding_dim: int = 16
     teamposition_embedding_dim: int = 4
     build_embedding_dim: int = 8
-    metrics_embedding_dim: int = 80
+    metrics_embedding_dim: int = 160
     metrics_hidden_dims: tuple[int, ...] = DEFAULT_METRICS_HIDDEN_DIMS
     fusion_hidden_dims: tuple[int, ...] = (128,)
-    decoder_hidden_dims: tuple[int, ...] = (256, 256)
+    decoder_hidden_dims: tuple[int, ...] = (512, 384)
     dropout: float = 0.0
     latent_dropout: float = DEFAULT_LATENT_DROPOUT
     latent_norm: LatentNorm = "batch"
@@ -73,8 +74,8 @@ class ChampionSemanticConfig:
             raise ValueError("latent_norm must be one of: 'batch', 'layer', 'none'")
 
 
-class ChampionProfileDataset(Dataset[dict[str, torch.Tensor]]):
-    """Rows of normalized champion identity metrics for autoencoder training."""
+class FullGameProfileDataset(Dataset[dict[str, torch.Tensor]]):
+    """Rows of normalized full-game identity metrics for autoencoder training."""
 
     def __init__(
         self,
@@ -105,10 +106,15 @@ class ChampionProfileDataset(Dataset[dict[str, torch.Tensor]]):
         }
 
 
-class ChampionEncoder(nn.Module):
-    """Encode champion identity and normalized metrics into one latent vector."""
+class FullGameEncoder(nn.Module):
+    """Encode the full `(champion, role, build)` identity and its metrics.
 
-    def __init__(self, config: ChampionSemanticConfig) -> None:
+    The latent always fuses champion/role/build identity embeddings with the
+    normalized full-game behavioral metric vector; this branch operates at the
+    `(champion, role, build)` grain by construction.
+    """
+
+    def __init__(self, config: FullGameSemanticConfig) -> None:
         super().__init__()
         self.config = config
         self.champion_embedding = nn.Embedding(
@@ -127,10 +133,10 @@ class ChampionEncoder(nn.Module):
             dropout=config.dropout,
         )
         fusion_dim = (
-            config.champion_embedding_dim
+            config.metrics_embedding_dim
+            + config.champion_embedding_dim
             + config.teamposition_embedding_dim
             + config.build_embedding_dim
-            + config.metrics_embedding_dim
         )
         self.fusion = _mlp(
             fusion_dim,
@@ -185,11 +191,11 @@ class ChampionEncoder(nn.Module):
         return self.latent_norm(latent)
 
 
-class ChampionAutoencoder(nn.Module):
-    def __init__(self, config: ChampionSemanticConfig) -> None:
+class FullGameAutoencoder(nn.Module):
+    def __init__(self, config: FullGameSemanticConfig) -> None:
         super().__init__()
         self.config = config
-        self.encoder = ChampionEncoder(config)
+        self.encoder = FullGameEncoder(config)
         self.latent_dropout = nn.Dropout(config.latent_dropout)
         self.decoder = _mlp(
             config.latent_dim,
@@ -210,7 +216,7 @@ class ChampionAutoencoder(nn.Module):
 
 
 def train_autoencoder(
-    model: ChampionAutoencoder,
+    model: FullGameAutoencoder,
     dataloader: DataLoader[dict[str, torch.Tensor]],
     *,
     epochs: int = 20,
@@ -311,8 +317,8 @@ def train_from_dataframe_or_csv(
     champion_col: str = "champion_id",
     teamposition_col: str = "teamposition_id",
     build_col: str = "build_id",
-    config: ChampionSemanticConfig | None = None,
-    batch_size: int | str = 256,
+    config: FullGameSemanticConfig | None = None,
+    batch_size: int | str = 1024,
     shuffle: bool = True,
     epochs: int = 20,
     lr: float = 1.0e-3,
@@ -325,7 +331,7 @@ def train_from_dataframe_or_csv(
     pin_memory: bool | None = None,
     amp: bool = True,
     max_batch_size: int | None = None,
-) -> tuple[ChampionAutoencoder, list[dict[str, float]]]:
+) -> tuple[FullGameAutoencoder, list[dict[str, float]]]:
     frame = _read_frame(data)
     device = _resolve_device(device)
     batch_size_request = _resolve_batch_size_request(batch_size)
@@ -333,7 +339,7 @@ def train_from_dataframe_or_csv(
     if latent_decorrelation_weight < 0.0:
         raise ValueError("latent_decorrelation_weight must be non-negative")
     if config is None:
-        config = ChampionSemanticConfig(
+        config = FullGameSemanticConfig(
             n_champions=_infer_vocab_size(frame, champion_col),
             n_teampositions=_infer_vocab_size(frame, teamposition_col),
             n_builds=_infer_vocab_size(frame, build_col),
@@ -345,14 +351,14 @@ def train_from_dataframe_or_csv(
     _validate_frame_id_range(frame, teamposition_col, config.n_teampositions)
     _validate_frame_id_range(frame, build_col, config.n_builds)
 
-    dataset = ChampionProfileDataset(
+    dataset = FullGameProfileDataset(
         frame,
         metric_columns,
         champion_col=champion_col,
         teamposition_col=teamposition_col,
         build_col=build_col,
     )
-    model = ChampionAutoencoder(config)
+    model = FullGameAutoencoder(config)
     resolved_batch_size = _resolve_train_batch_size(
         model,
         dataset,
@@ -387,13 +393,26 @@ def train_from_dataframe_or_csv(
     return model, history
 
 
-def champion_semantic_metric_columns() -> tuple[str, ...]:
-    """Default full-game metric set for champion semantic autoencoder training."""
-    return raw_and_derived_metric_names()
+def full_game_metric_columns(*, include_context: bool = True) -> tuple[str, ...]:
+    """Default full-game metric set for full-game autoencoder training.
+
+    The default is the complete per-identity catalogue: raw profile metrics,
+    derived ratios/differences, and team-participation/role-matchup context
+    features. The context features are not derivable from plain per-identity
+    rows, so the input frame must already carry the (smoothed) context columns
+    built with ``EmbeddingConfig(include_context_features=True)``.
+
+    Pass ``include_context=False`` for the legacy profile-only 155-column
+    surface.
+    """
+    base = raw_and_derived_metric_names()
+    if include_context:
+        return (*base, *CONTEXT_FEATURE_NAMES)
+    return base
 
 
 def evaluate_autoencoder(
-    model: ChampionAutoencoder,
+    model: FullGameAutoencoder,
     dataloader: DataLoader[dict[str, torch.Tensor]],
     device: str | torch.device,
     *,
@@ -461,8 +480,8 @@ def evaluate_autoencoder(
     }
 
 
-def extract_champion_latents(
-    model: ChampionAutoencoder,
+def extract_full_game_latents(
+    model: FullGameAutoencoder,
     dataloader: DataLoader[dict[str, torch.Tensor]],
     device: str | torch.device,
 ) -> pd.DataFrame:
@@ -511,7 +530,7 @@ def extract_champion_latents(
 
 
 def find_max_train_batch_size(
-    model: ChampionAutoencoder,
+    model: FullGameAutoencoder,
     dataset: Dataset[dict[str, torch.Tensor]],
     device: str | torch.device = "auto",
     *,
@@ -751,7 +770,7 @@ def _latent_norm(latent_dim: int, kind: LatentNorm) -> nn.Module:
 
 def _metric_columns(metric_columns: Sequence[str] | None) -> tuple[str, ...]:
     if metric_columns is None:
-        return champion_semantic_metric_columns()
+        return full_game_metric_columns()
     if isinstance(metric_columns, str):
         raise ValueError("metric_columns must be a sequence of column names")
     columns = tuple(metric_columns)
@@ -975,7 +994,7 @@ def _resolve_batch_size_request(batch_size: int | str) -> int | str:
 
 
 def _resolve_train_batch_size(
-    model: ChampionAutoencoder,
+    model: FullGameAutoencoder,
     dataset: Dataset[dict[str, torch.Tensor]],
     batch_size: int | str,
     device: torch.device,
@@ -1023,7 +1042,7 @@ def _configure_cuda_fast_math(device: torch.device) -> None:
 
 
 def _train_probe_fits(
-    model: ChampionAutoencoder,
+    model: FullGameAutoencoder,
     batch_size: int,
     device: torch.device,
     amp_enabled: bool,
@@ -1069,9 +1088,26 @@ def _train_probe_fits(
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a champion semantic autoencoder")
+    parser = argparse.ArgumentParser(description="Train a full-game identity autoencoder")
     parser.add_argument("--csv", type=Path, required=True)
     parser.add_argument("--metric-columns", nargs="*")
+    metric_scope = parser.add_mutually_exclusive_group()
+    metric_scope.add_argument(
+        "--include-context",
+        dest="include_context",
+        action="store_true",
+        help=(
+            "Use the complete 215-column metric set with team-participation +"
+            " role-matchup context features. This is the default when"
+            " --metric-columns is omitted."
+        ),
+    )
+    metric_scope.add_argument(
+        "--profile-only",
+        dest="include_context",
+        action="store_false",
+        help="Use only the legacy 155 raw+derived profile metrics.",
+    )
     parser.add_argument("--champion-col", default="champion_id")
     parser.add_argument("--teamposition-col", default="teamposition_id")
     parser.add_argument("--build-col", default="build_id")
@@ -1079,7 +1115,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument(
         "--batch-size",
-        default="256",
+        default="1024",
         help="Positive integer batch size, or 'auto' to probe the largest CUDA training batch that fits.",
     )
     parser.add_argument(
@@ -1090,11 +1126,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1.0e-3)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--latent-dim", type=int, default=512)
+    parser.add_argument("--latent-dim", type=int, default=640)
     parser.add_argument("--champion-embedding-dim", type=int, default=16)
     parser.add_argument("--teamposition-embedding-dim", type=int, default=4)
     parser.add_argument("--build-embedding-dim", type=int, default=8)
-    parser.add_argument("--metrics-embedding-dim", type=int, default=80)
+    parser.add_argument("--metrics-embedding-dim", type=int, default=160)
     parser.add_argument(
         "--latent-dropout",
         type=float,
@@ -1152,15 +1188,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_false",
         help="Disable DataLoader pinned host memory.",
     )
-    parser.set_defaults(amp=True, pin_memory=None)
+    parser.set_defaults(amp=True, pin_memory=None, include_context=True)
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     frame = pd.read_csv(args.csv)
-    metric_columns = _metric_columns(args.metric_columns)
-    config = ChampionSemanticConfig(
+    metric_columns = (
+        _metric_columns(args.metric_columns)
+        if args.metric_columns
+        else full_game_metric_columns(include_context=args.include_context)
+    )
+    config = FullGameSemanticConfig(
         n_champions=_infer_vocab_size(frame, args.champion_col),
         n_teampositions=_infer_vocab_size(frame, args.teamposition_col),
         n_builds=_infer_vocab_size(frame, args.build_col),
@@ -1205,7 +1245,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         f"latent_decorrelation_loss={history[-1]['latent_decorrelation_loss']:.6f}"
     )
 
-    eval_dataset = ChampionProfileDataset(
+    eval_dataset = FullGameProfileDataset(
         frame,
         metric_columns,
         champion_col=args.champion_col,
@@ -1244,7 +1284,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(" ".join(print_parts))
 
     if args.latent_output is not None:
-        latents = extract_champion_latents(model, eval_dataloader, device)
+        latents = extract_full_game_latents(model, eval_dataloader, device)
         args.latent_output.parent.mkdir(parents=True, exist_ok=True)
         latents.to_csv(args.latent_output, index=False)
         print(f"wrote_latents={args.latent_output}")

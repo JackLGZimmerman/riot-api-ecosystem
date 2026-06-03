@@ -1,35 +1,32 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
-from torch import nn
 
 from app.ml.config import TrainConfig
 from app.ml.dataset import SplitData
 from app.ml.hgnn_model import HGNNConfig
 from app.ml.train import (
     CHECKPOINT_METRICS,
-    CONTEXT_SUPPORT_RISK_BUCKETS,
     PRIOR_1VX_SUPPORT_RISK_BUCKETS,
     _auc_ranking_loss,
     _checkpoint_score,
-    _context_auxiliary_loss,
-    _context_residual_metrics,
-    _context_support_temperature_report,
     _drop_unused_model_arrays,
     _fit_temperature,
-    _identity_context_support_bucket_ids,
     _prior_1vx_support_bucket_ids,
     _select_threshold,
     _sigmoid_np,
     _support_bucket_metrics,
     _threshold_accuracy,
+    _validate_split_targets,
     _validate_train_config,
 )
 
 
-def _split(labels: np.ndarray, support: np.ndarray | None) -> SplitData:
+def _split(labels: np.ndarray) -> SplitData:
     n = int(labels.size)
     return SplitData(
         win_rate=np.zeros((n, 10), dtype=np.float32),
@@ -39,7 +36,10 @@ def _split(labels: np.ndarray, support: np.ndarray | None) -> SplitData:
         m1v1_cnt=np.zeros((n, 25), dtype=np.float32),
         s2vx_cnt=np.zeros((n, 20), dtype=np.float32),
         blue_win=labels.astype(np.float64, copy=False),
-        identity_context_support=support,
+        identity_static_sidecar=np.zeros((n, 10, 2), dtype=np.float32),
+        identity_full_game_sidecar=np.zeros((n, 10, 3), dtype=np.float32),
+        identity_temporal_sidecar=np.zeros((n, 10, 4), dtype=np.float32),
+        identity_encoder_support=np.zeros((n, 10), dtype=np.float32),
     )
 
 
@@ -71,36 +71,9 @@ def test_threshold_and_temperature_are_fit_from_validation_arrays_only() -> None
     assert temperature == _fit_temperature(val_logits, val_labels)
 
 
-def test_identity_context_support_bucket_metrics_expose_context_gate_risk() -> None:
-    labels = np.array([0, 1, 0, 1], dtype=np.float64)
-    support = np.array(
-        [
-            [0, 0, 0, 0, 0, 10, 10, 10, 10, 10],
-            [12, 14, 16, 18, 20, 22, 24, 26, 28, 29],
-            [60, 80, 100, 120, 140, 160, 180, 190, 195, 199],
-            [250, 300, 350, 400, 450, 500, 550, 600, 650, 700],
-        ],
-        dtype=np.float32,
-    )
-    split = _split(labels, support)
-    ids = _identity_context_support_bucket_ids(split)
-    assert [CONTEXT_SUPPORT_RISK_BUCKETS[int(i)] for i in ids] == [
-        "zero_player",
-        "min_1_29",
-        "mean_30_199",
-        "mean_200_plus",
-    ]
-
-    metrics = _support_bucket_metrics(np.array([0.8, 0.7, 0.6, 0.4]), split)
-    risk = metrics["identity_context_support"]["risk_bucket"]
-    assert risk["zero_player"]["n"] == 1
-    assert risk["mean_200_plus"]["n"] == 1
-    assert risk["zero_player"]["calibration_gap"] == 0.8
-
-
 def test_prior_1vx_support_bucket_metrics_expose_variance_ablation_risk() -> None:
     labels = np.array([0, 1, 0, 1], dtype=np.float64)
-    split = _split(labels, support=None)
+    split = _split(labels)
     split.p1_cnt[:] = np.array(
         [
             [0, 0, 0, 0, 0, 10, 10, 10, 10, 10],
@@ -124,20 +97,20 @@ def test_prior_1vx_support_bucket_metrics_expose_variance_ablation_risk() -> Non
     assert risk["zero_player"]["n"] == 1
     assert risk["min_50_plus"]["n"] == 1
     assert risk["zero_player"]["calibration_gap"] == 0.8
-    assert "identity_context_support" not in metrics
 
 
 def test_default_model_config_drops_relationship_tables_before_tensor_cache() -> None:
-    split = _split(
-        np.array([0, 1], dtype=np.float64),
-        np.full((2, 10), 100.0, dtype=np.float32),
-    )
+    split = _split(np.array([0, 1], dtype=np.float64))
 
     dropped = _drop_unused_model_arrays(split, HGNNConfig())
     assert dropped.matchup_1v1 is None
     assert dropped.synergy_2vx is None
     assert dropped.m1v1_cnt is None
     assert dropped.s2vx_cnt is None
+    assert dropped.identity_static_sidecar is None
+    assert dropped.identity_full_game_sidecar is None
+    assert dropped.identity_temporal_sidecar is None
+    assert dropped.identity_encoder_support is None
 
     kept = _drop_unused_model_arrays(
         split,
@@ -146,50 +119,44 @@ def test_default_model_config_drops_relationship_tables_before_tensor_cache() ->
     assert kept.matchup_1v1 is split.matchup_1v1
     assert kept.synergy_2vx is split.synergy_2vx
 
-
-def test_context_support_temperature_report_fits_validation_buckets_only() -> None:
-    val_logits = np.array([-3.0, -2.0, 2.0, 3.0, -1.0, -0.5, 0.5, 1.0])
-    val_labels = np.array([0, 0, 1, 1, 0, 1, 0, 1], dtype=np.float64)
-    test_logits = np.array([-4.0, -3.0, -2.0, 2.0, 3.0, 4.0])
-    test_labels = 1.0 - np.array([0, 0, 0, 1, 1, 1], dtype=np.float64)
-    zero_support = np.zeros((4, 10), dtype=np.float32)
-    high_support = np.full((4, 10), 300.0, dtype=np.float32)
-    val_split = _split(val_labels, np.vstack([zero_support, high_support]))
-    train_split = _split(val_labels, np.vstack([zero_support, high_support]))
-    test_split = _split(
-        test_labels,
-        np.vstack([
-            np.full((2, 10), 300.0, dtype=np.float32),
-            np.zeros((4, 10), dtype=np.float32),
-        ]),
+    sidecar_kept = _drop_unused_model_arrays(
+        split,
+        HGNNConfig(use_identity_static_sidecar=True),
     )
-    raw_test = _sigmoid_np(test_logits).copy()
+    assert sidecar_kept.identity_static_sidecar is split.identity_static_sidecar
+    assert sidecar_kept.identity_full_game_sidecar is None
+    assert sidecar_kept.identity_temporal_sidecar is None
+    assert sidecar_kept.identity_encoder_support is split.identity_encoder_support
 
-    report, scaled = _context_support_temperature_report(
-        {"train": val_logits, "val": val_logits, "test": test_logits},
-        {"train": train_split, "val": val_split, "test": test_split},
-        min_bucket_size=4,
+    semantic_kept = _drop_unused_model_arrays(
+        split,
+        HGNNConfig(use_identity_semantic_context_head=True),
+    )
+    assert semantic_kept.identity_static_sidecar is split.identity_static_sidecar
+    assert semantic_kept.identity_full_game_sidecar is split.identity_full_game_sidecar
+    assert semantic_kept.identity_temporal_sidecar is split.identity_temporal_sidecar
+    assert semantic_kept.identity_encoder_support is split.identity_encoder_support
+
+
+def test_semantic_context_head_fails_early_without_sidecar_cache_arrays() -> None:
+    split = replace(
+        _split(np.array([0, 1], dtype=np.float64)),
+        identity_temporal_sidecar=None,
     )
 
-    buckets = {str(row["bucket"]): row for row in report["buckets"]}
-    assert report["fit_split"] == "val"
-    assert report["report_only"] is True
-    assert buckets["zero_player"]["n_val"] == 4
-    assert buckets["mean_200_plus"]["n_val"] == 4
-    assert buckets["zero_player"]["fit_source"] == "bucket_val"
-    assert scaled["test"]["n"] == test_labels.size
-    assert "identity_context_support" in scaled["test"]
-    assert np.allclose(raw_test, _sigmoid_np(test_logits))
+    with pytest.raises(ValueError, match="requires cache arrays"):
+        _drop_unused_model_arrays(split, HGNNConfig(use_identity_semantic_context_head=True))
 
 
-def test_context_support_calibration_min_bucket_fails_early() -> None:
-    with pytest.raises(ValueError, match="context_support_calibration_min_bucket"):
-        _validate_train_config(TrainConfig(context_support_calibration_min_bucket=0))
+def test_training_target_validation_catches_degenerate_cache_split() -> None:
+    splits = {
+        "train": _split(np.array([0, 1], dtype=np.float64)),
+        "val": _split(np.zeros(3, dtype=np.float64)),
+        "test": _split(np.array([0, 1], dtype=np.float64)),
+    }
 
-
-def test_context_auxiliary_loss_weight_fails_early_when_negative() -> None:
-    with pytest.raises(ValueError, match="context_auxiliary_loss_weight"):
-        _validate_train_config(TrainConfig(context_auxiliary_loss_weight=-0.1))
+    with pytest.raises(ValueError, match="val split has degenerate blue_win labels"):
+        _validate_split_targets(splits)
 
 
 def test_auc_ranking_loss_config_fails_early_when_invalid() -> None:
@@ -221,28 +188,6 @@ def test_calibration_aware_checkpoint_metric_penalizes_ece() -> None:
     assert score == pytest.approx(-0.70)
 
 
-def test_context_auxiliary_loss_detaches_base_logit() -> None:
-    base = torch.tensor([0.2, -0.1], requires_grad=True)
-    context = torch.tensor([0.0, 0.3], requires_grad=True)
-    outputs = {
-        "final_logit": base + context,
-        "base_logit": base,
-        "context_logit": context,
-    }
-
-    loss = _context_auxiliary_loss(
-        outputs,
-        torch.tensor([1.0, 0.0]),
-        nn.BCEWithLogitsLoss(),
-        weight=0.5,
-    )
-    loss.backward()
-
-    assert base.grad is None
-    assert context.grad is not None
-    assert float(context.grad.abs().sum()) > 0.0
-
-
 def test_auc_ranking_loss_rewards_positive_logits_above_negative_logits() -> None:
     labels = torch.tensor([1.0, 1.0, 0.0, 0.0])
     well_ranked = torch.tensor([3.0, 2.0, -1.0, -2.0])
@@ -270,13 +215,3 @@ def test_auc_ranking_loss_backpropagates_through_sampled_pairs() -> None:
     assert loss.item() > 0.0
     assert logits.grad is not None
     assert float(logits.grad.abs().sum()) > 0.0
-
-
-def test_context_residual_metrics_are_machine_readable_logit_summaries() -> None:
-    metrics = _context_residual_metrics(np.array([-2.0, 0.0, 1.0], dtype=np.float64))
-
-    assert metrics["mean_logit"] == pytest.approx(-1.0 / 3.0)
-    assert metrics["mean_abs_logit"] == pytest.approx(1.0)
-    assert metrics["rms_logit"] == pytest.approx(np.sqrt(5.0 / 3.0))
-    assert metrics["p95_abs_logit"] == pytest.approx(1.9)
-    assert metrics["max_abs_logit"] == pytest.approx(2.0)

@@ -2,10 +2,9 @@
 
 """Match-Outcome HGNN win-rate model.
 
-Production currently uses the identity-conditioned raw semantic-context residual
-on top of the 1vX player prior. Direct 1v1/2vX integrations remain as explicit
-legacy/research capacity but are disabled by default, and training/inference
-share one model shape.
+Production currently uses identity embeddings on top of the 1vX player prior.
+Direct 1v1/2vX integrations remain as explicit research capacity but are
+disabled by default, and training/inference share one model shape.
 """
 
 from __future__ import annotations
@@ -45,6 +44,20 @@ class HGNNConfig:
     logit_clip: float | None = 5.0
     structural_antisymmetry: bool = False
     structural_antisymmetry_scale: float = 0.5
+    identity_static_sidecar_dim: int = 0
+    identity_full_game_sidecar_dim: int = 0
+    identity_temporal_sidecar_dim: int = 0
+    use_identity_static_sidecar: bool = False
+    use_identity_full_game_sidecar: bool = False
+    use_identity_temporal_sidecar: bool = False
+    identity_encoder_sidecar_hidden: tuple[int, ...] = (64,)
+    identity_encoder_sidecar_dropout: float = 0.0
+    identity_encoder_sidecar_support_strength: float = 30.0
+    use_identity_semantic_context_head: bool = False
+    semantic_context_dim: int = 96
+    semantic_context_hidden: tuple[int, ...] = (128,)
+    semantic_context_dropout: float = 0.0
+    semantic_context_support_strength: float = 30.0
 
 
 def resolve_device(device: str) -> str:
@@ -149,6 +162,10 @@ def build_hgnn_inputs(
     synergy_2vx: Any | None = None,
     m1v1_cnt: Any | None = None,
     s2vx_cnt: Any | None = None,
+    identity_static_sidecar: Any | None = None,
+    identity_full_game_sidecar: Any | None = None,
+    identity_temporal_sidecar: Any | None = None,
+    identity_encoder_support: Any | None = None,
     include_relationship_features: bool = False,
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
@@ -160,9 +177,9 @@ def build_hgnn_inputs(
 
     The production path no longer consumes direct 1v1/2vX relationship arrays.
     When they are absent, neutral internal placeholders preserve the model
-    tensor contract for swapping and old artifacts. Explicit research or legacy
-    callers can still pass relationship arrays and set
-    include_relationship_features=True to expose their deltas/support tensors.
+    tensor contract for swapping. Explicit research callers can still pass
+    relationship arrays and set include_relationship_features=True to expose
+    their deltas/support tensors.
     """
 
     def to_tensor(arr: Any) -> torch.Tensor:
@@ -223,6 +240,14 @@ def build_hgnn_inputs(
         )
     if include_relationship_features:
         inputs.update(relationship_logit_features(mu_1vx=mu_1vx, mu_2vx=mu_2vx, mu_1v1=mu_1v1))
+    for name, value in (
+        ("identity_static_sidecar", identity_static_sidecar),
+        ("identity_full_game_sidecar", identity_full_game_sidecar),
+        ("identity_temporal_sidecar", identity_temporal_sidecar),
+        ("identity_encoder_support", identity_encoder_support),
+    ):
+        if value is not None:
+            inputs[name] = to_tensor(value)
     return inputs
 
 
@@ -257,6 +282,14 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
         "mu_2vx": swap_halves(inputs["mu_2vx"], 10),
         "mu_1v1": swap_1v1_mu(inputs["mu_1v1"]),
     }
+    for key in (
+        "identity_static_sidecar",
+        "identity_full_game_sidecar",
+        "identity_temporal_sidecar",
+        "identity_encoder_support",
+    ):
+        if key in inputs:
+            swapped[key] = swap_halves(inputs[key], 5)
     if "var_2vx" in inputs:
         swapped["var_2vx"] = swap_halves(inputs["var_2vx"], 10)
     if "var_1v1" in inputs:
@@ -368,9 +401,120 @@ class AttnPool(nn.Module):
         return (x * weights).sum(dim=1)
 
 
-CONTEXT_SET_ENCODER_TYPES = frozenset(
-    {"mean", "deepsets", "set_transformer", "attention", "summary_stats"}
-)
+class IdentitySemanticContextHead(nn.Module):
+    """Slot-level own/ally/enemy latent interaction over the three encoder blocks."""
+
+    def __init__(self, config: HGNNConfig) -> None:
+        super().__init__()
+        input_dim = (
+            int(config.identity_static_sidecar_dim)
+            + int(config.identity_full_game_sidecar_dim)
+            + int(config.identity_temporal_sidecar_dim)
+        )
+        if input_dim <= 0:
+            raise ValueError("semantic context head requires non-empty identity sidecar dims")
+        if (
+            int(config.identity_static_sidecar_dim) <= 0
+            or int(config.identity_full_game_sidecar_dim) <= 0
+            or int(config.identity_temporal_sidecar_dim) <= 0
+        ):
+            raise ValueError(
+                "semantic context head requires static, full-game, and temporal sidecar dims"
+            )
+        context_dim = int(config.semantic_context_dim)
+        if context_dim <= 0:
+            raise ValueError("semantic_context_dim must be positive")
+        self.static_dim = int(config.identity_static_sidecar_dim)
+        self.full_game_dim = int(config.identity_full_game_sidecar_dim)
+        self.temporal_dim = int(config.identity_temporal_sidecar_dim)
+        self.support_strength = float(config.semantic_context_support_strength)
+        self.project = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, context_dim),
+            nn.ReLU(),
+            nn.LayerNorm(context_dim),
+        )
+        self.score = _mlp(
+            context_dim * 7,
+            tuple(int(dim) for dim in config.semantic_context_hidden),
+            1,
+            dropout=float(config.semantic_context_dropout),
+        )
+        last = self.score[-1]
+        if isinstance(last, nn.Linear):
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
+    def _confidence(self, support: torch.Tensor) -> torch.Tensor:
+        strength = max(self.support_strength, 0.0)
+        support = support.to(dtype=torch.float32).clamp_min(0.0)
+        return support / (support + strength + 1.0e-12)
+
+    @staticmethod
+    def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        weighted = values * weights.unsqueeze(-1)
+        denom = weights.sum(dim=1, keepdim=True).clamp_min(1.0e-12)
+        return weighted.sum(dim=1) / denom
+
+    def _side_contexts(
+        self,
+        own: torch.Tensor,
+        enemy: torch.Tensor,
+        own_conf: torch.Tensor,
+        enemy_conf: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        own_sum = (own * own_conf.unsqueeze(-1)).sum(dim=1, keepdim=True)
+        own_den = own_conf.sum(dim=1, keepdim=True).clamp_min(1.0e-12)
+        ally_num = own_sum - own * own_conf.unsqueeze(-1)
+        ally_den = (own_den - own_conf).clamp_min(1.0e-12).unsqueeze(-1)
+        ally_context = ally_num / ally_den
+        enemy_context = self._weighted_mean(enemy, enemy_conf).unsqueeze(1).expand_as(own)
+        return ally_context, enemy_context
+
+    def forward(
+        self,
+        *,
+        static: torch.Tensor,
+        full_game: torch.Tensor,
+        temporal: torch.Tensor,
+        support: torch.Tensor,
+    ) -> torch.Tensor:
+        if support.ndim != 2 or support.shape[1] != N_PLAYERS:
+            raise ValueError("identity_encoder_support must have shape [batch, 10]")
+        for name, value, expected_dim in (
+            ("identity_static_sidecar", static, self.static_dim),
+            ("identity_full_game_sidecar", full_game, self.full_game_dim),
+            ("identity_temporal_sidecar", temporal, self.temporal_dim),
+        ):
+            if value.ndim != 3 or value.shape[1] != N_PLAYERS:
+                raise ValueError(f"{name} must have shape [batch, 10, {expected_dim}]")
+            if value.shape[0] != support.shape[0] or value.shape[2] != expected_dim:
+                raise ValueError(f"{name} must have shape [batch, 10, {expected_dim}]")
+        latent = torch.cat([static, full_game, temporal], dim=-1)
+        semantic = self.project(latent)
+        confidence = self._confidence(support).to(dtype=semantic.dtype)
+
+        blue, red = semantic[:, :5], semantic[:, 5:]
+        blue_conf, red_conf = confidence[:, :5], confidence[:, 5:]
+        blue_ally, blue_enemy = self._side_contexts(blue, red, blue_conf, red_conf)
+        red_ally, red_enemy = self._side_contexts(red, blue, red_conf, blue_conf)
+        own = torch.cat([blue, red], dim=1)
+        ally = torch.cat([blue_ally, red_ally], dim=1)
+        enemy = torch.cat([blue_enemy, red_enemy], dim=1)
+        features = torch.cat(
+            [
+                own,
+                ally,
+                enemy,
+                own * ally,
+                own * enemy,
+                ally * enemy,
+                enemy - ally,
+            ],
+            dim=-1,
+        )
+        slot_scores = self.score(features).squeeze(-1) * confidence
+        return slot_scores[:, :5].mean(dim=1) - slot_scores[:, 5:].mean(dim=1)
 
 
 class HGNNWinModel(nn.Module):
@@ -383,6 +527,27 @@ class HGNNWinModel(nn.Module):
 
         self.phi = nn.ModuleDict({"1vx": PhiEncoder(c)})
         self.identity = IdentityEncoder(c.n_champions, c.n_builds, c.node_dim)
+        sidecar_input_dim = self._identity_sidecar_input_dim(c)
+        self.identity_sidecar = (
+            _mlp(
+                sidecar_input_dim + 2,
+                c.identity_encoder_sidecar_hidden,
+                c.node_dim,
+                dropout=c.identity_encoder_sidecar_dropout,
+            )
+            if sidecar_input_dim > 0
+            else None
+        )
+        if self.identity_sidecar is not None:
+            last = self.identity_sidecar[-1]
+            if isinstance(last, nn.Linear):
+                nn.init.zeros_(last.weight)
+                nn.init.zeros_(last.bias)
+        self.identity_semantic_context = (
+            IdentitySemanticContextHead(c)
+            if c.use_identity_semantic_context_head
+            else None
+        )
         # Node init fuses the multiplicative identity with the 1vX posterior (§3).
         self.node_init = _mlp(
             c.node_dim + c.edge_hidden, c.node_init_hidden, c.node_dim, dropout=c.dropout
@@ -406,6 +571,17 @@ class HGNNWinModel(nn.Module):
             dropout=c.dropout,
         )
         self.head = _mlp(c.node_dim * 5, c.readout_hidden, 1, dropout=c.dropout)
+
+    @staticmethod
+    def _identity_sidecar_input_dim(config: HGNNConfig) -> int:
+        dim = 0
+        if config.use_identity_static_sidecar:
+            dim += int(config.identity_static_sidecar_dim)
+        if config.use_identity_full_game_sidecar:
+            dim += int(config.identity_full_game_sidecar_dim)
+        if config.use_identity_temporal_sidecar:
+            dim += int(config.identity_temporal_sidecar_dim)
+        return dim
 
     def _readout(self, team: torch.Tensor) -> torch.Tensor:  # team: [B, 5, d]
         pooled = torch.cat([team.mean(dim=1), self.attn_pool(team)], dim=-1)
@@ -487,6 +663,116 @@ class HGNNWinModel(nn.Module):
         )
         return self.residual_head(residual_input)
 
+    def _sidecar_block(
+        self,
+        value: torch.Tensor | None,
+        *,
+        batch_size: int,
+        dim: int,
+        reference: torch.Tensor,
+        name: str,
+    ) -> torch.Tensor:
+        if dim <= 0:
+            return reference.new_zeros((batch_size, 10, 0))
+        if value is None:
+            return reference.new_zeros((batch_size, 10, dim))
+        if value.ndim != 3 or value.shape[1] != 10 or value.shape[2] != dim:
+            raise ValueError(f"{name} must have shape [batch, 10, {dim}]")
+        return value.to(dtype=reference.dtype)
+
+    def _sidecar_node_features(
+        self,
+        *,
+        champion_id: torch.Tensor,
+        identity_static_sidecar: torch.Tensor | None,
+        identity_full_game_sidecar: torch.Tensor | None,
+        identity_temporal_sidecar: torch.Tensor | None,
+        identity_encoder_support: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if self.identity_sidecar is None:
+            return None
+        c = self.config
+        batch_size = int(champion_id.shape[0])
+        parts: list[torch.Tensor] = []
+        if c.use_identity_static_sidecar:
+            parts.append(
+                self._sidecar_block(
+                    identity_static_sidecar,
+                    batch_size=batch_size,
+                    dim=int(c.identity_static_sidecar_dim),
+                    reference=self.identity.champion.weight,
+                    name="identity_static_sidecar",
+                )
+            )
+        if c.use_identity_full_game_sidecar:
+            parts.append(
+                self._sidecar_block(
+                    identity_full_game_sidecar,
+                    batch_size=batch_size,
+                    dim=int(c.identity_full_game_sidecar_dim),
+                    reference=self.identity.champion.weight,
+                    name="identity_full_game_sidecar",
+                )
+            )
+        if c.use_identity_temporal_sidecar:
+            parts.append(
+                self._sidecar_block(
+                    identity_temporal_sidecar,
+                    batch_size=batch_size,
+                    dim=int(c.identity_temporal_sidecar_dim),
+                    reference=self.identity.champion.weight,
+                    name="identity_temporal_sidecar",
+                )
+            )
+        if not parts:
+            return None
+        if identity_encoder_support is None:
+            support = champion_id.new_zeros((batch_size, 10), dtype=torch.float32)
+        else:
+            if identity_encoder_support.ndim != 2 or identity_encoder_support.shape[1] != 10:
+                raise ValueError("identity_encoder_support must have shape [batch, 10]")
+            support = identity_encoder_support.to(dtype=torch.float32)
+        strength = max(float(c.identity_encoder_sidecar_support_strength), 0.0)
+        confidence = support / (support + strength + 1.0e-12)
+        log_support = torch.log1p(support.clamp_min(0.0))
+        sidecar_input = torch.cat(
+            [*parts, confidence.unsqueeze(-1), log_support.unsqueeze(-1)],
+            dim=-1,
+        )
+        return self.identity_sidecar(sidecar_input)
+
+    def _semantic_context_logit(
+        self,
+        *,
+        identity_static_sidecar: torch.Tensor | None,
+        identity_full_game_sidecar: torch.Tensor | None,
+        identity_temporal_sidecar: torch.Tensor | None,
+        identity_encoder_support: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if self.identity_semantic_context is None:
+            return None
+        missing = [
+            name
+            for name, value in (
+                ("identity_static_sidecar", identity_static_sidecar),
+                ("identity_full_game_sidecar", identity_full_game_sidecar),
+                ("identity_temporal_sidecar", identity_temporal_sidecar),
+                ("identity_encoder_support", identity_encoder_support),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                "semantic context head requires all identity sidecar inputs: "
+                + ", ".join(missing)
+            )
+        return self.identity_semantic_context(
+            static=cast(torch.Tensor, identity_static_sidecar),
+            full_game=cast(torch.Tensor, identity_full_game_sidecar),
+            temporal=cast(torch.Tensor, identity_temporal_sidecar),
+            support=cast(torch.Tensor, identity_encoder_support),
+        )
+
     def _forward_impl(
         self,
         *,
@@ -506,6 +792,10 @@ class HGNNWinModel(nn.Module):
         conf_1v1: torch.Tensor | None = None,
         log_count_1v1: torch.Tensor | None = None,
         missing_1v1: torch.Tensor | None = None,
+        identity_static_sidecar: torch.Tensor | None = None,
+        identity_full_game_sidecar: torch.Tensor | None = None,
+        identity_temporal_sidecar: torch.Tensor | None = None,
+        identity_encoder_support: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         relationships_enabled = bool(self.config.use_relationship_integrations)
         if relationships_enabled and (delta_logit_2vx is None or delta_logit_1v1 is None):
@@ -515,6 +805,15 @@ class HGNNWinModel(nn.Module):
 
         # Node init: multiplicative identity (§3) fused with the 1vX posterior.
         h0 = self.identity(champion_id, build_id)
+        sidecar = self._sidecar_node_features(
+            champion_id=champion_id,
+            identity_static_sidecar=identity_static_sidecar,
+            identity_full_game_sidecar=identity_full_game_sidecar,
+            identity_temporal_sidecar=identity_temporal_sidecar,
+            identity_encoder_support=identity_encoder_support,
+        )
+        if sidecar is not None:
+            h0 = h0 + sidecar
         phi_node = self.phi["1vx"](
             _logit(mu_1vx, self.config.logit_clip),
             var_1vx,
@@ -539,17 +838,20 @@ class HGNNWinModel(nn.Module):
             )
         else:
             head_parts.append(a.new_zeros(a.shape))
-        logit = self.head(torch.cat(head_parts, dim=-1)).squeeze(-1)
-        base_logit = logit
-        context_logit = logit.new_zeros(logit.shape)
+        base_logit = self.head(torch.cat(head_parts, dim=-1)).squeeze(-1)
+        context_logit = self._semantic_context_logit(
+            identity_static_sidecar=identity_static_sidecar,
+            identity_full_game_sidecar=identity_full_game_sidecar,
+            identity_temporal_sidecar=identity_temporal_sidecar,
+            identity_encoder_support=identity_encoder_support,
+        )
+        if context_logit is None:
+            context_logit = base_logit.new_zeros(base_logit.shape)
         return {
-            "final_logit": logit,
             "base_logit": base_logit,
             "context_logit": context_logit,
+            "final_logit": base_logit + context_logit,
         }
-
-    def context_regularization_loss(self) -> torch.Tensor:
-        return next(self.parameters()).new_zeros(())
 
     def forward(
         self,
@@ -570,6 +872,10 @@ class HGNNWinModel(nn.Module):
         conf_1v1: torch.Tensor | None = None,
         log_count_1v1: torch.Tensor | None = None,
         missing_1v1: torch.Tensor | None = None,
+        identity_static_sidecar: torch.Tensor | None = None,
+        identity_full_game_sidecar: torch.Tensor | None = None,
+        identity_temporal_sidecar: torch.Tensor | None = None,
+        identity_encoder_support: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         inputs = {
             "champion_id": champion_id,
@@ -590,6 +896,10 @@ class HGNNWinModel(nn.Module):
             "conf_1v1": conf_1v1,
             "log_count_1v1": log_count_1v1,
             "missing_1v1": missing_1v1,
+            "identity_static_sidecar": identity_static_sidecar,
+            "identity_full_game_sidecar": identity_full_game_sidecar,
+            "identity_temporal_sidecar": identity_temporal_sidecar,
+            "identity_encoder_support": identity_encoder_support,
         }
         inputs.update(optional)
         filtered = {key: value for key, value in inputs.items() if value is not None}
@@ -597,12 +907,12 @@ class HGNNWinModel(nn.Module):
             direct = self._forward_impl(**filtered)
             swapped = self._forward_impl(**swap_hgnn_inputs(filtered))
             scale = float(self.config.structural_antisymmetry_scale)
-            final_logit = scale * (direct["final_logit"] - swapped["final_logit"])
+            base_logit = scale * (direct["base_logit"] - swapped["base_logit"])
             context_logit = scale * (direct["context_logit"] - swapped["context_logit"])
             return {
-                "final_logit": final_logit,
-                "base_logit": final_logit - context_logit,
+                "base_logit": base_logit,
                 "context_logit": context_logit,
+                "final_logit": base_logit + context_logit,
             }
         return self._forward_impl(**filtered)
 
@@ -610,7 +920,7 @@ class HGNNWinModel(nn.Module):
 def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
     raw_config = dict(payload.get("model_config", {}))
     if "use_relationship_integrations" not in raw_config:
-        # Older artifacts were trained with direct 1v1/2vX integration enabled
+        # Older model artifacts were trained with direct 1v1/2vX integration enabled
         # before the flag existed. Preserve their saved semantics on load; newly
         # trained models record the now-disabled default explicitly.
         raw_config["use_relationship_integrations"] = True
@@ -627,10 +937,9 @@ def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
         "node_init_hidden",
         "readout_hidden",
         "residual_head_hidden",
-        "profile_head_hidden",
-        "context_head_hidden",
         "team_slot_readout_hidden",
-        "context_summary_quantiles",
+        "identity_encoder_sidecar_hidden",
+        "semantic_context_hidden",
     ):
         if key in config_dict:
             config_dict[key] = tuple(config_dict[key])
@@ -664,6 +973,7 @@ __all__ = [
     "HGNNConfig",
     "HGNNWinModel",
     "IdentityEncoder",
+    "IdentitySemanticContextHead",
     "TEAM_PAIRS",
     "build_hgnn_inputs",
     "load_hgnn_model",

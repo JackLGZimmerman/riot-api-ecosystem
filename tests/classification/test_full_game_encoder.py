@@ -8,19 +8,20 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from app.classification import champion_semantics
-from app.classification.champion_semantics import (
-    ChampionAutoencoder,
-    ChampionProfileDataset,
-    ChampionSemanticConfig,
-    champion_semantic_metric_columns,
+from app.classification import full_game_encoder
+from app.classification.full_game_encoder import (
+    FullGameAutoencoder,
+    FullGameProfileDataset,
+    FullGameSemanticConfig,
+    full_game_metric_columns,
     evaluate_autoencoder,
-    extract_champion_latents,
+    extract_full_game_latents,
     find_max_train_batch_size,
     train_autoencoder,
     train_from_dataframe_or_csv,
 )
 from app.classification.embeddings.config import ALL_METRICS, DERIVED_METRIC_FUNCS
+from app.classification.embeddings.context_features import CONTEXT_FEATURE_NAMES
 
 
 METRICS = ("damage_per_min", "gold_per_min", "cc_per_min")
@@ -40,8 +41,8 @@ def _frame(n: int = 12) -> pd.DataFrame:
     )
 
 
-def _config() -> ChampionSemanticConfig:
-    return ChampionSemanticConfig(
+def _config() -> FullGameSemanticConfig:
+    return FullGameSemanticConfig(
         n_champions=4,
         n_teampositions=3,
         n_builds=2,
@@ -63,20 +64,26 @@ def test_training_helper_defaults_match_locked_production_recipe() -> None:
 
     assert train_signature.parameters["noise_std"].default == 0.003
     assert frame_signature.parameters["noise_std"].default == 0.003
+    assert frame_signature.parameters["batch_size"].default == 1024
     assert (
         train_signature.parameters["latent_decorrelation_weight"].default
-        == champion_semantics.DEFAULT_LATENT_DECORRELATION_WEIGHT
+        == full_game_encoder.DEFAULT_LATENT_DECORRELATION_WEIGHT
     )
-    assert ChampionSemanticConfig(
+    config = FullGameSemanticConfig(
         n_champions=4,
         n_teampositions=3,
         n_builds=2,
         metrics_dim=len(METRICS),
-    ).latent_dropout == 0.05
+    )
+    assert config.latent_dim == 640
+    assert config.metrics_embedding_dim == 160
+    assert config.metrics_hidden_dims == (320, 160)
+    assert config.decoder_hidden_dims == (512, 384)
+    assert config.latent_dropout == 0.10
 
 
 def test_dataset_from_dataframe_returns_expected_tensors() -> None:
-    dataset = ChampionProfileDataset(_frame(5), METRICS)
+    dataset = FullGameProfileDataset(_frame(5), METRICS)
 
     row = dataset[0]
 
@@ -88,13 +95,55 @@ def test_dataset_from_dataframe_returns_expected_tensors() -> None:
     assert row["metrics"].shape == (len(METRICS),)
 
 
-def test_default_metric_columns_use_all_raw_and_derived_metrics() -> None:
-    columns = champion_semantic_metric_columns()
+def test_default_metric_columns_use_all_raw_derived_and_context_metrics() -> None:
+    columns = full_game_metric_columns()
 
     assert set(ALL_METRICS).issubset(columns)
     assert set(DERIVED_METRIC_FUNCS).issubset(columns)
+    assert set(CONTEXT_FEATURE_NAMES).issubset(columns)
+    assert len(columns) == len(ALL_METRICS) + len(DERIVED_METRIC_FUNCS) + len(CONTEXT_FEATURE_NAMES)
     assert "physicaldamagedealttochampions_share" in columns
+    # Added intra-identity ratio + difference families.
+    assert "physicaldamagetaken_share" in columns
+    assert "net_kills" in columns
+    assert "kills_team_share" in columns
+    assert "gold_vs_role_opponent_diff" in columns
     assert "matchups" not in columns
+
+
+def test_profile_only_metric_columns_exclude_context_features() -> None:
+    profile_only = full_game_metric_columns(include_context=False)
+    with_context = full_game_metric_columns()
+
+    assert len(profile_only) == len(ALL_METRICS) + len(DERIVED_METRIC_FUNCS)
+    assert with_context[: len(profile_only)] == profile_only
+    assert with_context[len(profile_only):] == CONTEXT_FEATURE_NAMES
+    assert not any(name in profile_only for name in CONTEXT_FEATURE_NAMES)
+
+
+def test_encoder_trains_on_supplied_context_columns() -> None:
+    columns = ("kills_team_share", "gold_vs_role_opponent_diff")
+    frame = pd.DataFrame(
+        {
+            "champion_id": [0, 1, 2, 3],
+            "teamposition_id": [0, 1, 2, 0],
+            "build_id": [0, 1, 0, 1],
+            "kills_team_share": [0.20, 0.30, 0.10, 0.25],
+            "gold_vs_role_opponent_diff": [100.0, -50.0, 0.0, 20.0],
+        }
+    )
+
+    model, history = train_from_dataframe_or_csv(
+        frame,
+        columns,
+        batch_size=2,
+        epochs=1,
+        pin_memory=False,
+        amp=False,
+    )
+
+    assert model.config.metrics_dim == 2
+    assert np.isfinite(history[0]["loss"])
 
 
 def test_dataset_rejects_matchups_as_profile_metric() -> None:
@@ -102,7 +151,7 @@ def test_dataset_rejects_matchups_as_profile_metric() -> None:
     frame["matchups"] = np.arange(5)
 
     with pytest.raises(ValueError, match="matchups"):
-        ChampionProfileDataset(frame, (*METRICS, "matchups"))
+        FullGameProfileDataset(frame, (*METRICS, "matchups"))
 
 
 def test_dataset_computes_derived_metrics_from_source_columns() -> None:
@@ -115,7 +164,7 @@ def test_dataset_computes_derived_metrics_from_source_columns() -> None:
             "totaldamagedealttochampions": [6.0, 0.0],
         }
     )
-    dataset = ChampionProfileDataset(
+    dataset = FullGameProfileDataset(
         frame,
         ("physicaldamagedealttochampions_share",),
     )
@@ -124,8 +173,8 @@ def test_dataset_computes_derived_metrics_from_source_columns() -> None:
 
 
 def test_autoencoder_outputs_reconstruction_and_latent_shapes() -> None:
-    model = ChampionAutoencoder(_config())
-    batch = next(iter(DataLoader(ChampionProfileDataset(_frame(6), METRICS), batch_size=6)))
+    model = FullGameAutoencoder(_config())
+    batch = next(iter(DataLoader(FullGameProfileDataset(_frame(6), METRICS), batch_size=6)))
 
     reconstruction, latent = model(
         batch["champion_id"],
@@ -139,9 +188,44 @@ def test_autoencoder_outputs_reconstruction_and_latent_shapes() -> None:
     assert torch.allclose(latent.mean(dim=0), torch.zeros(5), atol=1.0e-5)
 
 
+def test_full_game_encoder_always_includes_champion_role_build_identity() -> None:
+    config = FullGameSemanticConfig(
+        n_champions=20,
+        n_teampositions=5,
+        n_builds=4,
+        metrics_dim=len(METRICS),
+        latent_dim=5,
+        metrics_embedding_dim=4,
+        metrics_hidden_dims=(6,),
+        fusion_hidden_dims=(7,),
+        decoder_hidden_dims=(7,),
+        latent_norm="none",
+    )
+    model = FullGameAutoencoder(config).eval()
+    metrics = torch.randn(2, len(METRICS))
+
+    with torch.no_grad():
+        latent_a = model.encoder(
+            torch.tensor([1, 2]),
+            torch.tensor([0, 1]),
+            torch.tensor([0, 1]),
+            metrics,
+        )
+        latent_b = model.encoder(
+            torch.tensor([9, 8]),
+            torch.tensor([4, 3]),
+            torch.tensor([3, 2]),
+            metrics,
+        )
+
+    # The encoder is fixed at the (champion, role, build) grain, so the same
+    # metrics under different identities must produce different latents.
+    assert not torch.allclose(latent_a, latent_b)
+
+
 def test_batch_norm_latent_supports_single_row_training_batch() -> None:
-    model = ChampionAutoencoder(_config())
-    batch = next(iter(DataLoader(ChampionProfileDataset(_frame(1), METRICS), batch_size=1)))
+    model = FullGameAutoencoder(_config())
+    batch = next(iter(DataLoader(FullGameProfileDataset(_frame(1), METRICS), batch_size=1)))
 
     model.train()
     reconstruction, latent = model(
@@ -160,7 +244,7 @@ def test_batch_norm_latent_supports_single_row_training_batch() -> None:
 
 
 def test_layer_norm_option_normalizes_each_latent_row() -> None:
-    config = ChampionSemanticConfig(
+    config = FullGameSemanticConfig(
         n_champions=4,
         n_teampositions=3,
         n_builds=2,
@@ -172,8 +256,8 @@ def test_layer_norm_option_normalizes_each_latent_row() -> None:
         decoder_hidden_dims=(7,),
         latent_norm="layer",
     )
-    model = ChampionAutoencoder(config)
-    batch = next(iter(DataLoader(ChampionProfileDataset(_frame(6), METRICS), batch_size=6)))
+    model = FullGameAutoencoder(config)
+    batch = next(iter(DataLoader(FullGameProfileDataset(_frame(6), METRICS), batch_size=6)))
 
     _, latent = model(
         batch["champion_id"],
@@ -186,7 +270,7 @@ def test_layer_norm_option_normalizes_each_latent_row() -> None:
 
 
 def test_latent_dropout_only_affects_training_decoder_input() -> None:
-    config = ChampionSemanticConfig(
+    config = FullGameSemanticConfig(
         n_champions=4,
         n_teampositions=3,
         n_builds=2,
@@ -199,8 +283,8 @@ def test_latent_dropout_only_affects_training_decoder_input() -> None:
         latent_dropout=1.0,
         latent_norm="none",
     )
-    model = ChampionAutoencoder(config)
-    batch = next(iter(DataLoader(ChampionProfileDataset(_frame(6), METRICS), batch_size=6)))
+    model = FullGameAutoencoder(config)
+    batch = next(iter(DataLoader(FullGameProfileDataset(_frame(6), METRICS), batch_size=6)))
 
     model.train()
     expected_latent = model.encoder(
@@ -232,7 +316,7 @@ def test_latent_dropout_only_affects_training_decoder_input() -> None:
 
 
 def test_forward_validates_metric_width_and_batch_sizes() -> None:
-    model = ChampionAutoencoder(_config())
+    model = FullGameAutoencoder(_config())
     champion_id = torch.tensor([0, 1], dtype=torch.long)
     teamposition_id = torch.tensor([0, 1], dtype=torch.long)
     build_id = torch.tensor([0, 1], dtype=torch.long)
@@ -245,8 +329,8 @@ def test_forward_validates_metric_width_and_batch_sizes() -> None:
 
 
 def test_short_training_run_returns_finite_loss_history() -> None:
-    model = ChampionAutoencoder(_config())
-    dataloader = DataLoader(ChampionProfileDataset(_frame(16), METRICS), batch_size=4)
+    model = FullGameAutoencoder(_config())
+    dataloader = DataLoader(FullGameProfileDataset(_frame(16), METRICS), batch_size=4)
 
     history = train_autoencoder(
         model,
@@ -262,17 +346,17 @@ def test_short_training_run_returns_finite_loss_history() -> None:
 
 
 def test_gpu_option_helpers_are_cpu_safe() -> None:
-    assert not champion_semantics._resolve_amp(True, torch.device("cpu"))
-    assert champion_semantics._resolve_amp(True, torch.device("cuda"))
-    assert not champion_semantics._resolve_pin_memory(None, torch.device("cpu"))
-    assert champion_semantics._resolve_pin_memory(None, torch.device("cuda"))
-    assert champion_semantics._resolve_batch_size_request("auto") == "auto"
-    assert champion_semantics._resolve_batch_size_request("32") == 32
+    assert not full_game_encoder._resolve_amp(True, torch.device("cpu"))
+    assert full_game_encoder._resolve_amp(True, torch.device("cuda"))
+    assert not full_game_encoder._resolve_pin_memory(None, torch.device("cpu"))
+    assert full_game_encoder._resolve_pin_memory(None, torch.device("cuda"))
+    assert full_game_encoder._resolve_batch_size_request("auto") == "auto"
+    assert full_game_encoder._resolve_batch_size_request("32") == 32
 
 
 def test_evaluate_autoencoder_returns_clean_reconstruction_metrics() -> None:
-    model = ChampionAutoencoder(_config())
-    dataloader = DataLoader(ChampionProfileDataset(_frame(8), METRICS), batch_size=4)
+    model = FullGameAutoencoder(_config())
+    dataloader = DataLoader(FullGameProfileDataset(_frame(8), METRICS), batch_size=4)
 
     metrics = evaluate_autoencoder(model, dataloader, "auto")
 
@@ -293,8 +377,8 @@ def test_evaluate_autoencoder_returns_clean_reconstruction_metrics() -> None:
 
 
 def test_evaluate_autoencoder_can_score_metric_neighbor_preservation() -> None:
-    model = ChampionAutoencoder(_config())
-    dataloader = DataLoader(ChampionProfileDataset(_frame(8), METRICS), batch_size=4)
+    model = FullGameAutoencoder(_config())
+    dataloader = DataLoader(FullGameProfileDataset(_frame(8), METRICS), batch_size=4)
 
     metrics = evaluate_autoencoder(model, dataloader, "auto", neighbor_k=2)
 
@@ -304,8 +388,8 @@ def test_evaluate_autoencoder_can_score_metric_neighbor_preservation() -> None:
 
 
 def test_evaluate_autoencoder_handles_single_row_latent_summary() -> None:
-    model = ChampionAutoencoder(_config())
-    dataloader = DataLoader(ChampionProfileDataset(_frame(1), METRICS), batch_size=1)
+    model = FullGameAutoencoder(_config())
+    dataloader = DataLoader(FullGameProfileDataset(_frame(1), METRICS), batch_size=1)
 
     metrics = evaluate_autoencoder(model, dataloader, "auto")
 
@@ -319,7 +403,7 @@ def test_evaluate_autoencoder_handles_single_row_latent_summary() -> None:
 def test_metric_corruption_keeps_masked_values_zero_after_noise() -> None:
     metrics = torch.ones(4, len(METRICS))
 
-    corrupted = champion_semantics._corrupt_metrics(
+    corrupted = full_game_encoder._corrupt_metrics(
         metrics,
         noise_std=1.0,
         mask_prob=1.0,
@@ -341,7 +425,7 @@ def test_training_helper_supports_optional_denoising() -> None:
         amp=False,
     )
 
-    assert isinstance(model, ChampionAutoencoder)
+    assert isinstance(model, FullGameAutoencoder)
     assert len(history) == 1
     assert np.isfinite(history[0]["loss"])
     assert np.isfinite(history[0]["reconstruction_loss"])
@@ -360,14 +444,14 @@ def test_training_helper_supports_latent_decorrelation_regularizer() -> None:
         amp=False,
     )
 
-    assert isinstance(model, ChampionAutoencoder)
+    assert isinstance(model, FullGameAutoencoder)
     assert history[0]["latent_decorrelation_loss"] >= 0.0
     assert history[0]["loss"] >= history[0]["reconstruction_loss"]
 
 
 def test_training_helper_rejects_negative_latent_decorrelation_weight() -> None:
-    model = ChampionAutoencoder(_config())
-    dataloader = DataLoader(ChampionProfileDataset(_frame(8), METRICS), batch_size=4)
+    model = FullGameAutoencoder(_config())
+    dataloader = DataLoader(FullGameProfileDataset(_frame(8), METRICS), batch_size=4)
 
     with pytest.raises(ValueError, match="latent_decorrelation_weight"):
         train_autoencoder(
@@ -390,14 +474,14 @@ def test_training_helper_supports_auto_batch_size() -> None:
         amp=True,
     )
 
-    assert isinstance(model, ChampionAutoencoder)
+    assert isinstance(model, FullGameAutoencoder)
     assert history[0]["batch_size"] == 16.0
     assert np.isfinite(history[0]["loss"])
 
 
 def test_find_max_train_batch_size_respects_cpu_cap() -> None:
-    dataset = ChampionProfileDataset(_frame(16), METRICS)
-    model = ChampionAutoencoder(_config())
+    dataset = FullGameProfileDataset(_frame(16), METRICS)
+    model = FullGameAutoencoder(_config())
 
     batch_size = find_max_train_batch_size(
         model,
@@ -410,8 +494,8 @@ def test_find_max_train_batch_size_respects_cpu_cap() -> None:
 
 
 def test_find_max_train_batch_size_rejects_negative_decorrelation_weight() -> None:
-    dataset = ChampionProfileDataset(_frame(16), METRICS)
-    model = ChampionAutoencoder(_config())
+    dataset = FullGameProfileDataset(_frame(16), METRICS)
+    model = FullGameAutoencoder(_config())
 
     with pytest.raises(ValueError, match="latent_decorrelation_weight"):
         find_max_train_batch_size(
@@ -436,7 +520,7 @@ def test_training_helper_infers_vocab_sizes_when_config_omitted() -> None:
 
 
 def test_training_helper_validates_config_vocab_ranges_before_training() -> None:
-    bad_config = ChampionSemanticConfig(
+    bad_config = FullGameSemanticConfig(
         n_champions=2,
         n_teampositions=3,
         n_builds=2,
@@ -455,7 +539,7 @@ def test_training_helper_validates_config_vocab_ranges_before_training() -> None
 
 def test_config_rejects_unknown_latent_norm() -> None:
     with pytest.raises(ValueError, match="latent_norm"):
-        ChampionSemanticConfig(
+        FullGameSemanticConfig(
             n_champions=4,
             n_teampositions=3,
             n_builds=2,
@@ -466,7 +550,7 @@ def test_config_rejects_unknown_latent_norm() -> None:
 
 def test_config_rejects_invalid_latent_dropout() -> None:
     with pytest.raises(ValueError, match="latent_dropout"):
-        ChampionSemanticConfig(
+        FullGameSemanticConfig(
             n_champions=4,
             n_teampositions=3,
             n_builds=2,
@@ -475,12 +559,12 @@ def test_config_rejects_invalid_latent_dropout() -> None:
         )
 
 
-def test_extract_champion_latents_returns_identity_columns_and_latents() -> None:
-    dataset = ChampionProfileDataset(_frame(7), METRICS)
+def test_extract_full_game_latents_returns_identity_columns_and_latents() -> None:
+    dataset = FullGameProfileDataset(_frame(7), METRICS)
     dataloader = DataLoader(dataset, batch_size=3, shuffle=False)
-    model = ChampionAutoencoder(_config())
+    model = FullGameAutoencoder(_config())
 
-    latents = extract_champion_latents(model, dataloader, "auto")
+    latents = extract_full_game_latents(model, dataloader, "auto")
 
     assert list(latents.columns) == [
         "champion_id",

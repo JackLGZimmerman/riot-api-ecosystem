@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 
+import numpy as np
+
 from app.classification.embeddings import config
 from app.classification.embeddings import load
 from app.classification.embeddings import registry as R
@@ -16,7 +18,7 @@ def _digest(names: tuple[str, ...]) -> str:
 # Frozen snapshots of the pre-registry ordering. Any reorder/rename of the
 # catalogue must update these deliberately.
 ALL_METRICS_DIGEST = "f8adad3b51396d98"
-RAW_AND_DERIVED_DIGEST = "42ef0702948645aa"
+RAW_AND_DERIVED_DIGEST = "e02f2d2cf5f776e2"
 
 
 def test_catalogue_ordering_is_byte_stable() -> None:
@@ -40,11 +42,37 @@ def test_specs_are_unique_and_ordered() -> None:
     assert tuple(s.name for s in R.RAW_SPECS) == R.ALL_METRICS
     assert tuple(s.name for s in R.DERIVED_SPECS) == tuple(R.DERIVED_METRIC_FUNCS)
     assert len(R.RAW_SPECS) == 66
-    assert len(R.DERIVED_SPECS) == 81
+    assert len(R.DERIVED_SPECS) == 89
 
 
 def test_no_challenge_metrics() -> None:
     assert not any("challenge" in s.name.lower() for s in R.FULL_GAME_SPECS)
+
+
+def test_added_ratio_and_difference_metric_math() -> None:
+    # Ratios are zero-safe (denominator floor); differences keep their sign.
+    d = {
+        "physicaldamagetaken": np.array([30.0, 0.0], dtype=np.float32),
+        "magicdamagetaken": np.array([10.0, 0.0], dtype=np.float32),
+        "truedamagetaken": np.array([10.0, 0.0], dtype=np.float32),
+        "totaldamagetaken": np.array([50.0, 0.0], dtype=np.float32),
+        "totaldamagedealttochampions": np.array([80.0, 5.0], dtype=np.float32),
+        "kills": np.array([7.0, 1.0], dtype=np.float32),
+        "deaths": np.array([3.0, 0.0], dtype=np.float32),
+        "largestcriticalstrike": np.array([400.0, 0.0], dtype=np.float32),
+        "attackdamage": np.array([200.0, 0.0], dtype=np.float32),
+        "goldearned": np.array([12000.0, 500.0], dtype=np.float32),
+    }
+    f = R.DERIVED_METRIC_FUNCS
+    assert np.allclose(f["physicaldamagetaken_share"](d), [0.6, 0.0])
+    assert np.allclose(f["magicdamagetaken_share"](d), [0.2, 0.0])
+    assert np.allclose(f["truedamagetaken_share"](d), [0.2, 0.0])
+    assert np.allclose(f["champion_damage_to_damage_taken_ratio"](d), [1.6, 0.0])
+    assert np.allclose(f["net_combat_damage"](d), [30.0, 5.0])
+    assert np.allclose(f["net_kills"](d), [4.0, 1.0])
+    assert np.allclose(f["largestcriticalstrike_to_attackdamage_ratio"](d), [2.0, 0.0])
+    # Zero-death row floors to 0 rather than dividing by zero.
+    assert np.allclose(f["goldearned_to_deaths_ratio"](d), [4000.0, 0.0])
 
 
 def test_derived_dependencies_resolve_to_raw_metrics() -> None:

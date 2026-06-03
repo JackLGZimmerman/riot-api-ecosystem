@@ -1,12 +1,16 @@
 # ML Win-Rate Model
 
-As of 2026-06-02, production uses the threshold-tuned raw
-identity-conditioned context head on top of the 1vX player prior. Direct 1v1 and
-2vX integrations are disabled by default after an accuracy-neutral removal audit;
-the loader still keeps those arrays for future research or legacy artifacts. The
-shared 24-dim context-atlas head remains available as `--shared-context` for
-baseline runs. Maintained iteration surfaces are
-`app/ml/experiments/context_ablation.py` and `app/ml/context_examples_audit.py`.
+As of 2026-06-03, production uses champion/build identity embeddings on top of
+the smoothed 1vX player prior. The old classification-derived semantic,
+profile, and context inputs have been removed from the HGNN contract.
+
+Direct 1v1 and 2vX relationship integrations remain as explicit research
+capacity behind `HGNNConfig.use_relationship_integrations=True`; default
+training and serving leave them disabled. Identity-encoder sidecars
+(static / full-game / temporal) are the current identity-signal research
+surface, and the semantic context head can aggregate those latents into
+ally/enemy context logits. Both are disabled by default — see
+[HGNN_CURRENT.md](HGNN_CURRENT.md#identity-encoder-sidecars).
 
 ## Production Path
 
@@ -14,8 +18,8 @@ baseline runs. Maintained iteration surfaces are
 cache/prior arrays
 -> posterior and support features
 -> champion/role/build identity + 1vX node prior
+-> optional static/full-game/temporal sidecars and semantic context head
 -> blue/red mean + attention team readout
--> raw identity-conditioned context interaction (support-gated, antisymmetric)
 -> final logit
 -> sigmoid = P(blue wins)
 ```
@@ -37,7 +41,7 @@ Runtime prediction uses `load_predictor()` from `app/ml/predictor.py`.
 
 ## Cache Contract
 
-The model consumes `npy-memmap-v26` cache arrays with 10 ordered slots:
+The model consumes `npy-memmap-v27` cache arrays with 10 ordered slots:
 
 ```text
 0..4 = blue TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
@@ -47,26 +51,25 @@ The model consumes `npy-memmap-v26` cache arrays with 10 ordered slots:
 | Array | Shape | Live model use |
 | --- | --- | --- |
 | `win_rate.npy` | `[games, 10]` | smoothed `1vX` player priors |
-| `matchup_1v1.npy` | `[games, 25]` | loader-retained; not used by default training/serving |
-| `synergy_2vx.npy` | `[games, 20]` | loader-retained; not used by default training/serving |
 | `p1_cnt.npy` | `[games, 10]` | raw `1vX` support for node confidence |
-| `m1v1_cnt.npy` | `[games, 25]` | loader-retained relationship support |
-| `s2vx_cnt.npy` | `[games, 20]` | loader-retained relationship support |
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
-| `identity_context.npy` | `[games, 10, 24]` | shared descriptor; dense tail available to `raw_plus_dense` experiments |
-| `identity_context_support.npy` | `[games, 10]` | per-player historical support (context head gate) |
-| `identity_context_raw.npy` | `[games, 10, 62]` | production raw semantic atlas for the identity-conditioned head |
 | `blue_win.npy` | `[games]` | target label |
 
-`identity_semantic.npy` `[games, 10, 64]`, `identity_profile.npy`
-`[games, 10, 9]`, and `m1v1_eff_n.npy` / `s2vx_eff_n.npy` are retained for
-inspection, back-compat, and future experiments but unused by the default model.
+Relationship arrays are still written for opt-in research runs:
+
+| Array | Shape | Default use |
+| --- | --- | --- |
+| `matchup_1v1.npy` | `[games, 25]` | ignored |
+| `synergy_2vx.npy` | `[games, 20]` | ignored |
+| `m1v1_cnt.npy` | `[games, 25]` | ignored |
+| `s2vx_cnt.npy` | `[games, 20]` | ignored |
+| `m1v1_eff_n.npy` | `[games, 25]` | ignored |
+| `s2vx_eff_n.npy` | `[games, 20]` | ignored |
 
 ## Relationship Features
 
-Direct relationship features are retained only behind
-`HGNNConfig.use_relationship_integrations=True` for legacy/research runs:
+When relationship integrations are enabled, the residual features are:
 
 ```text
 1v1 delta        = logit(blue beats red prior) - logit(generic 1vX baseline)
@@ -76,40 +79,25 @@ confidence       = raw_count / (raw_count + confidence_strength)
 missing          = raw_count <= 0
 ```
 
-The residual head receives:
+The default model path does not feed those tensors into the head.
 
-```text
-delta                 45
-confidence            45
-delta * confidence    45
-missing               45
-total                180
-```
+## Identity Semantic Context
 
-Final prediction:
+`HGNNConfig.use_identity_semantic_context_head=True` enables an opt-in
+side-logit over the frozen static, full-game, and temporal identity sidecars.
+It projects the three latent blocks into a shared semantic vector, builds
+support-weighted ally and enemy summaries for each slot, scores the interaction,
+and returns `base_logit`, `context_logit`, and `final_logit`. The final context
+layer is zero-initialised, so enabling the flag starts as a no-op.
 
-```text
-final_logit = main_head_logit + context_logit
-P(blue wins) = sigmoid(final_logit)
-```
+The recommended experiment variant is `all_three_plus_semantic_context` in
+`app/ml/experiments/context_ablation.py`.
 
 ## Training
 
 `app/ml/train.py` trains one production model shape with AdamW, team-swap
-augmentation, and validation threshold-accuracy checkpointing.
-
-| Setting | Value |
-| --- | ---: |
-| optimizer | AdamW |
-| batch size request | 32768 |
-| train batch cap | 7424 |
-| max epochs | 40 |
-| patience | 3 |
-| learning rate | 0.001 |
-| weight decay | 0.001 |
-| gradient clip | 1.0 |
-| checkpoint metric | `val_threshold_accuracy` |
-| checkpoint min delta | 0.0005 |
+augmentation, validation temperature diagnostics, and validation
+threshold-accuracy checkpointing.
 
 Each batch is trained twice: original blue/red order with label `y`, and a
 team-swapped mirror with label `1 - y`.
@@ -118,34 +106,3 @@ team-swapped mirror with label `1 - y`.
 loss = 0.5 * BCE(original_logit, y)
      + 0.5 * BCE(swapped_logit, 1 - y)
 ```
-
-The swap mirrors blue/red slots and, for explicit legacy relationship runs,
-flips the `1v1` matrix into the new blue perspective and negates signed
-relationship logits where needed.
-
-## Current Result
-
-The active post-removal `val_nll_ece` verification run selected the default
-no-relationship model path:
-
-| Variant | Val Threshold Acc | Val AUC | Test Threshold Acc | Test AUC | Test ECE |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| no direct 1v1/2vX, `val_nll_ece` | 0.57746 | 0.60074 | 0.57319 | 0.59539 | 0.03131 |
-
-The measured accuracy/AUC movement versus the prior relationship-enabled
-calibration-aware run stayed below `0.005`, while calibration worsened. The next
-iteration should focus on recovering calibration without restoring direct
-1v1/2vX data to the default pipeline.
-
-The removal verification artifact saved
-`app/ml/data/experiments/context_ablation_relationship_removed_iter/low_rank_checkpoint_nll_ece/model.pt`
-with:
-
-| Split | Accuracy | Threshold Acc | AUC | NLL | Brier | ECE |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| train | 0.5731 | 0.5723 | 0.6047 | 0.6745 | 0.2409 | 0.0108 |
-| val | 0.5717 | 0.5775 | 0.6007 | 0.6761 | 0.2417 | 0.0341 |
-| test | 0.5674 | 0.5732 | 0.5954 | 0.6778 | 0.2425 | 0.0313 |
-
-Concrete context slices are in
-[HGNN_CONTEXT_EXAMPLES_AUDIT.md](HGNN_CONTEXT_EXAMPLES_AUDIT.md).
