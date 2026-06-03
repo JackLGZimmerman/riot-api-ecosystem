@@ -71,12 +71,16 @@ The registry becomes the source of truth; these stay **byte-identical**:
 
 ## Phases
 
-| # | Scope | Size | Model impact |
-| --- | --- | --- | --- |
-| 1 | Registry + evidence-loop unification + cache hash; 147 features byte-stable | S | none |
-| 2 | Static champion branch (lookup join, standardize, no priors) | S | re-benchmark once |
-| 3 | Team-share / matchup features (participant-grain SQL + evaluator) | L | re-benchmark per batch |
-| — | Temporal branch + its own autoencoder | XL | separate doc |
+| # | Scope | Size | Model impact | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Registry + evidence-loop unification + cache hash; 147 features byte-stable | S | none | done |
+| 2 | Static champion branch (lookup join, standardize, no priors) | S | re-benchmark once | done (+47 feat) |
+| 3 | Team-share / matchup / concentration features (participant-grain SQL) | L | re-benchmark per batch | done (+55 feat) |
+| — | Temporal branch + its own autoencoder | XL | separate doc | done (see temporal doc) |
+
+Full-game matrix widths: 147 default, +47 with `include_static_champion`, +55 with
+`include_context_features` (249 with both). All branches are opt-in so the default
+matrix stays byte-identical to Phase 0.
 
 ### Phase 1 — registry, zero behavior change
 
@@ -100,12 +104,39 @@ The registry becomes the source of truth; these stay **byte-identical**:
 
 ### Phase 3 — team-share / matchup
 
-- New participant-grain CTE: team aggregate (sum over 5 teammates) + opponent
-  join (same `teamposition`, other team), then aggregate to identity.
-- Participant-grain evaluator for composite dependencies (`epic_kills`,
-  `structure_takedowns`, `objective_damage` are derived, not raw columns).
-- `evidence_kind = MATCHUPS`, smoothed directly. Add in small batches, each
-  gated on the autoencoder rank/recall benchmark.
+- `context_features.py`: team aggregate (sum over 5 teammates) + opponent via the
+  pair-sum identity (`self - opponent = 2*self - pair_sum`, `HAVING count() = 2`),
+  avoiding an 11M x 11M self-join. Composite quantities (`takedowns`,
+  `durability_total`, `epic_kills`, `structure_takedowns`, ...) are expressed at
+  participant grain.
+- 21 team-share + 4 concentration + 30 matchup (11 raw + 4 share, each diff +
+  advantage) = 55.
+- Concentration: per-team Herfindahl HHI of the 4 share metrics (`gold`, `xp`,
+  `total_farm`, `champion_damage`), `HHI = sum(x^2) / sum(x)^2` over the five
+  teammates, broadcast to each identity. Emitted by `team_share_query` (mirrors
+  the `concentration()` helper). High = one player carries that metric.
+- `evidence_kind = MATCHUPS`, smoothed through the existing hierarchy
+  (`apply_hierarchical_shrinkage`, extended when present).
+
+## Materialised aggregation (current)
+
+Aggregation and prior derivation run in ClickHouse, not Python. `build_tables.py`
+materialises **sufficient-statistic** tables (raw `SUM` / `COUNT` /
+`SUM_timeplayed`), one row per `(split, championid, teamposition, build)`:
+
+- `classification_identity_base` — participant-stats sums + `matchups` +
+  `sum_w_timeplayed` + `build_group`.
+- `classification_final_base` — final-snapshot sums (denominator = `matchups`).
+- `classification_context_base` — team-share / matchup sums + their counts.
+
+Heavy scans use `shard -> stage (append) -> GROUP BY combine` to stay under the
+server memory limit. `load.py` then issues thin SELECTs: the baseline divides the
+sums into rate form, and **every prior level is an exact SQL `GROUP BY` rollup**
+(`sum(sum_x) / sum(matchups)` etc.) — replacing the former in-Python
+`derive_prior` and context shard-averaging. The shared smoother
+(`smoothing.py`) and median/MAD standardisation stay in Python. A
+`classification_base_meta` row carries `catalogue_hash()`; loaders raise if the
+tables are missing or stale.
 
 ## Test plan
 

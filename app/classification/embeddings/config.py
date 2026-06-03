@@ -61,11 +61,8 @@ PRIOR_LEVELS: tuple[IdentityType, ...] = (
     IdentityType.BUILD,
 )
 
-# Prior strength caps. Two dicts because the two metric families have different
-# effective-N denominators and therefore different natural scales:
-#   * rate metrics use `matchups` (~10^1-10^3) as effective N
-#   * per-minute metrics use `sum_w_timeplayed` seconds (~10^3-10^5) as effective N
-# Per-minute caps are rate caps scaled by the typical sum_w_timeplayed per matchup.
+# Rate metrics use `matchups` as effective N; per-minute use `sum_w_timeplayed`
+# (~200x larger), so per-minute caps are the rate caps scaled by this factor.
 PRIOR_PER_MINUTE_SCALE: float = 200.0
 
 DEFAULT_PRIOR_RATE_STRENGTHS: dict[IdentityType, float] = {
@@ -121,30 +118,19 @@ class EmbeddingConfig:
     prior_per_minute_strengths: dict[IdentityType, float] = field(
         default_factory=DEFAULT_PRIOR_PER_MINUTE_STRENGTHS.copy
     )
-    # Dynamic low-sample weighting (shared with app/ml via
-    # app.core.utils.smoothing): each prior level's weight is multiplied by
-    # sqrt(1 + amplification_threshold/max(n, 1)), so under-sampled levels are
-    # pulled harder toward their prior.
+    # Under-sampled levels pulled harder toward their prior (weight *=
+    # sqrt(1 + amplification_threshold/max(n, 1))). Shared with app/ml.
     amplification_threshold: float = 50.0
-    # Smoothing strategy:
-    #   "additive" — pool every prior level into one weighted mixture (legacy).
-    #   "cascade"  — shrink toward only the highest-priority prior level whose
-    #                own sample size clears `prior_confidence_matchups`; broader
-    #                levels are used only as fallback when no specific level is
-    #                confident enough. Prevents broad priors from contaminating
-    #                well-sampled specific priors.
+    # "additive" pools all prior levels; "cascade" shrinks toward only the
+    # highest-priority level clearing `prior_confidence_matchups`, so broad priors
+    # don't contaminate well-sampled specific ones.
     smoothing_mode: str = "cascade"
     prior_confidence_matchups: float = 50.0
-    # When cascade selects a single level, give it the same *total* prior weight
-    # the additive mixture would have applied across all levels. This isolates
-    # the effect of the prior *value* (single vs pooled) from the effect of the
-    # shrinkage *magnitude*, which otherwise drops sharply in cascade mode.
+    # In cascade, give the selected level the total weight the additive mixture
+    # would apply, isolating prior value (single vs pooled) from shrinkage magnitude.
     cascade_match_weight: bool = True
-    # Roles that must not borrow from cross-role prior levels. CHAMPION_BUILD
-    # aggregates a champion across all roles; BUILD aggregates all roles into one
-    # group. Both contaminate utility/jungle embeddings with lane-champion stats.
-    # Lane roles (TOP/MIDDLE/BOTTOM) are allowed to share because their mechanics
-    # are similar enough that cross-champion borrowing is informative.
+    # UTILITY/JUNGLE must not borrow from cross-role levels (CHAMPION_BUILD, BUILD),
+    # which would contaminate them with lane-champion stats; lanes may share.
     isolated_roles: frozenset[str] = frozenset({"UTILITY", "JUNGLE"})
     isolated_role_excluded_levels: tuple[IdentityType, ...] = (
         IdentityType.CHAMPION_BUILD,
@@ -152,3 +138,6 @@ class EmbeddingConfig:
     )
     feature_set: tuple[str, ...] = field(default_factory=raw_and_derived_metric_names)
     matrix_clip_value: float | None = 8.0
+    # Opt-in feature blocks, off by default to keep the 147-feature baseline byte-stable.
+    include_static_champion: bool = False  # +47 static champion base stats
+    include_context_features: bool = False  # +55 team-share / matchup features

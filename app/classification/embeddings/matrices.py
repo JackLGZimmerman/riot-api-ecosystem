@@ -18,7 +18,9 @@ from app.classification.embeddings.config import (
     EmbeddingConfig,
     IdentityType,
 )
+from app.classification.embeddings.context_features import CONTEXT_FEATURE_NAMES
 from app.classification.embeddings.load import LevelRows
+from app.classification.embeddings.static_champion import build_static_matrix
 from app.core.utils.common import median_mad_standardise
 
 logger = logging.getLogger(__name__)
@@ -126,6 +128,35 @@ def build_level_matrix(
         standardised = np.clip(standardised, -clip, clip)
     matrix = standardised.astype(np.float32)
     feature_names = tuple(cfg.feature_set)
+
+    if cfg.include_context_features:
+        ctx_names = tuple(
+            name
+            for name in CONTEXT_FEATURE_NAMES
+            if f"smoothed_{name}" in rows.columns
+        )
+        if ctx_names:
+            ctx_raw = np.stack(
+                [
+                    rows.columns[f"smoothed_{name}"][sorted_row_idx].astype(np.float32)
+                    for name in ctx_names
+                ],
+                axis=-1,
+            )
+            ctx_std, _, _ = median_mad_standardise(ctx_raw)
+            if cfg.matrix_clip_value is not None:
+                clip = float(cfg.matrix_clip_value)
+                ctx_std = np.clip(ctx_std, -clip, clip)
+            matrix = np.concatenate([matrix, ctx_std.astype(np.float32)], axis=1)
+            feature_names = feature_names + ctx_names
+
+    if cfg.include_static_champion and "championid" in rows.columns:
+        champ_ids = rows.columns["championid"][sorted_row_idx]
+        static_matrix, static_names = build_static_matrix(
+            champ_ids, clip_value=cfg.matrix_clip_value
+        )
+        matrix = np.concatenate([matrix, static_matrix], axis=1)
+        feature_names = feature_names + static_names
 
     keys = [tuple(rows.columns[c][i] for c in key_cols) for i in sorted_row_idx.tolist()]
     return LevelMatrix(

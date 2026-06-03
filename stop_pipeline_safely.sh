@@ -4,6 +4,7 @@ set -euo pipefail
 
 WORK_POOL_NAME="${WORK_POOL_NAME:-docker-pool}"
 WORK_QUEUE_NAME="${WORK_QUEUE_NAME:-default}"
+DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-riot-pipeline/riot-pipeline}"
 AUTOMATION_NAME="${AUTOMATION_NAME:-}"
 CLICKHOUSE_CONTAINER="${CLICKHOUSE_CONTAINER:-clickhouse}"
 STOP_WAIT_TIMEOUT_S="${STOP_WAIT_TIMEOUT_S:-600}"
@@ -48,7 +49,7 @@ if prefect_api_available; then
   if [ -f scripts/cancel_deployment_runs.py ]; then
     echo "Cancelling active Prefect runs"
     PREFECT_API_URL="$PREFECT_API_URL_VALUE" \
-      .venv/bin/python scripts/cancel_deployment_runs.py || true
+      .venv/bin/python scripts/cancel_deployment_runs.py "$DEPLOYMENT_NAME" || true
   else
     echo "Prefect cancel helper missing; skipping active-run cancellation"
   fi

@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import hashlib
 
-import numpy as np
-
-from app.classification.embeddings import config, load
+from app.classification.embeddings import config
+from app.classification.embeddings import load
 from app.classification.embeddings import registry as R
-from app.classification.embeddings.load import LevelRows, derive_prior
 
 
 def _digest(names: tuple[str, ...]) -> str:
@@ -69,56 +67,24 @@ def test_catalogue_hash_is_deterministic() -> None:
     assert len(R.catalogue_hash()) == 16
 
 
-def _synthetic_baseline() -> LevelRows:
-    # Two rows, same (champion, role), so they fold into one CHAMPION_ROLE prior.
-    # matchups and timeplayed weight the rows oppositely so a rate metric and a
-    # per-minute metric resolve to distinct prior values.
-    n = 2
-    columns: dict[str, np.ndarray] = {
-        "championid": np.asarray([1, 1], dtype=np.int32),
-        "teamposition": np.asarray(["TOP", "TOP"], dtype=object),
-        "build": np.asarray(["a", "b"], dtype=object),
-        "build_group": np.asarray(["g", "g"], dtype=object),
-        "matchups": np.asarray([1.0, 3.0], dtype=np.float32),
-        "sum_w_timeplayed": np.asarray([3.0, 1.0], dtype=np.float64),
-    }
-    for metric in R.ALL_METRICS:
-        columns[metric] = np.zeros(n, dtype=np.float32)
-    columns["win"] = np.asarray([1.0, 0.0], dtype=np.float32)  # rate -> matchups
-    columns["kills"] = np.asarray([1.0, 0.0], dtype=np.float32)  # per-min -> timeplayed
-    return LevelRows(
-        config.IdentityType.BASELINE,
-        config.LEVEL_KEY[config.IdentityType.BASELINE],
-        columns,
-        n,
+def test_prior_query_routes_each_metric_by_evidence() -> None:
+    # The prior rollup must denominate each metric by its evidence: rate/final by
+    # matchups, per-minute by sum_w_timeplayed. (Replaces the old in-Python
+    # derive_prior; the rollup now happens in SQL over sufficient statistics.)
+    sql, _ = load._prior_query(config.IdentityType.CHAMPION_ROLE, config.EmbeddingConfig())
+    assert "toFloat32(sum(b.sum_win) / sum(b.matchups)) AS win" in sql
+    assert "60 * sum(b.sum_kills) / sum(b.sum_w_timeplayed)" in sql
+    assert "sum(ifNull(f.sum_final_attackdamage, 0)) / sum(b.matchups)) AS attackdamage" in sql
+
+    # The sibling level rolls up via the shared sibling-build SQL helper.
+    sib_sql, _ = load._prior_query(config.IdentityType.SIBLING, config.EmbeddingConfig())
+    assert "multiIf" in sib_sql
+
+
+def test_baseline_query_divides_sufficient_statistics() -> None:
+    sql, cols = load._baseline_query(config.EmbeddingConfig())
+    assert cols[:6] == (
+        "championid", "teamposition", "build", "build_group", "matchups", "sum_w_timeplayed",
     )
-
-
-def test_derive_prior_routes_each_metric_by_evidence() -> None:
-    prior = derive_prior(config.IdentityType.CHAMPION_ROLE, _synthetic_baseline())
-    assert prior.n == 1
-    # matchups-weighted: (1*1 + 3*0) / 4
-    assert prior.columns["win"][0] == np.float32(0.25)
-    # timeplayed-weighted: (3*1 + 1*0) / 4
-    assert prior.columns["kills"][0] == np.float32(0.75)
-
-
-def test_baseline_cache_rejects_stale_catalogue(tmp_path, monkeypatch) -> None:
-    path = tmp_path / "baseline.npz"
-    rows = LevelRows(
-        config.IdentityType.BASELINE,
-        config.LEVEL_KEY[config.IdentityType.BASELINE],
-        {
-            "championid": np.asarray([1], dtype=np.int32),
-            "teamposition": np.asarray(["TOP"], dtype=object),
-            "build": np.asarray(["a"], dtype=object),
-        },
-        1,
-    )
-    load._save_level_rows(path, rows)
-
-    loaded = load._load_level_rows(path, config.IdentityType.BASELINE)
-    assert loaded is not None and loaded.n == 1
-
-    monkeypatch.setattr(load, "catalogue_hash", lambda: "deadbeefdeadbeef")
-    assert load._load_level_rows(path, config.IdentityType.BASELINE) is None
+    assert "toFloat32(b.sum_win / b.matchups) AS win" in sql
+    assert "60 * b.sum_kills / b.sum_w_timeplayed" in sql

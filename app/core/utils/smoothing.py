@@ -866,14 +866,23 @@ def apply_hierarchical_shrinkage(levels: Mapping[Any, Any], cfg: Any) -> dict[An
                 0,
             )
         }
+    # Phase 3 context features (when loaded) smooth as MATCHUPS-evidence rate-like
+    # metrics. Absent by default, so the standard path is unchanged.
+    context: tuple[str, ...] = ()
+    if getattr(cfg, "include_context_features", False):
+        from app.classification.embeddings.context_features import (
+            CONTEXT_FEATURE_NAMES,
+        )
+
+        context = tuple(m for m in CONTEXT_FEATURE_NAMES if m in target.columns)
     return {
         IdentityType.BASELINE: smooth_hierarchical_baseline(
             target,
             {level: rows for level, rows in levels.items() if level in PRIOR_LEVELS},
             cfg,
             prior_levels=PRIOR_LEVELS,
-            all_metrics=ALL_METRICS,
-            rate_like_metrics=RATE_LIKE_METRICS,
+            all_metrics=(*ALL_METRICS, *context),
+            rate_like_metrics=(*RATE_LIKE_METRICS, *context),
             per_minute_metrics=PER_MINUTE_METRICS,
         )
     }

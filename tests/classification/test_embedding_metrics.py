@@ -15,7 +15,8 @@ from app.classification.embeddings.matrices import build_level_matrix
 
 
 def test_baseline_query_excludes_challenge_data() -> None:
-    baseline_query = _baseline_query("train").lower()
+    baseline_query, _ = _baseline_query(EmbeddingConfig())
+    baseline_query = baseline_query.lower()
 
     assert "participant_challenges" not in baseline_query
     assert "challenge_" not in baseline_query

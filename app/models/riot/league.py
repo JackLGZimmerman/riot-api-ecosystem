@@ -36,10 +36,10 @@ class LeagueItemDTO(BaseModel):
 
 
 class LeagueListDTO(BaseModel):
-    leagueId: str
+    leagueId: str | None = None
     entries: list[LeagueItemDTO]
     tier: str
-    name: str
+    name: str | None = None
     queue: str
 
 

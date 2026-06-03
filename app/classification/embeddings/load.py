@@ -1,51 +1,59 @@
-"""Load non-temporal identity rows and derive hierarchical priors.
+"""Load identity rows and prior levels as SQL rollups of sufficient statistics.
 
-The embeddable population is one row per:
-    (championid, teamposition, build)
+The embeddable population is one row per ``(championid, teamposition, build)``.
+The heavy aggregation is materialised once into the ClickHouse base tables (see
+[build_tables.py]); every prior level is then an exact ``GROUP BY`` rollup of
+those sums. Python only issues the SELECTs and hands the rows to the shared
+smoother. No metric value is computed in Python.
 
-Rows are aggregated directly from filtered participant stats plus final
-participant stat snapshots. Prior levels are derived in memory from the
-baseline aggregate.
+Each metric resolves to its stored sufficient statistic:
+
+* rate / largest-avg -> ``sum_<m> / matchups``
+* per-minute         -> ``60 * sum_<m> / sum_w_timeplayed``
+* final-snapshot     -> ``sum_final_<m> / matchups`` (missing snapshot = 0)
+* context feature    -> ``sum_<f> / cnt`` (team uses ``cnt_team``, matchup
+  ``cnt_matchup``)
+
+A prior level replaces every column with ``sum(...)`` over the coarser key, which
+is the pooled value at that grain (equal to the former matchups-weighted average
+for the count-denominated families).
 """
 
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 
+from app.classification.embeddings.build_tables import (
+    CONTEXT_BASE,
+    FINAL_BASE,
+    IDENTITY_BASE,
+    assert_built,
+)
 from app.classification.embeddings.config import (
     ALL_METRICS,
-    FINAL_SNAPSHOT_AVG_METRICS,
-    FINAL_PARTICIPANT_STATS_TABLE,
-    ITEM_VALUE_TOTALS_TABLE,
-    LARGEST_AVG_METRICS,
     LEVEL_KEY,
-    ML_GAME_SPLIT_TABLE,
-    PARTICIPANT_STATS_TABLE,
-    PER_MINUTE_METRICS,
     PRIOR_LEVELS,
-    RATE_METRICS,
     EmbeddingConfig,
     IdentityType,
 )
-from app.classification.embeddings.registry import (
-    EVIDENCE_BY_RAW_METRIC,
-    Evidence,
-    catalogue_hash,
+from app.classification.embeddings.context_features import (
+    CONTEXT_FEATURE_NAMES,
+    TEAM_FEATURE_NAMES,
 )
+from app.classification.embeddings.registry import RAW_SPECS, Source
 from app.core.utils.common import sql_literal
-from app.core.utils.smoothing import (
-    SIBLING_BUILD_BY_LABEL,
-    build_group_sql,
-)
+from app.core.utils.smoothing import sibling_build_sql
 from database.clickhouse.client import get_client
 
 logger = logging.getLogger(__name__)
+
+_SOURCE_BY_METRIC: dict[str, Source] = {spec.name: spec.source for spec in RAW_SPECS}
+_TEAM_SET = frozenset(TEAM_FEATURE_NAMES)
+_NUMERIC_FLOAT32 = frozenset((*ALL_METRICS, *CONTEXT_FEATURE_NAMES))
 
 
 @dataclass(frozen=True)
@@ -78,7 +86,7 @@ def _columns_to_arrays(
             arrays[name] = np.asarray(col, dtype=np.int32)
         elif name == "sum_w_timeplayed":
             arrays[name] = np.asarray(col, dtype=np.float64)
-        elif name == "matchups" or name in ALL_METRICS:
+        elif name == "matchups" or name in _NUMERIC_FLOAT32:
             arrays[name] = np.asarray(col, dtype=np.float32)
         else:
             arrays[name] = np.asarray(col, dtype=object)
@@ -87,447 +95,140 @@ def _columns_to_arrays(
 
 
 def _query_to_level(
-    *,
-    level: IdentityType,
-    query: str,
-    col_names: tuple[str, ...],
+    *, level: IdentityType, query: str, col_names: tuple[str, ...]
 ) -> LevelRows:
     rows = get_client().query(query).result_rows
     arrays = _columns_to_arrays(rows, col_names)
-    n = len(rows)
-    logger.info("Loaded %s: %d rows", level.value, n)
-    return LevelRows(
-        level=level,
-        key_columns=LEVEL_KEY[level],
-        columns=arrays,
-        n=n,
+    logger.info("Loaded %s: %d rows", level.value, len(rows))
+    return LevelRows(level, LEVEL_KEY[level], arrays, len(rows))
+
+
+def _metric_expr(metric: str, *, rollup: bool) -> str:
+    source = _SOURCE_BY_METRIC[metric]
+    s = (lambda e: f"sum({e})") if rollup else (lambda e: e)
+    if source in (Source.RATE, Source.LARGEST_AVG):
+        body = f"{s(f'b.sum_{metric}')} / {s('b.matchups')}"
+    elif source is Source.FINAL_SNAPSHOT:
+        body = f"{s(f'ifNull(f.sum_final_{metric}, 0)')} / {s('b.matchups')}"
+    elif source is Source.PER_MINUTE:
+        tp = s("b.sum_w_timeplayed")
+        body = f"if({tp} > 0, 60 * {s(f'b.sum_{metric}')} / {tp}, 0)"
+    else:  # pragma: no cover - raw specs are only the four sources above
+        raise ValueError(f"{metric}: unsupported source {source}")
+    return f"toFloat32({body}) AS {metric}"
+
+
+def _context_expr(feature: str, *, rollup: bool) -> str:
+    cnt = "c.cnt_team" if feature in _TEAM_SET else "c.cnt_matchup"
+    s = (lambda e: f"sum({e})") if rollup else (lambda e: e)
+    num = s(f"ifNull(c.sum_{feature}, 0)")
+    den = f"greatest({s(f'ifNull({cnt}, 0)')}, 1)"
+    return f"toFloat32({num} / {den}) AS {feature}"
+
+
+def _join_sql(split: str, *, context: bool) -> str:
+    keys = " AND ".join(f"b.{k} = f.{k}" for k in LEVEL_KEY[IdentityType.BASELINE])
+    join = (
+        f"FROM {IDENTITY_BASE} AS b\n"
+        f"LEFT JOIN {FINAL_BASE} AS f ON b.split = f.split AND {keys}\n"
     )
-
-
-def _raw_cache_path(cfg: EmbeddingConfig, label: str) -> Path:
-    return cfg.cache_dir / "_raw" / f"{cfg.split}_{label}.npz"
-
-
-def _save_npz_atomic(path: Path, columns: dict[str, np.ndarray]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    payload = {
-        "column_names": np.asarray(tuple(columns), dtype=object),
-        **{f"col_{i}": value for i, value in enumerate(columns.values())},
-    }
-    with tmp.open("wb") as fh:
-        np.savez(fh, **payload)
-    tmp.replace(path)
-
-
-def _load_npz_columns(path: Path) -> dict[str, np.ndarray] | None:
-    if not path.exists():
-        return None
-    payload = np.load(path, allow_pickle=True)
-    names = tuple(str(name) for name in payload["column_names"].tolist())
-    return {name: payload[f"col_{i}"] for i, name in enumerate(names)}
-
-
-def _save_level_rows(path: Path, rows: LevelRows) -> None:
-    _save_npz_atomic(
-        path,
-        {
-            "__n": np.asarray([rows.n], dtype=np.int64),
-            "__level": np.asarray([rows.level.value], dtype=object),
-            "__key_columns": np.asarray(rows.key_columns, dtype=object),
-            "__catalogue_hash": np.asarray([catalogue_hash()], dtype=object),
-            **rows.columns,
-        },
-    )
-
-
-def _load_level_rows(path: Path, level: IdentityType) -> LevelRows | None:
-    columns = _load_npz_columns(path)
-    if columns is None:
-        return None
-    n = int(columns.pop("__n")[0])
-    cached_level = str(columns.pop("__level")[0])
-    key_columns = tuple(str(value) for value in columns.pop("__key_columns").tolist())
-    if cached_level != level.value or key_columns != LEVEL_KEY[level]:
-        logger.warning("Ignoring stale classification cache %s", path)
-        return None
-    # Pre-hash caches are grandfathered (absent hash); caches written since carry
-    # the catalogue hash and are rejected when the catalogue changes.
-    cached_hash = columns.pop("__catalogue_hash", None)
-    if cached_hash is not None and str(cached_hash[0]) != catalogue_hash():
-        logger.warning("Ignoring classification cache with stale catalogue %s", path)
-        return None
-    if any(arr.shape != (n,) for arr in columns.values()):
-        logger.warning("Ignoring malformed classification cache %s", path)
-        return None
-    if any("challenge" in name.lower() for name in columns):
-        logger.warning("Ignoring challenge-derived classification cache %s", path)
-        return None
-    logger.info("Loaded cached %s: %d rows", level.value, n)
-    return LevelRows(
-        level=level,
-        key_columns=LEVEL_KEY[level],
-        columns=columns,
-        n=n,
-    )
-
-
-def _rate_aggs(metrics: tuple[str, ...]) -> list[str]:
-    return [f"toFloat32(sum(ps.{metric}) / count()) AS {metric}" for metric in metrics]
-
-
-def _per_minute_aggs(metrics: tuple[str, ...]) -> list[str]:
-    nullable_zero = {"damagedealttoepicmonsters"}
-    out: list[str] = []
-    for metric in metrics:
-        value = f"coalesce(ps.{metric}, 0)" if metric in nullable_zero else f"ps.{metric}"
-        out.append(
-            "toFloat32("
-            f"if(sum(ps.timeplayed) > 0, 60 * sum({value}) / sum(ps.timeplayed), 0)"
-            f") AS {metric}"
+    if context:
+        ckeys = " AND ".join(
+            f"b.{k} = c.{k}" for k in LEVEL_KEY[IdentityType.BASELINE]
         )
-    return out
+        join += f"LEFT JOIN {CONTEXT_BASE} AS c ON b.split = c.split AND {ckeys}\n"
+    return join + f"WHERE b.split = {sql_literal(split)}"
 
 
-def _participant_context_cte(
-    split: str,
-    *,
-    include_stats: bool = True,
-    stat_columns: tuple[str, ...] | None = None,
-) -> str:
-    stat_select = ""
-    if include_stats:
-        columns = stat_columns or (
-            "timeplayed",
-            *RATE_METRICS,
-            *LARGEST_AVG_METRICS,
-            *PER_MINUTE_METRICS,
-        )
-        stat_select = (
-            ",\n        "
-            + ",\n        ".join(f"ps.{column} AS {column}" for column in columns)
-        )
-    return f"""
-participant_context AS (
-    SELECT
-        ps.matchid AS matchid,
-        ps.participantid AS participantid,
-        assumeNotNull(ps.championid) AS championid_nn,
-        toString(ps.teamposition) AS teamposition_str,
-        toString(ivt.highest_value_label) AS build
-        {stat_select}
-    FROM {PARTICIPANT_STATS_TABLE} AS ps
-    INNER JOIN {ML_GAME_SPLIT_TABLE} AS s
-        ON ps.matchid = s.matchid
-    INNER JOIN {ITEM_VALUE_TOTALS_TABLE} AS ivt
-        ON
-            ps.matchid = ivt.matchid
-            AND ps.participantid = ivt.participantid
-    WHERE
-        s.split = {split}
-        AND isNotNull(ps.championid)
-        AND toString(ps.teamposition) != 'UNKNOWN'
-)
-"""
+def _value_exprs(*, rollup: bool, context: bool) -> list[str]:
+    exprs = [_metric_expr(m, rollup=rollup) for m in ALL_METRICS]
+    if context:
+        exprs += [_context_expr(f, rollup=rollup) for f in CONTEXT_FEATURE_NAMES]
+    return exprs
 
 
-def _baseline_query(split: str) -> str:
-    split_sql = sql_literal(split)
-    placeholder_by_metric = {
-        metric: f"toFloat32(0) AS {metric}"
-        for metric in ALL_METRICS
-    }
-    metric_aggs = [placeholder_by_metric[metric] for metric in ALL_METRICS]
-    return f"""
-WITH
-{_participant_context_cte(split_sql, stat_columns=("timeplayed",))}
-SELECT
-    ps.championid_nn AS championid,
-    ps.teamposition_str AS teamposition,
-    ps.build AS build,
-    {build_group_sql("ps.build")},
-    toUInt32(count()) AS matchups,
-    toFloat64(sum(ps.timeplayed)) AS sum_w_timeplayed,
-    {", ".join(metric_aggs)}
-FROM participant_context AS ps
-GROUP BY
-    championid,
-    teamposition,
-    build,
-    build_group
-SETTINGS
-    max_threads = 1,
-    max_bytes_before_external_group_by = 500000000,
-    max_bytes_before_external_sort = 500000000,
-    join_algorithm = 'grace_hash'
-"""
+def _col_names(extra_keys: tuple[str, ...], *, context: bool) -> tuple[str, ...]:
+    ctx = CONTEXT_FEATURE_NAMES if context else ()
+    return (*extra_keys, "matchups", *ALL_METRICS, *ctx)
 
 
-def _direct_metric_query(
-    split: str,
-    metrics: tuple[str, ...],
-    *,
-    per_minute: bool,
-) -> str:
-    split_sql = sql_literal(split)
-    stat_columns = metrics
-    if per_minute:
-        stat_columns = ("timeplayed", *metrics)
-        metric_aggs = _per_minute_aggs(metrics)
-    else:
-        metric_aggs = _rate_aggs(metrics)
-    return f"""
-WITH
-{_participant_context_cte(split_sql, stat_columns=tuple(dict.fromkeys(stat_columns)))}
-SELECT
-    ps.championid_nn AS championid,
-    ps.teamposition_str AS teamposition,
-    ps.build AS build,
-    {", ".join(metric_aggs)}
-FROM participant_context AS ps
-GROUP BY
-    championid,
-    teamposition,
-    build
-SETTINGS
-    max_threads = 1,
-    max_bytes_before_external_group_by = 500000000,
-    max_bytes_before_external_sort = 500000000,
-    join_algorithm = 'grace_hash'
-"""
-
-
-def _final_snapshot_query(split: str) -> str:
-    split_sql = sql_literal(split)
-    tuple_select = ",\n                ".join(FINAL_SNAPSHOT_AVG_METRICS)
-    metric_aggs = ",\n    ".join(
-        f"toFloat32(coalesce(avg(tupleElement(ts.final_stats, {i})), 0)) AS {metric}"
-        for i, metric in enumerate(FINAL_SNAPSHOT_AVG_METRICS, start=1)
+def _baseline_query(cfg: EmbeddingConfig) -> tuple[str, tuple[str, ...]]:
+    context = cfg.include_context_features
+    select = ",\n    ".join(
+        [
+            "b.championid AS championid",
+            "b.teamposition AS teamposition",
+            "b.build AS build",
+            "b.build_group AS build_group",
+            "toUInt32(b.matchups) AS matchups",
+            "toFloat64(b.sum_w_timeplayed) AS sum_w_timeplayed",
+            *_value_exprs(rollup=False, context=context),
+        ]
     )
-    return f"""
-WITH
-final_snapshot AS (
-    SELECT
-        matchid,
-        participantid,
-        argMax(
-            tuple(
-                {tuple_select}
-            ),
-            frame_timestamp
-        ) AS final_stats
-    FROM {FINAL_PARTICIPANT_STATS_TABLE}
-    WHERE matchid IN (
-        SELECT matchid
-        FROM {ML_GAME_SPLIT_TABLE}
-        WHERE split = {split_sql}
-    )
-    GROUP BY
-        matchid,
-        participantid
-),
-{_participant_context_cte(split_sql, include_stats=False)}
-SELECT
-    ps.championid_nn AS championid,
-    ps.teamposition_str AS teamposition,
-    ps.build AS build,
-    {metric_aggs}
-FROM participant_context AS ps
-LEFT JOIN final_snapshot AS ts
-    ON
-        ps.matchid = ts.matchid
-        AND ps.participantid = ts.participantid
-GROUP BY
-    championid,
-    teamposition,
-    build
-SETTINGS
-    max_threads = 2,
-    max_bytes_before_external_group_by = 2000000000,
-    max_bytes_before_external_sort = 2000000000
-"""
-
-
-def _row_key(row: Sequence[object]) -> tuple[int, str, str]:
-    return (int(row[0]), str(row[1]), str(row[2]))
-
-
-def _baseline_index(rows: LevelRows) -> dict[tuple[int, str, str], int]:
-    return {
-        (
-            int(rows.columns["championid"][idx]),
-            str(rows.columns["teamposition"][idx]),
-            str(rows.columns["build"][idx]),
-        ): idx
-        for idx in range(rows.n)
-    }
-
-
-def _merge_identity_metrics(
-    rows: LevelRows,
-    query: str,
-    metrics: tuple[str, ...],
-    *,
-    cache_path: Path | None = None,
-) -> LevelRows:
-    if cache_path is not None:
-        cached = _load_npz_columns(cache_path)
-        if cached is not None and set(cached) == set(metrics):
-            if all(cached[metric].shape == (rows.n,) for metric in metrics):
-                logger.info("Loaded cached identity metrics: %s", cache_path.name)
-                return rows.with_columns({metric: cached[metric] for metric in metrics})
-            logger.warning("Ignoring malformed identity cache %s", cache_path)
-
-    fetched = get_client().query(query).result_rows
-    index = _baseline_index(rows)
-    extra = {
-        metric: np.zeros(rows.n, dtype=np.float32)
-        for metric in metrics
-    }
-    for row in fetched:
-        idx = index.get(_row_key(row))
-        if idx is None:
-            continue
-        for offset, metric in enumerate(metrics, start=3):
-            extra[metric][idx] = np.float32(row[offset] or 0.0)
-    logger.info("Merged %d metric rows into %s", len(fetched), rows.level.value)
-    if cache_path is not None:
-        _save_npz_atomic(cache_path, extra)
-    return rows.with_columns(extra)
-
-
-def _chunks(values: tuple[str, ...], size: int) -> tuple[tuple[str, ...], ...]:
-    return tuple(values[i : i + size] for i in range(0, len(values), size))
-
-
-def load_baseline(cfg: EmbeddingConfig) -> LevelRows:
-    key_cols = LEVEL_KEY[IdentityType.BASELINE]
+    query = f"SELECT\n    {select}\n{_join_sql(cfg.split, context=context)}"
     col_names = (
-        *key_cols,
+        "championid",
+        "teamposition",
+        "build",
         "build_group",
         "matchups",
         "sum_w_timeplayed",
         *ALL_METRICS,
+        *(CONTEXT_FEATURE_NAMES if context else ()),
     )
-    baseline_cache = _raw_cache_path(cfg, "baseline_direct")
-    rows = _load_level_rows(baseline_cache, IdentityType.BASELINE)
-    if rows is None:
-        rows = _query_to_level(
-            level=IdentityType.BASELINE,
-            query=_baseline_query(cfg.split),
-            col_names=col_names,
-        )
-        _save_level_rows(baseline_cache, rows)
-    direct_rate_metrics = (*RATE_METRICS, *LARGEST_AVG_METRICS)
-    rows = _merge_identity_metrics(
-        rows,
-        _direct_metric_query(cfg.split, direct_rate_metrics, per_minute=False),
-        direct_rate_metrics,
-        cache_path=_raw_cache_path(cfg, "direct_rates"),
-    )
-    for idx, metrics in enumerate(_chunks(PER_MINUTE_METRICS, 8)):
-        rows = _merge_identity_metrics(
-            rows,
-            _direct_metric_query(cfg.split, metrics, per_minute=True),
-            metrics,
-            cache_path=_raw_cache_path(cfg, f"direct_per_minute_{idx:02d}"),
-        )
-    rows = _merge_identity_metrics(
-        rows,
-        _final_snapshot_query(cfg.split),
-        FINAL_SNAPSHOT_AVG_METRICS,
-        cache_path=_raw_cache_path(cfg, "final_snapshot"),
-    )
-    return rows
+    return query, col_names
 
 
-def _prior_key(level: IdentityType, rows: LevelRows, idx: int) -> tuple | None:
-    c = rows.columns
-    championid = int(c["championid"][idx])
-    teamposition = str(c["teamposition"][idx])
-    build = str(c["build"][idx])
-    build_group = str(c["build_group"][idx])
-
+def _level_key_exprs(level: IdentityType) -> tuple[list[str], str]:
+    """Return (key select-expressions, extra WHERE) for a prior level."""
     if level is IdentityType.SIBLING:
-        sibling = SIBLING_BUILD_BY_LABEL.get(build)
-        return (championid, teamposition, sibling) if sibling else None
+        sib = sibling_build_sql("b.build")
+        return (
+            ["b.championid AS championid", "b.teamposition AS teamposition", f"{sib} AS build"],
+            f" AND {sib} != ''",
+        )
     if level is IdentityType.CHAMPION_ROLE:
-        return (championid, teamposition)
+        return (["b.championid AS championid", "b.teamposition AS teamposition"], "")
     if level is IdentityType.ROLE_BUILD:
-        return (teamposition, build_group)
+        return (["b.teamposition AS teamposition", "b.build_group AS build_group"], "")
     if level is IdentityType.CHAMPION_BUILD:
-        return (championid, build_group)
+        return (["b.championid AS championid", "b.build_group AS build_group"], "")
     if level is IdentityType.BUILD:
-        return (build_group,)
+        return (["b.build_group AS build_group"], "")
     raise ValueError(f"{level.value} is not a prior level")
 
 
-def _key_array(name: str, values: list[object]) -> np.ndarray:
-    if name == "championid":
-        return np.asarray(values, dtype=np.int32)
-    return np.asarray(values, dtype=object)
+def _prior_query(level: IdentityType, cfg: EmbeddingConfig) -> tuple[str, tuple[str, ...]]:
+    context = cfg.include_context_features
+    key_exprs, where_extra = _level_key_exprs(level)
+    key_cols = LEVEL_KEY[level]
+    select = ",\n    ".join(
+        [*key_exprs, "toUInt32(sum(b.matchups)) AS matchups", *_value_exprs(rollup=True, context=context)]
+    )
+    group_by = ", ".join(key_cols)
+    query = (
+        f"SELECT\n    {select}\n{_join_sql(cfg.split, context=context)}{where_extra}\n"
+        f"GROUP BY {group_by}"
+    )
+    return query, _col_names(key_cols, context=context)
 
 
-def _weighted_average(
-    values: np.ndarray,
-    weights: np.ndarray,
-    indices: np.ndarray,
-) -> np.float32:
-    w = weights[indices].astype(np.float64, copy=False)
-    denom = float(np.sum(w))
-    if denom <= 0.0:
-        return np.float32(0.0)
-    v = values[indices].astype(np.float64, copy=False)
-    return np.float32(np.sum(v * w) / denom)
+def load_baseline(cfg: EmbeddingConfig) -> LevelRows:
+    assert_built()
+    query, col_names = _baseline_query(cfg)
+    return _query_to_level(level=IdentityType.BASELINE, query=query, col_names=col_names)
 
 
-def derive_prior(level: IdentityType, baseline: LevelRows) -> LevelRows:
+def derive_prior(level: IdentityType, cfg: EmbeddingConfig) -> LevelRows:
     if level not in PRIOR_LEVELS:
         raise ValueError(f"{level.value} is not a prior level")
-
-    grouped: dict[tuple, list[int]] = defaultdict(list)
-    for idx in range(baseline.n):
-        key = _prior_key(level, baseline, idx)
-        if key is not None:
-            grouped[key].append(idx)
-
-    key_cols = LEVEL_KEY[level]
-    keys = sorted(grouped)
-    columns: dict[str, np.ndarray] = {
-        name: _key_array(name, [key[i] for key in keys])
-        for i, name in enumerate(key_cols)
-    }
-
-    matchups = baseline.columns["matchups"].astype(np.float64)
-    timeplayed = baseline.columns["sum_w_timeplayed"].astype(np.float64)
-    columns["matchups"] = np.asarray(
-        [np.sum(matchups[grouped[key]]) for key in keys],
-        dtype=np.float32,
-    )
-
-    weight_by_evidence = {
-        Evidence.MATCHUPS: matchups,
-        Evidence.SUM_W_TIMEPLAYED: timeplayed,
-    }
-    for metric in ALL_METRICS:
-        values = baseline.columns[metric]
-        weights = weight_by_evidence[EVIDENCE_BY_RAW_METRIC[metric]]
-        columns[metric] = np.asarray(
-            [
-                _weighted_average(values, weights, np.asarray(grouped[key], dtype=np.int64))
-                for key in keys
-            ],
-            dtype=np.float32,
-        )
-
-    rows = LevelRows(level, key_cols, columns, len(keys))
-    logger.info("Derived %s prior: %d rows", level.value, rows.n)
-    return rows
+    query, col_names = _prior_query(level, cfg)
+    return _query_to_level(level=level, query=query, col_names=col_names)
 
 
 def load_all(cfg: EmbeddingConfig) -> dict[IdentityType, LevelRows]:
-    baseline = load_baseline(cfg)
-    out = {IdentityType.BASELINE: baseline}
+    assert_built()
+    out: dict[IdentityType, LevelRows] = {IdentityType.BASELINE: load_baseline(cfg)}
     for level in PRIOR_LEVELS:
-        out[level] = derive_prior(level, baseline)
+        out[level] = derive_prior(level, cfg)
     return out

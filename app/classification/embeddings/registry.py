@@ -39,11 +39,9 @@ class Evidence(str, Enum):
     STATIC_NONE = "static_none"  # derived metrics: not individually smoothed
 
 
-# ---------------------------------------------------------------------------
 # Raw source groups. Order is the catalogue contract: ALL_METRICS is
 # (rate, largest_avg, final_snapshot, per_minute) and downstream feature
 # ordering depends on it staying stable.
-# ---------------------------------------------------------------------------
 
 # Per-game event rates in [0, 1]; smoothed with matchups as effective N.
 RATE_METRICS: tuple[str, ...] = (
@@ -520,9 +518,7 @@ DERIVED_METRIC_FUNCS: dict[str, Callable[[Mapping[str, np.ndarray]], np.ndarray]
 }
 
 
-# ---------------------------------------------------------------------------
 # MetricSpec layer.
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
