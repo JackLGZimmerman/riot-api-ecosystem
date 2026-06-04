@@ -29,6 +29,8 @@ else
   echo "Prefect API unavailable; skipping queue/automation pause"
 fi
 
+docker stop prefect-worker 2>/dev/null || true
+
 mapfile -t flow_run_containers < <(
   docker ps -q --filter label=io.prefect.flow-run-id
 )
@@ -56,8 +58,6 @@ if prefect_api_available; then
 else
   echo "Prefect API unavailable; skipping active-run cancellation"
 fi
-
-docker stop prefect-worker 2>/dev/null || true
 
 unfinished_matchdata_mutations() {
   docker container inspect "$CLICKHOUSE_CONTAINER" --format '{{.State.Running}}' 2>/dev/null \

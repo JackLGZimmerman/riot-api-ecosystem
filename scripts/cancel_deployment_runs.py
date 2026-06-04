@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from uuid import uuid4
 
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import (
@@ -14,6 +13,7 @@ from prefect.client.schemas.filters import (
 )
 from prefect.client.schemas.objects import StateType
 from prefect.client.schemas.sorting import FlowRunSort
+from prefect.states import Cancelled
 
 
 ACTIVE_STATE_TYPES = (
@@ -45,22 +45,10 @@ async def cancel_deployment_runs(deployment_name: str) -> int:
 
         print(f"Cancelling {len(flow_runs)} active Prefect flow run(s)")
         for flow_run in flow_runs:
-            await client.request(
-                "POST",
-                "/flow_runs/{id}/set_state",
-                path_params={"id": flow_run.id},
-                json={
-                    "state": {
-                        "type": StateType.CANCELLED.value,
-                        "name": "Cancelled",
-                        "message": "Cancelled by stop_pipeline_safely.sh",
-                        "state_details": {
-                            "flow_run_id": str(flow_run.id),
-                            "transition_id": str(uuid4()),
-                        },
-                    },
-                    "force": True,
-                },
+            await client.set_flow_run_state(
+                flow_run.id,
+                Cancelled(message="Cancelled by pipeline restart/stop script"),
+                force=True,
             )
             print(f"Cancelled {flow_run.id}")
 

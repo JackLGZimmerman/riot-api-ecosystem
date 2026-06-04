@@ -11,6 +11,14 @@ from pathlib import Path
 
 import numpy as np
 
+from app.ml.audit_format import (
+    _format_pct,
+    _format_pp,
+    _format_pp_mse,
+    _max_or_nan,
+    _mean_or_nan,
+)
+
 DEFAULT_AUDIT_PATH = Path("app/ml/documentation/HGNN_CONTEXT_EXAMPLES_AUDIT.md")
 
 
@@ -273,42 +281,9 @@ def _as_1d_float(name: str, values: Sequence[float] | np.ndarray) -> np.ndarray:
     return arr
 
 
-def _mean_or_nan(values: np.ndarray) -> float:
-    if values.size == 0:
-        return float("nan")
-    return float(np.mean(values))
-
-
-def _max_or_nan(values: np.ndarray) -> float:
-    if values.size == 0:
-        return float("nan")
-    return float(np.max(values))
-
-
 def _finite_gaps(values: Sequence[float]) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64)
     return arr[np.isfinite(arr)]
-
-
-def _format_pct(value: float) -> str:
-    if not np.isfinite(value):
-        return "N/A"
-    return f"{100.0 * value:.2f}%"
-
-
-def _format_pp(value: float | int, *, signed: bool = True) -> str:
-    numeric = float(value)
-    if not np.isfinite(numeric):
-        return "N/A"
-    sign = "+" if signed and numeric >= 0.0 else ""
-    return f"{sign}{100.0 * numeric:.2f} pp"
-
-
-def _format_pp_mse(value: float | int) -> str:
-    numeric = float(value)
-    if not np.isfinite(numeric):
-        return "N/A"
-    return f"{10000.0 * numeric:.2f} pp^2"
 
 
 def _parse_args() -> argparse.Namespace:

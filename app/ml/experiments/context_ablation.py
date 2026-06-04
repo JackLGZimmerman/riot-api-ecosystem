@@ -53,11 +53,37 @@ SIDECAR_VARIANTS: dict[str, dict[str, Any]] = {
         "use_identity_temporal_sidecar": False,
         "use_identity_semantic_context_head": True,
     },
+    "learned_semantic_moe_only": {
+        "use_identity_static_sidecar": False,
+        "use_identity_full_game_sidecar": False,
+        "use_identity_temporal_sidecar": False,
+        "use_learned_semantic_moe": True,
+    },
+    "learned_semantic_moe_group_features_only": {
+        "use_identity_static_sidecar": False,
+        "use_identity_full_game_sidecar": False,
+        "use_identity_temporal_sidecar": False,
+        "use_learned_semantic_moe": True,
+        "use_semantic_group_features": True,
+    },
     "all_three_plus_semantic_context": {
         "use_identity_static_sidecar": True,
         "use_identity_full_game_sidecar": True,
         "use_identity_temporal_sidecar": True,
         "use_identity_semantic_context_head": True,
+    },
+    "all_three_plus_learned_semantic_moe": {
+        "use_identity_static_sidecar": True,
+        "use_identity_full_game_sidecar": True,
+        "use_identity_temporal_sidecar": True,
+        "use_learned_semantic_moe": True,
+    },
+    "all_three_plus_learned_semantic_moe_group_features": {
+        "use_identity_static_sidecar": True,
+        "use_identity_full_game_sidecar": True,
+        "use_identity_temporal_sidecar": True,
+        "use_learned_semantic_moe": True,
+        "use_semantic_group_features": True,
     },
     "all_three_plus_raw_context": {
         "use_identity_static_sidecar": True,

@@ -8,9 +8,9 @@ from app.core.utils.smoothing import (
     SIBLING_BUILD_BY_LABEL,
     S2VX_NEUTRAL_FLOOR_LADDER,
     build_group_for,
-    build_group_sql,
     capped_prior_weight,
     s2vx_floor_prior_for_ladder,
+    sibling_build_sql,
     smooth_ml_prior_features,
     smooth_metrics_with_priors,
     smooth_rate_by_mode,
@@ -23,8 +23,9 @@ def test_build_group_policy_is_shared_across_ml_and_classification() -> None:
     assert ml_config.build_group_for("ap_off_tank") == "ap"
     assert build_group_for("crit") == "crit"
     assert SIBLING_BUILD_BY_LABEL["ability_power"] == "ap_off_tank"
-    assert embedding_load.SIBLING_BUILD_BY_LABEL is SIBLING_BUILD_BY_LABEL
-    assert embedding_load.build_group_sql is build_group_sql
+    # Classification shares the same build-group/sibling policy via the
+    # single smoothing module (load.py imports sibling_build_sql from it).
+    assert embedding_load.sibling_build_sql is sibling_build_sql
 
 
 def test_smooth_rate_by_mode_matches_additive_and_cascade_semantics() -> None:

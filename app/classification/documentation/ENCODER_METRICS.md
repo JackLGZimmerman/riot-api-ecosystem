@@ -1,24 +1,17 @@
 # Identity Encoder Metric Surfaces
 
-This file lists the input metrics available to each classification identity
-encoder. Counts are generated from the current code surfaces.
-
-## Summary
+Input-metric reference for each classification identity encoder. Counts come
+from the current code surfaces.
 
 | Encoder | Grain | Input count | Source |
 | --- | --- | ---: | --- |
-| Full-game | `(champion_id, teamposition_id, build_id)` | 215 metrics | `full_game_metric_columns()` |
+| Full-game | `(champion_id, teamposition_id, build_id)` | 215 (66 raw + 89 derived + 60 context) | `full_game_metric_columns()` |
 | Static identity | `champion_id` | 47 features | `static_feature_names()` |
-| Temporal | `(champion_id, teamposition_id, build_id)` | 47 buckets x 51 metrics = 2397 possible scalar values per identity | `METRIC_NAMES` over the temporal bucket axis |
+| Temporal | `(champion_id, teamposition_id, build_id)` | 51 metrics × 47 buckets = 2397 scalars/identity | `METRIC_NAMES` over the bucket axis |
 
-The full-game default includes all 215 metrics: 66 raw profile metrics, 89
-derived profile metrics, and 60 context features. Use
-`full_game_metric_columns(include_context=False)` or CLI `--profile-only` only
-for legacy 155-column profile-only matrices.
-
-The temporal metrics are listed once. Each metric is available across the 47
-minute buckets (`0..45` plus `46_plus`); unobserved buckets are masked during
-training and evaluation.
+`full_game_metric_columns(include_context=False)` / CLI `--profile-only` selects
+the legacy 155-column profile-only surface. Temporal metrics are listed once;
+each spans the 47 minute buckets (`0..45` + `46_plus`), unobserved buckets masked.
 
 ## Full-Game Encoder
 

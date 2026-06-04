@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -21,16 +20,25 @@ from torch.utils.data import DataLoader, Dataset
 
 from app.classification.embeddings.static_champion import (
     build_static_matrix,
-    static_feature_names,
 )
-from app.classification.full_game_encoder import (
+from app.classification.encoder_common import (
+    LatentNorm,
+    _batchnorm_single_row_safe,
+    _id_array,
     _latent_decorrelation_loss,
+    _latent_norm,
     _latent_summary,
+    _mlp,
+    _normalise_positive_dims,
+    _require_columns,
+    _require_latent_norm,
+    _require_positive,
+    _require_unit_interval,
     _resolve_amp,
     _resolve_device,
 )
 
-StaticLatentNorm = Literal["batch", "layer", "none"]
+StaticLatentNorm = LatentNorm
 
 FORBIDDEN_STATIC_INPUT_SUBSTRINGS = (
     "win_rate",
@@ -72,20 +80,11 @@ class StaticIdentityConfig:
     latent_norm: StaticLatentNorm = "batch"
 
     def __post_init__(self) -> None:
-        for name in ("continuous_dim", "latent_dim"):
-            if int(getattr(self, name)) <= 0:
-                raise ValueError(f"{name} must be positive")
-        for name in ("hidden_dims", "decoder_hidden_dims"):
-            dims = tuple(int(dim) for dim in getattr(self, name))
-            if any(dim <= 0 for dim in dims):
-                raise ValueError(f"{name} must contain only positive dimensions")
-            object.__setattr__(self, name, dims)
-        if not 0.0 <= float(self.dropout) <= 1.0:
-            raise ValueError("dropout must be between 0 and 1")
-        if not 0.0 <= float(self.latent_dropout) <= 1.0:
-            raise ValueError("latent_dropout must be between 0 and 1")
-        if self.latent_norm not in {"batch", "layer", "none"}:
-            raise ValueError("latent_norm must be one of: 'batch', 'layer', 'none'")
+        _require_positive(self, ("continuous_dim", "latent_dim"))
+        _normalise_positive_dims(self, ("hidden_dims", "decoder_hidden_dims"))
+        _require_unit_interval(self, "dropout")
+        _require_unit_interval(self, "latent_dropout")
+        _require_latent_norm(self.latent_norm)
 
 
 class StaticIdentityDataset(Dataset[dict[str, torch.Tensor]]):
@@ -135,21 +134,7 @@ class StaticIdentityAutoencoder(nn.Module):
     def encode(self, continuous: torch.Tensor) -> torch.Tensor:
         _validate_continuous(continuous, self.config.continuous_dim)
         latent = self.encoder(continuous)
-        if (
-            isinstance(self.latent_norm, nn.BatchNorm1d)
-            and self.training
-            and latent.shape[0] == 1
-        ):
-            return nn.functional.batch_norm(
-                latent,
-                self.latent_norm.running_mean,
-                self.latent_norm.running_var,
-                self.latent_norm.weight,
-                self.latent_norm.bias,
-                training=False,
-                eps=self.latent_norm.eps,
-            )
-        return self.latent_norm(latent)
+        return _batchnorm_single_row_safe(latent, self.latent_norm)
 
     def forward(self, continuous: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         latent = self.encode(continuous)
@@ -365,23 +350,6 @@ def _continuous_columns(
     return out
 
 
-def _require_columns(frame: pd.DataFrame, columns: Sequence[str]) -> None:
-    missing = [column for column in columns if column not in frame.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
-
-def _id_array(frame: pd.DataFrame, column: str) -> np.ndarray:
-    values = frame[column].to_numpy(dtype=np.float64, copy=True)
-    if values.ndim != 1:
-        raise ValueError(f"{column} must be a 1-D column")
-    if not np.isfinite(values).all():
-        raise ValueError(f"{column} contains non-finite IDs")
-    if np.any(values < 0.0) or np.any(values != np.floor(values)):
-        raise ValueError(f"{column} must contain non-negative integer IDs")
-    return values.astype(np.int64, copy=False)
-
-
 def _continuous_array(frame: pd.DataFrame, columns: Sequence[str]) -> np.ndarray:
     values = frame.loc[:, list(columns)].to_numpy(dtype=np.float32, copy=True)
     if values.ndim != 2:
@@ -427,28 +395,6 @@ def _corrupt_continuous(values: torch.Tensor, *, noise_std: float, mask_prob: fl
     return out
 
 
-def _mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int, *, dropout: float) -> nn.Sequential:
-    layers: list[nn.Module] = []
-    prev = int(input_dim)
-    for hidden_dim in hidden_dims:
-        layers.extend([nn.Linear(prev, int(hidden_dim)), nn.ReLU()])
-        if dropout > 0.0:
-            layers.append(nn.Dropout(dropout))
-        prev = int(hidden_dim)
-    layers.append(nn.Linear(prev, int(output_dim)))
-    return nn.Sequential(*layers)
-
-
-def _latent_norm(latent_dim: int, kind: StaticLatentNorm) -> nn.Module:
-    if kind == "batch":
-        return nn.BatchNorm1d(latent_dim)
-    if kind == "layer":
-        return nn.LayerNorm(latent_dim)
-    if kind == "none":
-        return nn.Identity()
-    raise ValueError("latent_norm must be one of: 'batch', 'layer', 'none'")
-
-
 __all__ = [
     "FORBIDDEN_STATIC_INPUT_COLUMNS",
     "FORBIDDEN_STATIC_INPUT_SUBSTRINGS",
@@ -457,7 +403,6 @@ __all__ = [
     "StaticIdentityDataset",
     "evaluate_static_autoencoder",
     "extract_static_latents",
-    "static_feature_names",
     "static_identity_frame",
     "train_static_autoencoder",
     "validate_static_input_columns",

@@ -52,15 +52,10 @@ from app.classification.temporal_autoencoder import (
     train_temporal,
 )
 from app.core.logging.logger import setup_logging_config
+from app.core.utils.common import resolve_device_str as _resolve_device
 from app.ml.encoder_sidecar import build_encoder_sidecar_metadata, save_encoder_sidecar
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_device(device: str) -> str:
-    if device != "auto":
-        return device
-    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _identity_frame(matrix) -> tuple[pd.DataFrame, dict[str, int], dict[str, int]]:

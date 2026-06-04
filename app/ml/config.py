@@ -28,7 +28,6 @@ MATCHUP_1V1_NOBUILD_DICT = "game_data_filtered.matchup_1v1_nobuild_dict"
 MATCHUP_1V1_CHAMP_DICT = "game_data_filtered.matchup_1v1_champ_dict"
 SYNERGY_2VX_BUILD_GROUP_DICT = "game_data_filtered.synergy_2vx_build_group_dict"
 SYNERGY_2VX_NOBUILD_DICT = "game_data_filtered.synergy_2vx_nobuild_dict"
-SYNERGY_2VX_CHAMP_DICT = "game_data_filtered.synergy_2vx_champ_dict"
 # Source tables (finest -> coarsest) for the empirical-Bayes per-level strength
 # moments, with the win-rate column each table exposes.
 MATCHUP_1V1_LEVEL_TABLES: tuple[tuple[str, str], ...] = (
@@ -55,7 +54,6 @@ class DatasetConfig:
     matchup_1v1_champ_dict: str = MATCHUP_1V1_CHAMP_DICT
     synergy_2vx_build_group_dict: str = SYNERGY_2VX_BUILD_GROUP_DICT
     synergy_2vx_nobuild_dict: str = SYNERGY_2VX_NOBUILD_DICT
-    synergy_2vx_champ_dict: str = SYNERGY_2VX_CHAMP_DICT
     val_fraction: float = 0.1
     test_fraction: float = 0.1
     smoothing_prior_mean: float = 0.5
@@ -106,6 +104,7 @@ class DatasetConfig:
 class TrainConfig:
     model_path: Path = ML_DATA_DIR / "structured_winrate_model.pt"
     metrics_path: Path = ML_DATA_DIR / "metrics_latest.json"
+    warm_start_model_path: Path | None = None
     batch_size: int = 32768
     max_epochs: int = 40
     patience: int = 3
@@ -127,3 +126,15 @@ class TrainConfig:
     # to BCE. This is opt-in research behaviour and does not affect inference.
     auc_ranking_loss_weight: float = 0.0
     auc_ranking_loss_pairs: int = 4096
+    # Optional semantic context-bin calibration objective. It matches the mean
+    # predicted side win rate to the empirical side win rate inside the shared
+    # HGNN context audit bins, giving rare semantic tails direct training signal.
+    semantic_context_calibration_loss_weight: float = 0.0
+    semantic_context_calibration_min_count: int = 8
+    semantic_context_calibration_tail_weight: float = 2.0
+    # Calibration target family. "champion_raw" matches each champion-specific audit
+    # bin's raw train win rate (high variance: median bin n~500, noise floor ~10.5
+    # pp^2, overfits when up-weighted). "group_eb" matches deterministic build/role
+    # group bins (median n~47k) with empirical-Bayes-shrunk targets, whose noise
+    # floor is ~20x lower, so the objective fits true win rates instead of noise.
+    semantic_context_calibration_target: str = "champion_raw"

@@ -33,14 +33,17 @@ def sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def fit_last_dim(values: np.ndarray, dim: int) -> np.ndarray:
-    """Pad/truncate the last axis of `values` to `dim` (float32)."""
-    if values.shape[-1] == dim:
-        return values.astype(np.float32, copy=False)
-    if values.shape[-1] > dim:
-        return values[..., :dim].astype(np.float32, copy=False)
-    pad = np.zeros((*values.shape[:-1], dim - values.shape[-1]), dtype=np.float32)
-    return np.concatenate([values.astype(np.float32, copy=False), pad], axis=-1)
+def resolve_device_str(device: str) -> str:
+    """Resolve an ``"auto"`` device request to ``"cuda"``/``"cpu"``.
+
+    Any explicit device string passes through unchanged. ``torch`` is imported
+    lazily so this module stays dependency-light for non-torch consumers.
+    """
+    if device != "auto":
+        return device
+    import torch
+
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def signed_log1p(values: np.ndarray) -> np.ndarray:
@@ -54,8 +57,7 @@ def median_mad_standardise(
     """Signed-log1p compress then standardise each column by median/MAD.
 
     Returns (standardised float32, median float32, MAD float32). The MAD is
-    floored at 1.0 where it would be ~0, and that floored MAD is what both the
-    returned values and `apply_median_mad` divide by.
+    floored at 1.0 where it would be ~0.
     """
     flat = signed_log1p(values)
     med = np.median(flat, axis=0, keepdims=True)
@@ -63,11 +65,3 @@ def median_mad_standardise(
     mad = np.where(mad > 1e-8, mad, 1.0)
     standardised = ((flat - med) / mad).astype(np.float32)
     return standardised, med.astype(np.float32), mad.astype(np.float32)
-
-
-def apply_median_mad(
-    values: np.ndarray, med: np.ndarray, mad: np.ndarray
-) -> np.ndarray:
-    """Apply a previously fit median/MAD standardisation to new values."""
-    flat = signed_log1p(values)
-    return ((flat - med) / np.where(mad > 1e-8, mad, 1.0)).astype(np.float32)

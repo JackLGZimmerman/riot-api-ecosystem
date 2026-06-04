@@ -20,11 +20,6 @@ from app.core.utils.common import POSITIONS
 
 N_PLAYERS = 10
 SIDE_CAR_BLOCKS = ("static", "full_game", "temporal")
-LATENT_KEYS = {
-    "static": "static_latents",
-    "full_game": "full_game_latents",
-    "temporal": "temporal_latents",
-}
 REQUIRED_SIDECAR_ARRAYS = frozenset(
     {
         "champion_id",
@@ -424,7 +419,6 @@ __all__ = [
     "EncoderSidecarDims",
     "EncoderSidecarLookup",
     "SidecarGatherTables",
-    "LATENT_KEYS",
     "REQUIRED_SIDECAR_ARRAYS",
     "SIDE_CAR_BLOCKS",
     "build_encoder_sidecar_metadata",

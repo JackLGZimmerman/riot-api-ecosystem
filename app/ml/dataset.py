@@ -12,6 +12,7 @@ from app.ml.cache_layout import (
     sidecar_array_paths,
 )
 from app.ml.config import DatasetConfig
+from app.ml.semantic_group_features import materialize_semantic_group_feature_cache
 
 LEGACY_CACHE_FORMATS = frozenset(
     {
@@ -57,6 +58,9 @@ class SplitData:
     identity_full_game_sidecar: np.ndarray | None = None
     identity_temporal_sidecar: np.ndarray | None = None
     identity_encoder_support: np.ndarray | None = None
+    # Optional compact semantic audit-group features [games, 10, G]. Loaded only
+    # when the learned semantic MoE group-feature flag is enabled.
+    semantic_group_features: np.ndarray | None = None
 
 
 def _slice(arrays: dict[str, np.ndarray], lo: int, hi: int) -> SplitData:
@@ -173,6 +177,7 @@ def load_splits(
     cfg: DatasetConfig,
     *,
     require_counts: bool = False,
+    load_semantic_group_features: bool = False,
 ) -> dict[str, SplitData]:
     meta = json.loads((cfg.cache_dir / CACHE_META_FILE).read_text())
     cache_format = meta.get("format")
@@ -227,5 +232,14 @@ def load_splits(
     for name, path in sidecar_array_paths(cfg.cache_dir).items():
         if path.exists():
             arrays[name] = np.load(path, mmap_mode="r")[:n]
+    if load_semantic_group_features:
+        identity = meta.get("identity")
+        if not isinstance(identity, dict) or "build_vocab" not in identity:
+            raise ValueError("Cache metadata is missing identity.build_vocab; rebuild the cache.")
+        arrays["semantic_group_features"] = materialize_semantic_group_feature_cache(
+            cache_dir=cfg.cache_dir,
+            n_games=n,
+            build_vocab=tuple(identity["build_vocab"]),
+        )
     _validate_blue_win(arrays["blue_win"])
     return {name: _slice(arrays, *split_ranges[name]) for name in SPLIT_ORDER}

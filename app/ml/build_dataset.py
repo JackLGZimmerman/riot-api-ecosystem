@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from pathlib import Path
@@ -303,25 +304,19 @@ def _level_strengths(cfg: DatasetConfig) -> dict[str, list[float]]:
 
 def _smoothed_features(
     raw: dict[str, np.ndarray],
+    cfg: DatasetConfig,
     *,
-    prior_mean: float,
-    prior_strength: float,
-    amplification_threshold: float,
-    smoothing_mode: str,
-    prior_confidence_matchups: float,
-    per_side_fallback: bool,
-    nested_pooling: bool,
     level_strengths: dict[str, list[float]],
 ) -> dict[str, np.ndarray]:
     smoothed = smooth_ml_prior_features(
         raw,
-        prior_mean=prior_mean,
-        prior_strength=prior_strength,
-        amplification_threshold=amplification_threshold,
-        smoothing_mode=smoothing_mode,
-        prior_confidence_matchups=prior_confidence_matchups,
-        per_side_fallback=per_side_fallback,
-        nested_pooling=nested_pooling,
+        prior_mean=cfg.smoothing_prior_mean,
+        prior_strength=cfg.smoothing_prior_strength,
+        amplification_threshold=cfg.amplification_threshold,
+        smoothing_mode=cfg.smoothing_mode,
+        prior_confidence_matchups=cfg.prior_confidence_matchups,
+        per_side_fallback=cfg.interaction_per_side_fallback,
+        nested_pooling=cfg.interaction_nested_pooling,
         level_strengths=level_strengths,
         m1v1_levels=_M1V1_LEVELS,
         s2vx_levels=_S2VX_LEVELS,
@@ -377,18 +372,10 @@ def _fetch_chunk_rows(query: str, attempts: int = 4) -> list:
 
 
 def _stream_split(
+    cfg: DatasetConfig,
     split: str,
     limit: int,
     *,
-    player_pivot_table: str,
-    solo_prior_dict: str,
-    matchup_1v1_dict: str,
-    synergy_2vx_dict: str,
-    matchup_1v1_nobuild_dict: str,
-    matchup_1v1_champ_dict: str,
-    synergy_2vx_build_group_dict: str,
-    synergy_2vx_nobuild_dict: str,
-    synergy_2vx_champ_dict: str,
     build_vocab_sql: str,
     n_builds: int,
     key_build_expr: str,
@@ -399,15 +386,14 @@ def _stream_split(
     while remaining > 0:
         chunk = min(_CHUNK_SIZE, remaining)
         query = _CHUNK_QUERY_TEMPLATE.format(
-            table=player_pivot_table,
-            solo_prior_dict=solo_prior_dict,
-            matchup_1v1_dict=matchup_1v1_dict,
-            synergy_2vx_dict=synergy_2vx_dict,
-            matchup_1v1_nobuild_dict=matchup_1v1_nobuild_dict,
-            matchup_1v1_champ_dict=matchup_1v1_champ_dict,
-            synergy_2vx_build_group_dict=synergy_2vx_build_group_dict,
-            synergy_2vx_nobuild_dict=synergy_2vx_nobuild_dict,
-            synergy_2vx_champ_dict=synergy_2vx_champ_dict,
+            table=cfg.player_pivot_table,
+            solo_prior_dict=cfg.solo_prior_dict,
+            matchup_1v1_dict=cfg.matchup_1v1_dict,
+            synergy_2vx_dict=cfg.synergy_2vx_dict,
+            matchup_1v1_nobuild_dict=cfg.matchup_1v1_nobuild_dict,
+            matchup_1v1_champ_dict=cfg.matchup_1v1_champ_dict,
+            synergy_2vx_build_group_dict=cfg.synergy_2vx_build_group_dict,
+            synergy_2vx_nobuild_dict=cfg.synergy_2vx_nobuild_dict,
             split=split,
             last_matchid=last_matchid,
             chunk=chunk,
@@ -430,62 +416,29 @@ def _stream_split(
 
 def _write_split(
     arrays: dict[str, np.ndarray],
+    cfg: DatasetConfig,
     *,
     split: str,
     limit: int,
     offset: int,
-    prior_mean: float,
-    prior_strength: float,
-    amplification_threshold: float,
-    smoothing_mode: str,
-    prior_confidence_matchups: float,
-    per_side_fallback: bool,
-    nested_pooling: bool,
     level_strengths: dict[str, list[float]],
     leave_one_out: bool,
-    player_pivot_table: str,
-    solo_prior_dict: str,
-    matchup_1v1_dict: str,
-    synergy_2vx_dict: str,
-    matchup_1v1_nobuild_dict: str,
-    matchup_1v1_champ_dict: str,
-    synergy_2vx_build_group_dict: str,
-    synergy_2vx_nobuild_dict: str,
-    synergy_2vx_champ_dict: str,
     build_vocab_sql: str,
     n_builds: int,
     key_build_expr: str,
 ) -> int:
     written = 0
     for raw in _stream_split(
+        cfg,
         split,
         limit,
-        player_pivot_table=player_pivot_table,
-        solo_prior_dict=solo_prior_dict,
-        matchup_1v1_dict=matchup_1v1_dict,
-        synergy_2vx_dict=synergy_2vx_dict,
-        matchup_1v1_nobuild_dict=matchup_1v1_nobuild_dict,
-        matchup_1v1_champ_dict=matchup_1v1_champ_dict,
-        synergy_2vx_build_group_dict=synergy_2vx_build_group_dict,
-        synergy_2vx_nobuild_dict=synergy_2vx_nobuild_dict,
-        synergy_2vx_champ_dict=synergy_2vx_champ_dict,
         build_vocab_sql=build_vocab_sql,
         n_builds=n_builds,
         key_build_expr=key_build_expr,
     ):
         if leave_one_out:
             _leave_one_out(raw)
-        block = _smoothed_features(
-            raw,
-            prior_mean=prior_mean,
-            prior_strength=prior_strength,
-            amplification_threshold=amplification_threshold,
-            smoothing_mode=smoothing_mode,
-            prior_confidence_matchups=prior_confidence_matchups,
-            per_side_fallback=per_side_fallback,
-            nested_pooling=nested_pooling,
-            level_strengths=level_strengths,
-        )
+        block = _smoothed_features(raw, cfg, level_strengths=level_strengths)
         start = offset + written
         for name, data in block.items():
             arrays[name][start : start + len(data)] = data
@@ -600,27 +553,12 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     for sql_split, meta_split in SPLITS:
         written = _write_split(
             arrays,
+            cfg,
             split=sql_split,
             limit=counts[meta_split],
             offset=offset,
-            prior_mean=cfg.smoothing_prior_mean,
-            prior_strength=cfg.smoothing_prior_strength,
-            amplification_threshold=cfg.amplification_threshold,
-            smoothing_mode=cfg.smoothing_mode,
-            prior_confidence_matchups=cfg.prior_confidence_matchups,
-            per_side_fallback=cfg.interaction_per_side_fallback,
-            nested_pooling=cfg.interaction_nested_pooling,
             level_strengths=level_strengths,
             leave_one_out=cfg.interaction_loo and sql_split == "train",
-            player_pivot_table=cfg.player_pivot_table,
-            solo_prior_dict=cfg.solo_prior_dict,
-            matchup_1v1_dict=cfg.matchup_1v1_dict,
-            synergy_2vx_dict=cfg.synergy_2vx_dict,
-            matchup_1v1_nobuild_dict=cfg.matchup_1v1_nobuild_dict,
-            matchup_1v1_champ_dict=cfg.matchup_1v1_champ_dict,
-            synergy_2vx_build_group_dict=cfg.synergy_2vx_build_group_dict,
-            synergy_2vx_nobuild_dict=cfg.synergy_2vx_nobuild_dict,
-            synergy_2vx_champ_dict=cfg.synergy_2vx_champ_dict,
             build_vocab_sql=build_vocab_sql,
             n_builds=n_builds,
             key_build_expr=key_build_expr,
@@ -647,5 +585,28 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     )
 
 
+def _parse_args() -> DatasetConfig:
+    defaults = DatasetConfig()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cache-dir", type=Path, default=defaults.cache_dir)
+    parser.add_argument("--max-games", type=int, default=defaults.max_games)
+    parser.add_argument(
+        "--encoder-sidecar-path",
+        type=Path,
+        default=defaults.encoder_sidecar_path,
+        help="Frozen three-encoder sidecar artifact to record in the v28 cache meta.",
+    )
+    args = parser.parse_args()
+    return DatasetConfig(
+        cache_dir=args.cache_dir,
+        max_games=args.max_games,
+        encoder_sidecar_path=args.encoder_sidecar_path,
+    )
+
+
+def main() -> None:
+    build(_parse_args())
+
+
 if __name__ == "__main__":
-    build()
+    main()

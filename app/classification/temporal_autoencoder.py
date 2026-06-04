@@ -17,9 +17,12 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from app.classification.full_game_encoder import (
+from app.classification.encoder_common import (
+    _batchnorm_single_row_safe,
     _latent_decorrelation_loss,
     _latent_summary,
+    _require_positive,
+    _require_unit_interval,
     _resolve_device,
 )
 
@@ -72,20 +75,19 @@ class TemporalAEConfig:
     zero_unobserved_input: bool = True
 
     def __post_init__(self) -> None:
-        for name in (
-            "metric_embed_dim",
-            "latent_dim",
-            "champ_embed_dim",
-            "pos_embed_dim",
-            "build_embed_dim",
-            "hidden",
-        ):
-            if int(getattr(self, name)) <= 0:
-                raise ValueError(f"{name} must be positive")
-        if not 0.0 <= float(self.dropout) <= 1.0:
-            raise ValueError("dropout must be between 0 and 1")
-        if not 0.0 <= float(self.latent_dropout) <= 1.0:
-            raise ValueError("latent_dropout must be between 0 and 1")
+        _require_positive(
+            self,
+            (
+                "metric_embed_dim",
+                "latent_dim",
+                "champ_embed_dim",
+                "pos_embed_dim",
+                "build_embed_dim",
+                "hidden",
+            ),
+        )
+        _require_unit_interval(self, "dropout")
+        _require_unit_interval(self, "latent_dropout")
 
 
 class TemporalAutoencoder(nn.Module):
@@ -141,19 +143,7 @@ class TemporalAutoencoder(nn.Module):
             dim=-1,
         )
         z = self.encoder(h)
-        if self.training and z.shape[0] == 1:
-            # BatchNorm1d cannot compute batch stats over a single row; use the
-            # running statistics instead so a trailing 1-row batch never crashes.
-            return nn.functional.batch_norm(
-                z,
-                self.latent_norm.running_mean,
-                self.latent_norm.running_var,
-                self.latent_norm.weight,
-                self.latent_norm.bias,
-                training=False,
-                eps=self.latent_norm.eps,
-            )
-        return self.latent_norm(z)
+        return _batchnorm_single_row_safe(z, self.latent_norm)
 
     def forward(self, x, champ, pos, build, mask=None):
         z = self.encode(x, champ, pos, build, mask)

@@ -7,11 +7,13 @@ import pytest
 import torch
 
 from app.ml.config import TrainConfig
+from app.ml.context_audit_specs import eb_shrink_targets, group_audit_specs
 from app.ml.dataset import SplitData
 from app.ml.hgnn_model import HGNNConfig
 from app.ml.train import (
     CHECKPOINT_METRICS,
     PRIOR_1VX_SUPPORT_RISK_BUCKETS,
+    _attach_output_diagnostics,
     _auc_ranking_loss,
     _checkpoint_score,
     _drop_unused_model_arrays,
@@ -137,15 +139,70 @@ def test_default_model_config_drops_relationship_tables_before_tensor_cache() ->
     assert semantic_kept.identity_temporal_sidecar is split.identity_temporal_sidecar
     assert semantic_kept.identity_encoder_support is split.identity_encoder_support
 
+    moe_kept = _drop_unused_model_arrays(
+        split,
+        HGNNConfig(use_learned_semantic_moe=True),
+    )
+    assert moe_kept.identity_static_sidecar is split.identity_static_sidecar
+    assert moe_kept.identity_full_game_sidecar is split.identity_full_game_sidecar
+    assert moe_kept.identity_temporal_sidecar is split.identity_temporal_sidecar
+    assert moe_kept.identity_encoder_support is split.identity_encoder_support
 
-def test_semantic_context_head_fails_early_without_sidecar_cache_arrays() -> None:
+
+def test_semantic_context_or_moe_head_fails_early_without_sidecar_cache_arrays() -> None:
     split = replace(
         _split(np.array([0, 1], dtype=np.float64)),
         identity_temporal_sidecar=None,
     )
 
-    with pytest.raises(ValueError, match="requires cache arrays"):
-        _drop_unused_model_arrays(split, HGNNConfig(use_identity_semantic_context_head=True))
+    for config in (
+        HGNNConfig(use_identity_semantic_context_head=True),
+        HGNNConfig(use_learned_semantic_moe=True),
+    ):
+        with pytest.raises(ValueError, match="semantic context/MoE head requires cache arrays"):
+            _drop_unused_model_arrays(split, config)
+
+
+def test_output_diagnostics_include_logit_std_and_semantic_moe_stats() -> None:
+    split_metrics: dict[str, dict[str, object]] = {"val": {}}
+    _attach_output_diagnostics(
+        split_metrics,
+        {
+            "val": {
+                "base_logit": np.array([-1.0, 0.0, 1.0]),
+                "context_logit": np.array([0.2, 0.0, -0.2]),
+                "final_logit": np.array([-0.8, 0.0, 0.8]),
+                "semantic_moe_expert_usage": np.array([0.2, 0.5, 0.3]),
+                "semantic_moe_expert_selected_fraction": np.array([0.5, 1.0, 0.5]),
+                "semantic_moe_router_entropy": np.array(0.6),
+                "semantic_moe_factor_norm": np.array(2.0),
+                "semantic_moe_balance_loss": np.array(0.01),
+                "semantic_moe_entropy_loss": np.array(0.02),
+                "semantic_moe_factor_orthogonality_loss": np.array(0.03),
+                "semantic_moe_factor_variance_loss": np.array(0.04),
+                "semantic_moe_factor_std_mean": np.array(0.5),
+                "semantic_moe_factor_std_min": np.array(0.1),
+                "semantic_moe_context_token_keep_fraction": np.array(1.0),
+                "semantic_moe_delta_l2_loss": np.array(0.05),
+                "semantic_moe_regularization_loss": np.array(0.06),
+            }
+        },
+    )
+
+    logit_diagnostics = split_metrics["val"]["logit_diagnostics"]
+    assert isinstance(logit_diagnostics, dict)
+    assert logit_diagnostics["base_logit_std"] == pytest.approx(np.sqrt(2.0 / 3.0))
+    assert logit_diagnostics["context_logit_std"] == pytest.approx(np.sqrt(0.08 / 3.0))
+    assert logit_diagnostics["final_logit_std"] == pytest.approx(np.sqrt(1.28 / 3.0))
+
+    moe = split_metrics["val"]["semantic_moe_diagnostics"]
+    assert isinstance(moe, dict)
+    assert np.allclose(moe["expert_usage"], [0.2, 0.5, 0.3])
+    assert np.allclose(moe["expert_selected_fraction"], [0.5, 1.0, 0.5])
+    assert moe["expert_usage_min"] == pytest.approx(0.2)
+    assert moe["expert_usage_max"] == pytest.approx(0.5)
+    assert moe["router_entropy_fraction_of_topk_max"] == pytest.approx(0.6 / np.log(2.0))
+    assert moe["regularization_loss"] == pytest.approx(0.06)
 
 
 def test_training_target_validation_catches_degenerate_cache_split() -> None:
@@ -169,6 +226,54 @@ def test_auc_ranking_loss_config_fails_early_when_invalid() -> None:
 def test_checkpoint_metric_fails_early_when_unknown() -> None:
     with pytest.raises(ValueError, match="checkpoint_metric"):
         _validate_train_config(TrainConfig(checkpoint_metric="test_auc"))
+
+
+def test_calibration_target_validation_rejects_unknown_family() -> None:
+    with pytest.raises(ValueError, match="semantic_context_calibration_target"):
+        _validate_train_config(
+            TrainConfig(semantic_context_calibration_target="bogus")
+        )
+    # valid families pass through validation.
+    for target in ("champion_raw", "group_eb"):
+        _validate_train_config(
+            TrainConfig(semantic_context_calibration_target=target)
+        )
+
+
+def test_eb_shrink_targets_pulls_small_noisy_bins_toward_row_mean() -> None:
+    counts = np.array([10_000.0, 50.0])
+    means = np.array([0.50, 0.30])
+    eb, eb_var = eb_shrink_targets(counts, means)
+    mu = float(np.sum(counts * means) / counts.sum())
+    sampling_var = means * (1.0 - means) / counts
+
+    # the tiny, far-from-mean bin is shrunk hard toward the pooled mean.
+    assert abs(eb[1] - mu) < 0.25 * abs(means[1] - mu)
+    # the large, on-trend bin barely moves.
+    assert abs(eb[0] - means[0]) < 1e-3
+    # the EB target variance never exceeds the raw sampling variance (debiasing).
+    assert np.all(eb_var <= sampling_var + 1e-12)
+    assert eb_var[1] < sampling_var[1]
+
+
+def test_eb_shrink_targets_collapses_to_mean_without_between_bin_signal() -> None:
+    counts = np.array([1000.0, 1000.0, 1000.0])
+    means = np.array([0.5, 0.5, 0.5])
+    eb, eb_var = eb_shrink_targets(counts, means)
+    assert np.allclose(eb, 0.5)
+    assert np.allclose(eb_var, 0.0)
+
+
+def test_group_audit_specs_only_use_known_build_labels() -> None:
+    build_vocab = {
+        "ability_power", "ad_off_tank", "ap_off_tank", "ar_tank", "attack_damage",
+        "crit", "lethality", "mr_tank", "on_hit", "utility_enchanter",
+        "utility_protection",
+    }
+    specs = group_audit_specs()
+    assert specs
+    for spec in specs:
+        assert set(spec.builds) <= build_vocab, spec.title
 
 
 def test_calibration_aware_checkpoint_metric_penalizes_ece() -> None:

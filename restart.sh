@@ -4,6 +4,7 @@ set -euo pipefail
 
 WORK_POOL_NAME="${WORK_POOL_NAME:-docker-pool}"
 WORK_QUEUE_NAME="${WORK_QUEUE_NAME:-default}"
+DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-riot-pipeline/riot-pipeline}"
 AUTOMATION_NAME="${AUTOMATION_NAME:-}"
 
 case "${1:-}" in
@@ -38,6 +39,10 @@ docker compose up -d --build --wait
 echo "Deploying flow"
 .venv/bin/prefect --no-prompt deploy --prefect-file prefect.yaml
 
+echo "Clearing stale Prefect runs"
+PREFECT_API_URL="http://localhost:4200/api" \
+  .venv/bin/python scripts/cancel_deployment_runs.py "$DEPLOYMENT_NAME"
+
 echo "Resuming Prefect intake"
 PREFECT_API_URL="http://localhost:4200/api" \
   timeout 20s .venv/bin/prefect work-queue resume "$WORK_QUEUE_NAME" -p "$WORK_POOL_NAME"
@@ -48,4 +53,5 @@ if [ -n "$AUTOMATION_NAME" ]; then
 fi
 
 echo "Starting new run"
-.venv/bin/prefect deployment run 'riot-pipeline/riot-pipeline'
+PREFECT_API_URL="http://localhost:4200/api" \
+  .venv/bin/prefect deployment run "$DEPLOYMENT_NAME"

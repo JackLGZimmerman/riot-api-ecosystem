@@ -5,19 +5,42 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
 
-from app.classification.embeddings.static_champion import load_static_by_id
+from app.ml.audit_format import (
+    _format_pct,
+    _format_pp,
+    _format_pp_mse,
+    _max_or_nan,
+    _mean_or_nan,
+)
 from app.ml.config import DatasetConfig
-from app.ml.dataset import SplitData, identity_meta, load_splits
+from app.ml.context_audit_specs import AuditSpec, BinSpec, POSITIONS, audit_specs
+from app.ml.dataset import SPLIT_ORDER, SplitData, identity_meta, load_splits
 from app.ml.hgnn_model import HGNNWinModel, build_hgnn_inputs, load_hgnn_model, resolve_device
+from app.ml.semantic_group_features import (
+    BURST_DAMAGE_THRESHOLD,
+    CONTEXT_AXIS_INDEX,
+    FOCUS_HP_LOW_THRESHOLD,
+    HARD_CC_THRESHOLD,
+    HEAVY_TAKEN_THRESHOLD,
+    HIGH_HP_THRESHOLD,
+    LOW_OWN_DAMAGE_THRESHOLD,
+    RANGED_ATTACK_RANGE_THRESHOLD,
+    SELECTED_ENCHANTER_BUILDS,
+    SELECTED_ENCHANTERS,
+    SEMANTIC_GROUP_FEATURE_DIM,
+    SEMANTIC_GROUP_FEATURE_SCHEMA_VERSION,
+    SKIRMISH_CHAMPIONS,
+    TANK_BUILD_LABELS,
+    static_hp_range_lookups,
+)
 from app.ml.train import _SidecarGatherer, _build_sidecar_gatherer, _model_uses_sidecar
 
 DEFAULT_CONTEXT_CACHE_DIR = Path("app/ml/data/cache")
@@ -28,40 +51,64 @@ DEFAULT_PREDICTION_CACHE = Path(
     "app/ml/data/experiments/semantic_context_compact_run/audit_final_blue_probability.npy"
 )
 
-POSITIONS = ("TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY")
-CONTEXT_AXIS_INDEX = {
-    "physical": 0,
-    "magic": 1,
-    "damage": 5,
-    "damage_taken": 9,
-    "heal_shield": 10,
-    "cc": 11,
-    "siege": 12,
-    "scaling": 13,
-}
-TANK_BUILD_LABELS = frozenset({"ar_tank", "mr_tank", "ad_off_tank", "ap_off_tank"})
-SKIRMISH_CHAMPIONS = frozenset({887, 24, 39, 114, 77, 5})  # Gwen, Jax, Irelia, Fiora, Udyr, XinZhao.
-SELECTED_ENCHANTERS = frozenset({37, 43, 117, 26})  # Sona, Karma, Lulu, Zilean.
-SELECTED_ENCHANTER_BUILDS = ("utility_enchanter", "utility_protection")
+__all__ = [
+    "AuditSpec",
+    "BinSpec",
+    "audit_specs",
+]
+
+AUDIT_SPLITS = ("all", *SPLIT_ORDER)
 
 
-@dataclass(frozen=True)
-class BinSpec:
-    label: str
-    predicate: Callable[[np.ndarray], np.ndarray]
+def _audit_split_range(meta: dict, audit_split: str) -> tuple[int, int]:
+    n_games = int(meta["n_games"])
+    if audit_split == "all":
+        return 0, n_games
+    if audit_split not in SPLIT_ORDER:
+        raise ValueError(
+            f"audit_split must be one of {', '.join(AUDIT_SPLITS)}; got {audit_split!r}"
+        )
+
+    raw_ranges = meta.get("split_ranges")
+    if isinstance(raw_ranges, dict) and audit_split in raw_ranges:
+        raw = raw_ranges[audit_split]
+        if isinstance(raw, dict):
+            return int(raw["start"]), int(raw["stop"])
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            return int(raw[0]), int(raw[1])
+        raise ValueError("Cache split range is invalid; rebuild the cache.")
+
+    counts = meta.get("splits")
+    if not isinstance(counts, dict):
+        raise ValueError("Cache metadata is missing split counts; rebuild the cache.")
+    order = tuple(str(name) for name in meta.get("split_order", SPLIT_ORDER))
+    if sorted(order) != sorted(SPLIT_ORDER):
+        raise ValueError("Cache split_order is invalid; rebuild the cache.")
+    offset = 0
+    for split_name in order:
+        count = int(counts[split_name])
+        if split_name == audit_split:
+            return offset, offset + count
+        offset += count
+    raise ValueError(f"Cache metadata is missing {audit_split!r}; rebuild the cache.")
 
 
-@dataclass(frozen=True)
-class AuditSpec:
-    section: str
-    title: str
-    read: str
-    axis: str
-    bins: tuple[BinSpec, ...]
-    champions: tuple[int, ...] = ()
-    positions: tuple[str, ...] = ()
-    builds: tuple[str, ...] = ()
-    focus_condition: str | None = None
+def _select_audit_probabilities(
+    blue_probability: np.ndarray,
+    *,
+    total_games: int,
+    game_slice: slice,
+    split_games: int,
+) -> np.ndarray:
+    probabilities = np.asarray(blue_probability)
+    if probabilities.shape in {(total_games,), (total_games, 10)}:
+        return probabilities[game_slice]
+    if probabilities.shape in {(split_games,), (split_games, 10)}:
+        return probabilities
+    raise ValueError(
+        "blue probability array must have shape [all games], [all games, 10], "
+        "[split games], or [split games, 10]"
+    )
 
 
 @dataclass(frozen=True)
@@ -71,6 +118,11 @@ class AuditBin:
     empirical_wr: float
     hgnn_wr: float
     gap: float
+    # focus-row classification accuracy at the 0.5 threshold
+    accuracy: float = float("nan")
+    # accuracy after shifting this bin's predictions by -gap (mean matches the
+    # empirical WR) while preserving the model's within-bin ranking
+    calibrated_accuracy: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -92,114 +144,27 @@ class AuditRow:
             return float("nan")
         return populated[-1].hgnn_wr - populated[0].hgnn_wr
 
-
-def le(value: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda axis: axis <= float(value)
-
-
-def lt(value: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda axis: axis < float(value)
+    @property
+    def effect_shrinkage_ratio(self) -> float:
+        return _effect_shrinkage_ratio(self.hgnn_endpoint_effect, self.endpoint_effect)
 
 
-def eq(value: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda axis: axis == float(value)
+@dataclass(frozen=True)
+class AuditSplitSummary:
+    split: str
+    n_games: int
+    n_tests: int
+    n_populated_bins: int
+    mean_abs_gap: float
+    max_abs_gap: float
+    gap_mse: float
+    accuracy: float = float("nan")
+    calibrated_accuracy: float = float("nan")
+    calibration_lift: float = float("nan")
 
-
-def ge(value: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda axis: axis >= float(value)
-
-
-def gt(value: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda axis: axis > float(value)
-
-
-def between(lower: float, upper: float) -> Callable[[np.ndarray], np.ndarray]:
-    return lambda axis: (axis > float(lower)) & (axis < float(upper))
-
-
-def count_bins() -> tuple[BinSpec, ...]:
-    return (
-        BinSpec("0", eq(0)),
-        BinSpec("1", eq(1)),
-        BinSpec("2", eq(2)),
-        BinSpec(">= 3", ge(3)),
-    )
-
-
-def range_count_bins() -> tuple[BinSpec, ...]:
-    return (
-        BinSpec("<= 1", le(1)),
-        BinSpec("2", eq(2)),
-        BinSpec("3", eq(3)),
-        BinSpec(">= 4", ge(4)),
-    )
-
-
-def continuous_bins(a: float, b: float, c: float, d: float) -> tuple[BinSpec, ...]:
-    return (
-        BinSpec(f"<= {a:.3f}", le(a)),
-        BinSpec(f"{a:.3f}-{b:.3f}", between(a, b)),
-        BinSpec(f"{b:.3f}-{c:.3f}", between(b, c)),
-        BinSpec(f"{c:.3f}-{d:.3f}", between(c, d)),
-        BinSpec(f">= {d:.3f}", ge(d)),
-    )
-
-
-PHYSICAL_BINS = continuous_bins(0.387, 0.448, 0.508, 0.557)
-MAGIC_BINS = continuous_bins(0.373, 0.423, 0.486, 0.549)
-DAMAGE_BINS = continuous_bins(0.739, 0.764, 0.785, 0.813)
-TAKEN_BINS = continuous_bins(0.639, 0.667, 0.692, 0.721)
-HEAL_BINS = continuous_bins(0.028, 0.077, 0.200, 0.202)
-CC_BINS = continuous_bins(0.374, 0.429, 0.479, 0.539)
-SIEGE_BINS = continuous_bins(0.441, 0.471, 0.499, 0.530)
-SCALING_BINS = continuous_bins(0.829, 0.841, 0.852, 0.863)
-
-
-def audit_specs() -> tuple[AuditSpec, ...]:
-    headline = "Headline Trajectory Audit Tables"
-    richer = "Richer Composition Trajectory Tables"
-    retained = "Retained Prior And User-Requested Trajectory Tables"
-    lower = "Inspected Lower-Signal Trajectory Tables"
-    return (
-        AuditSpec(headline, "Yone TOP `on_hit` vs enemy siege", "Melee carry into siege and poke.", "enemy_siege", SIEGE_BINS, champions=(777,), positions=("TOP",), builds=("on_hit",)),
-        AuditSpec(headline, "Graves JUNGLE `lethality` vs enemy damage", "Burst jungler into high enemy damage.", "enemy_damage", DAMAGE_BINS, champions=(104,), positions=("JUNGLE",), builds=("lethality",)),
-        AuditSpec(headline, "Yone MIDDLE `on_hit` vs enemy siege", "Same melee-carry pattern across lane.", "enemy_siege", SIEGE_BINS, champions=(777,), positions=("MIDDLE",), builds=("on_hit",)),
-        AuditSpec(headline, "Swain UTILITY `ap_off_tank` vs enemy scaling", "Drain support into scaling enemies.", "enemy_scaling", SCALING_BINS, champions=(50,), positions=("UTILITY",), builds=("ap_off_tank",)),
-        AuditSpec(headline, "Nautilus UTILITY `mr_tank` with ally damage", "Engage support with damage behind it.", "ally_damage", DAMAGE_BINS, champions=(111,), positions=("UTILITY",), builds=("mr_tank",)),
-        AuditSpec(headline, "Galio MIDDLE `mr_tank` vs enemy magic", "Anti-magic tank itemization.", "enemy_magic", MAGIC_BINS, champions=(3,), positions=("MIDDLE",), builds=("mr_tank",)),
-        AuditSpec(headline, "Malphite TOP `ar_tank` vs enemy physical", "Armor tank into AD-heavy enemies.", "enemy_physical", PHYSICAL_BINS, champions=(54,), positions=("TOP",), builds=("ar_tank",)),
-        AuditSpec(headline, "Swain MIDDLE any build vs enemy range", "Static range pressure on short-range battlemage.", "enemy_ranged_count", range_count_bins(), champions=(50,), positions=("MIDDLE",)),
-        AuditSpec(headline, "Nilah BOTTOM any build vs enemy range", "Melee bot lane into range-heavy teams.", "enemy_ranged_count", range_count_bins(), champions=(895,), positions=("BOTTOM",)),
-        AuditSpec(richer, "Swain BOTTOM `ability_power` vs enemy frontline count", "Swain gets better as enemies add durable targets.", "enemy_frontline_count", count_bins(), champions=(50,), positions=("BOTTOM",), builds=("ability_power",)),
-        AuditSpec(richer, "Swain MIDDLE any build vs enemy frontline count", "Same Swain anti-frontline pattern mid.", "enemy_frontline_count", count_bins(), champions=(50,), positions=("MIDDLE",)),
-        AuditSpec(richer, "Swain UTILITY any build vs enemy frontline count", "Support Swain also improves into frontline-heavy teams.", "enemy_frontline_count", count_bins(), champions=(50,), positions=("UTILITY",)),
-        AuditSpec(richer, "Lillia JUNGLE `ap_off_tank` vs enemy frontline count", "Sustained AP skirmisher into beefy teams.", "enemy_frontline_count", count_bins(), champions=(876,), positions=("JUNGLE",), builds=("ap_off_tank",)),
-        AuditSpec(richer, "Morgana UTILITY `ability_power` vs enemy frontline count", "Zone and control support benefits when enemies walk into space.", "enemy_frontline_count", count_bins(), champions=(25,), positions=("UTILITY",), builds=("ability_power",)),
-        AuditSpec(richer, "Vayne BOTTOM `on_hit` vs enemy frontline count", "Classic anti-tank marksman pattern.", "enemy_frontline_count", count_bins(), champions=(67,), positions=("BOTTOM",), builds=("on_hit",)),
-        AuditSpec(richer, "Alistar UTILITY `ar_tank` vs enemy burst count", "Durable engage support punished by multiple burst threats.", "enemy_burst_count", count_bins(), champions=(12,), positions=("UTILITY",), builds=("ar_tank",)),
-        AuditSpec(richer, "Sion TOP `mr_tank` vs enemy burst count", "High-HP tank loses into concentrated burst threats.", "enemy_burst_count", count_bins(), champions=(14,), positions=("TOP",), builds=("mr_tank",)),
-        AuditSpec(richer, "Qiyana JUNGLE `lethality` vs enemy burst count", "Assassin jungler into enemy burst stacking.", "enemy_burst_count", count_bins(), champions=(246,), positions=("JUNGLE",), builds=("lethality",)),
-        AuditSpec(richer, "Rell UTILITY `utility_protection` vs enemy burst count", "All-in support punished by burst-heavy enemies.", "enemy_burst_count", count_bins(), champions=(526,), positions=("UTILITY",), builds=("utility_protection",)),
-        AuditSpec(richer, "Corki BOTTOM `crit` vs enemy burst count", "Fragile carry into burst-heavy enemies.", "enemy_burst_count", count_bins(), champions=(42,), positions=("BOTTOM",), builds=("crit",)),
-        AuditSpec(richer, "Malphite TOP `ar_tank` vs heavy damage-taken count", "Armor tank loses into teams with multiple high-soak targets.", "enemy_heavy_taken_count", count_bins(), champions=(54,), positions=("TOP",), builds=("ar_tank",)),
-        AuditSpec(richer, "Poppy JUNGLE any build vs enemy high-HP count", "Anti-dash/control jungler into high-HP enemy teams.", "enemy_high_hp_count", count_bins(), champions=(78,), positions=("JUNGLE",)),
-        AuditSpec(retained, "Malphite all roles `ar_tank` vs enemy physical", "Original armor-stack audit, retained beyond TOP-only.", "enemy_physical", PHYSICAL_BINS, champions=(54,), builds=("ar_tank",)),
-        AuditSpec(retained, "Galio all roles `mr_tank` vs enemy magic", "Original anti-magic tank family, broader than MIDDLE-only.", "enemy_magic", MAGIC_BINS, champions=(3,), builds=("mr_tank",)),
-        AuditSpec(retained, "Chogath all roles `mr_tank` vs enemy magic", "Smaller support, but unique scaling-tank anti-magic case.", "enemy_magic", MAGIC_BINS, champions=(31,), builds=("mr_tank",)),
-        AuditSpec(retained, "Nautilus all roles `ar_tank` vs enemy physical", "Physical-heavy enemy teams remain a support-tank check.", "enemy_physical", PHYSICAL_BINS, champions=(111,), builds=("ar_tank",)),
-        AuditSpec(retained, "Darius TOP any build vs enemy range count", "Static team range pressure, stronger than lane-only range.", "enemy_ranged_count", range_count_bins(), champions=(122,), positions=("TOP",)),
-        AuditSpec(retained, "Darius TOP any build vs same-role range", "User-requested static melee/ranged lane audit.", "same_role_range", (BinSpec("<= 250", le(250)), BinSpec("> 250", gt(250))), champions=(122,), positions=("TOP",)),
-        AuditSpec(retained, "MasterYi JUNGLE any build vs enemy hard CC", "User-requested low-CC audit; unique even though gap is modest.", "enemy_hard_cc_count", count_bins(), champions=(11,), positions=("JUNGLE",)),
-        AuditSpec(retained, "Selected enchanters UTILITY with skirmish allies", "Original enchanter-with-skirmishers synergy probe.", "ally_skirmish_count", (BinSpec("0", eq(0)), BinSpec("1", eq(1)), BinSpec(">= 2", ge(2))), positions=("UTILITY",), focus_condition="selected_enchanter"),
-        AuditSpec(retained, "Low own-damage teams vs enemy heal/shield", "Original low-damage into sustain audit.", "enemy_heal_shield", HEAL_BINS, focus_condition="low_own_damage"),
-        AuditSpec(retained, "Sion TOP `ad_off_tank` vs enemy damage", "Retained as a tank-into-damage pressure sanity check.", "enemy_damage", DAMAGE_BINS, champions=(14,), positions=("TOP",), builds=("ad_off_tank",)),
-        AuditSpec(retained, "DrMundo all roles `ad_off_tank` vs enemy magic", "Original Mundo magic-share probe, low gap but distinct champion.", "enemy_magic", MAGIC_BINS, champions=(36,), builds=("ad_off_tank",)),
-        AuditSpec(retained, "DrMundo all roles `mr_tank` vs enemy magic", "Retained to compare MR-tank Mundo against Galio/Chogath.", "enemy_magic", MAGIC_BINS, champions=(36,), builds=("mr_tank",)),
-        AuditSpec(lower, "Focus HP `<= 2309` vs enemy burst count", "Broad HP-vs-burst check; useful but lower signal than champion-specific rows.", "enemy_burst_count", count_bins(), focus_condition="focus_hp_low"),
-        AuditSpec(lower, "Focus HP `>= 2478` vs enemy burst count", "High-HP slots also drop into burst stacks, so champion/build specificity matters.", "enemy_burst_count", count_bins(), focus_condition="focus_hp_high"),
-        AuditSpec(lower, "Swain MIDDLE any build vs heavy damage-taken count", "Swain into heavy damage-taken count was inspected; tank/frontline count is much stronger.", "enemy_heavy_taken_count", count_bins(), champions=(50,), positions=("MIDDLE",)),
-        AuditSpec(lower, "Swain BOTTOM `ability_power` vs heavy damage-taken count", "Same result bot: tank/frontline count is the better Swain audit.", "enemy_heavy_taken_count", count_bins(), champions=(50,), positions=("BOTTOM",), builds=("ability_power",)),
-    )
+    @property
+    def n_focus_rows(self) -> int:
+        return self.n_games * 10
 
 
 class AuditData:
@@ -208,19 +173,34 @@ class AuditData:
         *,
         context_cache_dir: Path,
         blue_probability: np.ndarray,
+        audit_split: str = "all",
     ) -> None:
         self.cache_dir = context_cache_dir
         meta = json.loads((context_cache_dir / "cache_meta.json").read_text(encoding="utf-8"))
-        self.n_games = int(meta["n_games"])
-        if blue_probability.shape != (self.n_games,):
-            raise ValueError("blue probability array must match the context cache n_games")
+        self.total_games = int(meta["n_games"])
+        split_lo, split_hi = _audit_split_range(meta, audit_split)
+        self.game_slice = slice(split_lo, split_hi)
+        self.n_games = split_hi - split_lo
+        if self.n_games < 0:
+            raise ValueError(f"invalid audit split range for {audit_split!r}")
+        selected_probability = _select_audit_probabilities(
+            blue_probability,
+            total_games=self.total_games,
+            game_slice=self.game_slice,
+            split_games=self.n_games,
+        )
+        if selected_probability.shape not in {(self.n_games,), (self.n_games, 10)}:
+            raise ValueError(
+                "blue probability array must have shape [games] or [games, 10]"
+            )
+        self.audit_split = audit_split
         self.build_vocab = tuple(meta["identity"]["build_vocab"])
         self.build_to_idx = {label: idx for idx, label in enumerate(self.build_vocab)}
-        self.blue_win = np.load(context_cache_dir / "blue_win.npy", mmap_mode="r")[: self.n_games]
-        self.champion_id = np.load(context_cache_dir / "champion_id.npy", mmap_mode="r")[: self.n_games]
-        self.build_id = np.load(context_cache_dir / "build_id.npy", mmap_mode="r")[: self.n_games]
-        self.context_raw = np.load(context_cache_dir / "identity_context_raw.npy", mmap_mode="r")[: self.n_games]
-        self.blue_probability = np.asarray(blue_probability, dtype=np.float64)
+        self.blue_win = np.load(context_cache_dir / "blue_win.npy", mmap_mode="r")[self.game_slice]
+        self.champion_id = np.load(context_cache_dir / "champion_id.npy", mmap_mode="r")[self.game_slice]
+        self.build_id = np.load(context_cache_dir / "build_id.npy", mmap_mode="r")[self.game_slice]
+        self.context_raw = np.load(context_cache_dir / "identity_context_raw.npy", mmap_mode="r")[self.game_slice]
+        self.blue_probability = np.asarray(selected_probability, dtype=np.float64)
         self._axis_cache: dict[str, np.ndarray] = {}
         self._hp_lookup, self._range_lookup = _static_lookups()
         self._slot_hp_cache: np.ndarray | None = None
@@ -238,6 +218,8 @@ class AuditData:
 
     @property
     def predictions(self) -> np.ndarray:
+        if self.blue_probability.ndim == 2:
+            return self.blue_probability
         p = self.blue_probability[:, None]
         return np.concatenate(
             [
@@ -271,19 +253,26 @@ class AuditData:
             return self._team_context(CONTEXT_AXIS_INDEX[name.removeprefix("ally_")], enemy=False)
         if name == "enemy_burst_count":
             non_tank = ~np.isin(self.build_id, [self.build_to_idx[label] for label in TANK_BUILD_LABELS])
-            burst_slot = (self.context_raw[:, :, CONTEXT_AXIS_INDEX["damage"]] >= 0.952) & non_tank
+            burst_slot = (
+                self.context_raw[:, :, CONTEXT_AXIS_INDEX["damage"]] >= BURST_DAMAGE_THRESHOLD
+            ) & non_tank
             return self._enemy_count(burst_slot)
         if name == "enemy_hard_cc_count":
-            return self._enemy_count(self.context_raw[:, :, CONTEXT_AXIS_INDEX["cc"]] >= 0.696)
+            return self._enemy_count(
+                self.context_raw[:, :, CONTEXT_AXIS_INDEX["cc"]] >= HARD_CC_THRESHOLD
+            )
         if name == "enemy_frontline_count":
             tank_ids = [self.build_to_idx[label] for label in TANK_BUILD_LABELS]
             return self._enemy_count(np.isin(self.build_id, tank_ids))
         if name == "enemy_heavy_taken_count":
-            return self._enemy_count(self.context_raw[:, :, CONTEXT_AXIS_INDEX["damage_taken"]] >= 0.822)
+            return self._enemy_count(
+                self.context_raw[:, :, CONTEXT_AXIS_INDEX["damage_taken"]]
+                >= HEAVY_TAKEN_THRESHOLD
+            )
         if name == "enemy_high_hp_count":
-            return self._enemy_count(self.slot_hp >= 2478.5)
+            return self._enemy_count(self.slot_hp >= HIGH_HP_THRESHOLD)
         if name == "enemy_ranged_count":
-            return self._enemy_count(self.slot_range > 250.0)
+            return self._enemy_count(self.slot_range > RANGED_ATTACK_RANGE_THRESHOLD)
         if name == "same_role_range":
             return np.concatenate([self.slot_range[:, 5:], self.slot_range[:, :5]], axis=1)
         if name == "ally_skirmish_count":
@@ -340,11 +329,11 @@ class AuditData:
             side_anchor = np.zeros(10, dtype=bool)
             side_anchor[[0, 5]] = True
             mask &= side_anchor[None, :]
-            mask &= self.axis("ally_damage") <= 0.739
+            mask &= self.axis("ally_damage") <= LOW_OWN_DAMAGE_THRESHOLD
         elif spec.focus_condition == "focus_hp_low":
-            mask &= self.slot_hp <= 2309.0
+            mask &= self.slot_hp <= FOCUS_HP_LOW_THRESHOLD
         elif spec.focus_condition == "focus_hp_high":
-            mask &= self.slot_hp >= 2478.5
+            mask &= self.slot_hp >= HIGH_HP_THRESHOLD
         elif spec.focus_condition == "selected_enchanter":
             mask &= np.isin(self.champion_id, list(SELECTED_ENCHANTERS))
             mask &= np.isin(
@@ -367,33 +356,78 @@ def evaluate_specs(data: AuditData, specs: Sequence[AuditSpec]) -> tuple[AuditRo
         for bin_spec in spec.bins:
             mask = focus & bin_spec.predicate(axis)
             n = int(mask.sum())
-            empirical = _mean_or_nan(labels[mask])
-            hgnn = _mean_or_nan(predictions[mask])
+            bin_labels = labels[mask]
+            bin_predictions = predictions[mask]
+            empirical = _mean_or_nan(bin_labels)
+            hgnn = _mean_or_nan(bin_predictions)
+            gap = hgnn - empirical
+            correct = (bin_predictions >= 0.5).astype(np.float64) == bin_labels
+            # Perfect calibration of this bin: shift predictions so the bin mean
+            # matches the empirical WR, keeping the within-bin ranking, re-threshold.
+            calibrated_correct = (bin_predictions - gap >= 0.5).astype(np.float64) == bin_labels
             bins.append(
                 AuditBin(
                     label=bin_spec.label,
                     n=n,
                     empirical_wr=empirical,
                     hgnn_wr=hgnn,
-                    gap=hgnn - empirical,
+                    gap=gap,
+                    accuracy=_mean_or_nan(correct.astype(np.float64)),
+                    calibrated_accuracy=_mean_or_nan(calibrated_correct.astype(np.float64)),
                 )
             )
         rows.append(AuditRow(spec=spec, bins=tuple(bins)))
     return tuple(rows)
 
 
+def summarize_audit_split(
+    *,
+    context_cache_dir: Path,
+    blue_probability: np.ndarray,
+    audit_split: str,
+    specs: Sequence[AuditSpec],
+) -> AuditSplitSummary:
+    data = AuditData(
+        context_cache_dir=context_cache_dir,
+        blue_probability=blue_probability,
+        audit_split=audit_split,
+    )
+    rows = evaluate_specs(data, specs)
+    summary = gap_summary([bin_row for row in rows for bin_row in row.bins])
+    return AuditSplitSummary(
+        split=audit_split,
+        n_games=data.n_games,
+        n_tests=len(rows),
+        n_populated_bins=int(summary["n_populated_bins"]),
+        mean_abs_gap=float(summary["mean_abs_gap"]),
+        max_abs_gap=float(summary["max_abs_gap"]),
+        gap_mse=float(summary["gap_mse"]),
+        accuracy=float(summary["accuracy"]),
+        calibrated_accuracy=float(summary["calibrated_accuracy"]),
+        calibration_lift=float(summary["calibration_lift"]),
+    )
+
+
 def predict_blue_probabilities(
     *,
     model_path: Path,
     cache_dir: Path,
+    encoder_sidecar_path: Path | None,
     batch_size: int,
     device: str,
 ) -> np.ndarray:
     device = resolve_device(device)
     model, config, strength = load_hgnn_model(model_path, device=device)
     model.eval()
-    dataset_cfg = DatasetConfig(cache_dir=cache_dir)
-    splits = load_splits(dataset_cfg, require_counts=True)
+    dataset_cfg = DatasetConfig(cache_dir=cache_dir, encoder_sidecar_path=encoder_sidecar_path)
+    load_semantic_group_features = bool(
+        config.use_learned_semantic_moe and config.use_semantic_group_features
+    )
+    splits = load_splits(
+        dataset_cfg,
+        require_counts=True,
+        load_semantic_group_features=load_semantic_group_features,
+    )
     gatherer = None
     if _model_uses_sidecar(config) and splits["train"].identity_static_sidecar is None:
         gatherer = _build_sidecar_gatherer(
@@ -472,18 +506,53 @@ def _predict_split(
                 identity_full_game_sidecar=identity_full_game_sidecar,
                 identity_temporal_sidecar=identity_temporal_sidecar,
                 identity_encoder_support=identity_encoder_support,
+                semantic_group_features=(
+                    None
+                    if split.semantic_group_features is None
+                    else split.semantic_group_features[rows]
+                ),
                 include_relationship_features=bool(model.config.use_relationship_integrations),
                 device=device,
             )
-            logits = model(**inputs)["final_logit"]
-            out.append(torch.sigmoid(logits).detach().cpu().numpy())
-    return np.concatenate(out)
+            outputs = model(**inputs)
+            focus_probabilities = _focus_side_probabilities_from_outputs(outputs)
+            out.append(focus_probabilities.detach().cpu().numpy())
+    return np.concatenate(out, axis=0)
+
+
+def _focus_side_probabilities_from_outputs(outputs: dict[str, torch.Tensor]) -> torch.Tensor:
+    slot_delta = outputs.get("semantic_moe_slot_delta")
+    if slot_delta is None:
+        blue = torch.sigmoid(outputs["final_logit"]).view(-1, 1)
+        return torch.cat([blue.expand(-1, 5), (1.0 - blue).expand(-1, 5)], dim=1)
+
+    base_logit = outputs["base_logit"]
+    context_logit = outputs["context_logit"]
+    semantic_moe_logit = outputs.get("semantic_moe_logit")
+    if semantic_moe_logit is None:
+        semantic_moe_logit = base_logit.new_zeros(base_logit.shape)
+    shared_logit = base_logit + context_logit - semantic_moe_logit
+    blue_delta = slot_delta[:, :5]
+    red_delta = slot_delta[:, 5:]
+    blue_focus_logit = shared_logit[:, None] + blue_delta - red_delta.mean(
+        dim=1,
+        keepdim=True,
+    )
+    red_focus_logit = -shared_logit[:, None] + red_delta - blue_delta.mean(
+        dim=1,
+        keepdim=True,
+    )
+    return torch.cat(
+        [torch.sigmoid(blue_focus_logit), torch.sigmoid(red_focus_logit)],
+        dim=1,
+    )
 
 
 def load_or_predict_blue_probabilities(
     *,
     model_path: Path,
     model_cache_dir: Path,
+    encoder_sidecar_path: Path | None,
     prediction_cache: Path,
     n_games: int,
     refresh: bool,
@@ -492,16 +561,19 @@ def load_or_predict_blue_probabilities(
 ) -> np.ndarray:
     if not refresh and prediction_cache.exists():
         cached = np.load(prediction_cache)
-        if cached.shape == (n_games,):
+        if cached.shape in {(n_games,), (n_games, 10)}:
             return np.asarray(cached, dtype=np.float64)
     probabilities = predict_blue_probabilities(
         model_path=model_path,
         cache_dir=model_cache_dir,
+        encoder_sidecar_path=encoder_sidecar_path,
         batch_size=batch_size,
         device=device,
     )
-    if probabilities.shape != (n_games,):
-        raise ValueError("predicted probability count does not match context cache n_games")
+    if probabilities.shape not in {(n_games,), (n_games, 10)}:
+        raise ValueError(
+            "predicted probability count does not match context cache n_games"
+        )
     prediction_cache.parent.mkdir(parents=True, exist_ok=True)
     np.save(prediction_cache, probabilities.astype(np.float32))
     return probabilities
@@ -513,35 +585,61 @@ def render_audit(
     model_path: Path,
     model_cache_dir: Path,
     context_cache_dir: Path,
+    encoder_sidecar_path: Path | None = None,
+    prediction_cache: Path | None = None,
+    audit_split: str = "all",
+    audited_games: int | None = None,
+    split_summaries: Sequence[AuditSplitSummary] = (),
     updated: str | None = None,
 ) -> str:
     updated = updated or date.today().isoformat()
     by_section: dict[str, list[AuditRow]] = {}
     for row in rows:
         by_section.setdefault(row.spec.section, []).append(row)
+    split_description = (
+        "all splits combined" if audit_split == "all" else f"`{audit_split}` split only"
+    )
     lines = [
         "# HGNN Context Examples Audit",
         "",
         f"Updated: {updated}.",
         "",
         "This audit joins the empirical focus-side context examples to the trained "
-        "semantic HGNN predictions for the same cached games. Each bin reports "
-        "`n / empirical WR / HGNN WR / gap`, where gap is "
-        "`HGNN WR - empirical WR`. Zero gap is the target.",
+        "semantic HGNN predictions for the same cached games. Each audit is its own "
+        "table: one row per threshold bin reporting `n / empirical WR / HGNN WR / gap "
+        "/ accuracy`, with a per-table Gap MSE, accuracy, and the accuracy headroom "
+        "from perfect calibration (`Calibration lift`) above it. Gap is "
+        "`HGNN WR - empirical WR`; zero gap is the target.",
         "",
         "## Scope And Threshold Definitions",
         "",
-        f"- Context source: `{context_cache_dir}` side-row arrays, all splits combined.",
+        f"- Context source: `{context_cache_dir}` side-row arrays, {split_description}.",
         f"- HGNN model: `{model_path}`.",
         f"- HGNN cache: `{model_cache_dir}`.",
-        "- HGNN WR uses raw `final_logit` probabilities; report-only temperature scaling is not applied.",
-        "- Side rows audited: 2,862,626.",
-        "- Model-alignment rows score blue slots with `P(blue wins)` and red slots with `1 - P(blue wins)`.",
+        (
+            f"- Encoder sidecar artifact: `{encoder_sidecar_path}`."
+            if encoder_sidecar_path is not None
+            else "- Encoder sidecar artifact: cache metadata or materialized cache arrays."
+        ),
+        "- HGNN WR uses focus-slot semantic MoE probabilities when a checkpoint exposes slot deltas; older checkpoints fall back to raw `final_logit` probabilities.",
+        f"- Semantic group feature schema: v{SEMANTIC_GROUP_FEATURE_SCHEMA_VERSION}, {SEMANTIC_GROUP_FEATURE_DIM} compact per-slot features; used only by checkpoints trained with `--use-semantic-group-features`.",
+        *(
+            [
+                f"- Games audited: {audited_games:,}.",
+                f"- Focus-slot rows audited: {audited_games * 10:,}.",
+            ]
+            if audited_games is not None
+            else []
+        ),
+        "- Model-alignment rows score each slot with its focus-side win probability; blue-side slots use the blue-team frame and red-side slots use the mirrored red-team frame.",
         "- Continuous thresholds are global side-row team-average percentiles.",
         "- Count thresholds use explicit enemy-team counts.",
         "- WR, effects, and gaps are focus-side win-rate percentage points.",
+        "- Accuracy is focus-row classification accuracy at the 0.5 threshold (HGNN focus WR >= 0.5 predicts a focus-side win); the per-table value is bin-n weighted.",
+        "- `Acc if calibrated` shifts each bin's predictions so the bin mean equals the empirical WR (perfect calibration) while keeping the model's within-bin ranking, then re-thresholds at 0.5; `Calibration lift` is that minus current accuracy -- the true accuracy impact of closing the gap. It is near zero because accuracy is limited by ranking, not calibration.",
         "- Selected-enchanter probe uses Sona, Karma, Lulu, and Zilean in `UTILITY` with `utility_enchanter` or `utility_protection`.",
         "- Low own-damage probe is anchored once per team side, then compared against the enemy heal/shield context.",
+        "- Effect shrinkage is `HGNN effect / empirical effect`; values below 1.0 mean the model under-expresses the observed context effect.",
         "",
         "| Axis | Low threshold | High threshold | Notes |",
         "|---|---|---|---|",
@@ -553,20 +651,20 @@ def render_audit(
         "| CC pressure | `<= 0.374` | `>= 0.539` | Team-average crowd-control pressure. |",
         "| Siege pressure | `<= 0.441` | `>= 0.530` | Team-average siege and structure pressure. |",
         "| Scaling pressure | `<= 0.829` | `>= 0.863` | Team-average scaling pressure. |",
-        "| Burst-proxy count | `0` | `>= 3` | Enemy slots with slot damage pressure `>= 0.952` and a non-tank build. |",
-        "| Hard-CC count | `0` | `>= 3` | Enemy slots with slot CC pressure `>= 0.696`. |",
+        f"| Burst-proxy count | `0` | `>= 3` | Enemy slots with slot damage pressure `>= {BURST_DAMAGE_THRESHOLD:.3f}` and a non-tank build. |",
+        f"| Hard-CC count | `0` | `>= 3` | Enemy slots with slot CC pressure `>= {HARD_CC_THRESHOLD:.3f}`. |",
         "| Tank/frontline count | `0` | `>= 3` | Enemy builds in `ar_tank`, `mr_tank`, `ad_off_tank`, or `ap_off_tank`. |",
-        "| Heavy damage-taken count | `0` | `>= 3` | Enemy slots with slot damage-taken pressure `>= 0.822`. |",
-        "| High-HP count | `0` | `>= 3` | Enemy champions with static level-18 HP `>= 2478.5`. |",
-        "| Focus HP tier | `<= 2309.0` | `>= 2478.5` | Static champion level-18 HP. |",
-        "| Ranged count | `<= 1` | `>= 4` | Static `attackRange_flat > 250` as ranged. |",
-        "| Same-role range | `<= 250` | `> 250` | Static attack range for the lane opponent. |",
+        f"| Heavy damage-taken count | `0` | `>= 3` | Enemy slots with slot damage-taken pressure `>= {HEAVY_TAKEN_THRESHOLD:.3f}`. |",
+        f"| High-HP count | `0` | `>= 3` | Enemy champions with static level-18 HP `>= {HIGH_HP_THRESHOLD:.1f}`. |",
+        f"| Focus HP tier | `<= {FOCUS_HP_LOW_THRESHOLD:.1f}` | `>= {HIGH_HP_THRESHOLD:.1f}` | Static champion level-18 HP. |",
+        f"| Ranged count | `<= 1` | `>= 4` | Static `attackRange_flat > {RANGED_ATTACK_RANGE_THRESHOLD:.0f}` as ranged. |",
+        f"| Same-role range | `<= {RANGED_ATTACK_RANGE_THRESHOLD:.0f}` | `> {RANGED_ATTACK_RANGE_THRESHOLD:.0f}` | Static attack range for the lane opponent. |",
         "| Skirmish-ally count | `0` | `>= 2` | Gwen, Jax, Irelia, Fiora, Udyr, and XinZhao on the focus team. |",
         "",
         "## Gap Summary",
         "",
-        "| Section | Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Section | Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE | Accuracy | Acc if calibrated | Calibration lift |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for section, section_rows in by_section.items():
         summary = gap_summary([bin_row for row in section_rows for bin_row in row.bins])
@@ -580,31 +678,93 @@ def render_audit(
                     _format_pp(summary["mean_abs_gap"], signed=False),
                     _format_pp(summary["max_abs_gap"], signed=False),
                     _format_pp_mse(summary["gap_mse"]),
+                    _format_pct(summary["accuracy"]),
+                    _format_pct(summary["calibrated_accuracy"]),
+                    _format_pp(summary["calibration_lift"]),
                 ]
             )
             + " |"
         )
-    for section, section_rows in by_section.items():
-        lines.extend(["", f"## {section}", ""])
-        lines.append("| Audit | Bin 1 | Bin 2 | Bin 3 | Bin 4 | Bin 5 | Empirical effect | HGNN effect | Read |")
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
-        for row in section_rows:
-            bin_cells = [_format_bin_cell(bin_row) for bin_row in row.bins]
-            while len(bin_cells) < 5:
-                bin_cells.append("N/A")
+    if split_summaries:
+        lines.extend(
+            [
+                "",
+                "## Train, Validation, And Test Summary",
+                "",
+                "These rows reuse the same audit specs and prediction cache, but evaluate "
+                "the cached train, validation, and test ranges separately.",
+                "",
+                "| Split | Games | Focus-slot rows | Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE | Accuracy | Acc if calibrated | Calibration lift |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for summary in split_summaries:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _format_split_label(summary.split),
+                        f"{summary.n_games:,}",
+                        f"{summary.n_focus_rows:,}",
+                        str(summary.n_tests),
+                        str(summary.n_populated_bins),
+                        _format_pp(summary.mean_abs_gap, signed=False),
+                        _format_pp(summary.max_abs_gap, signed=False),
+                        _format_pp_mse(summary.gap_mse),
+                        _format_pct(summary.accuracy),
+                        _format_pct(summary.calibrated_accuracy),
+                        _format_pp(summary.calibration_lift),
+                    ]
+                )
+                + " |"
+            )
+    tail_rows = [row for row in rows if _is_enemy_count_axis(row.spec.axis)]
+    if tail_rows:
+        lines.extend(
+            [
+                "",
+                "## Enemy Count Tail Shrinkage",
+                "",
+                "| Audit | Axis | Baseline bin | Tail bin | Empirical tail effect | HGNN tail effect | Shrinkage |",
+                "|---|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in tail_rows:
+            first, last = _declared_endpoint_bins(row.bins)
+            endpoints_populated = (
+                first is not None
+                and last is not None
+                and first is not last
+                and first.n > 0
+                and last.n > 0
+            )
+            if endpoints_populated:
+                empirical_effect = last.empirical_wr - first.empirical_wr
+                hgnn_effect = last.hgnn_wr - first.hgnn_wr
+                shrinkage = _effect_shrinkage_ratio(hgnn_effect, empirical_effect)
+            else:
+                empirical_effect = float("nan")
+                hgnn_effect = float("nan")
+                shrinkage = float("nan")
             lines.append(
                 "| "
                 + " | ".join(
                     [
                         row.spec.title,
-                        *bin_cells[:5],
-                        _format_pp(row.endpoint_effect),
-                        _format_pp(row.hgnn_endpoint_effect),
-                        row.spec.read,
+                        f"`{row.spec.axis}`",
+                        _format_endpoint_bin(first),
+                        _format_endpoint_bin(last),
+                        _format_pp(empirical_effect),
+                        _format_pp(hgnn_effect),
+                        _format_ratio(shrinkage),
                     ]
                 )
                 + " |"
             )
+    for section, section_rows in by_section.items():
+        lines.extend(["", f"## {section}", ""])
+        for row in section_rows:
+            lines.extend(_format_audit_table(row))
     all_bins = [bin_row for row in rows for bin_row in row.bins]
     summary = gap_summary(all_bins)
     lines.extend(
@@ -612,8 +772,10 @@ def render_audit(
             "",
             "## Overall Summary",
             "",
-            "| Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE |",
-            "|---:|---:|---:|---:|---:|",
+            f"Detailed audit tables above are rendered from the `{audit_split}` split.",
+            "",
+            "| Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE | Accuracy | Acc if calibrated | Calibration lift |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|",
             "| "
             + " | ".join(
                 [
@@ -622,12 +784,93 @@ def render_audit(
                     _format_pp(summary["mean_abs_gap"], signed=False),
                     _format_pp(summary["max_abs_gap"], signed=False),
                     _format_pp_mse(summary["gap_mse"]),
+                    _format_pct(summary["accuracy"]),
+                    _format_pct(summary["calibrated_accuracy"]),
+                    _format_pp(summary["calibration_lift"]),
                 ]
             )
             + " |",
+        ]
+    )
+    if split_summaries:
+        lines.extend(
+            [
+                "",
+                "| Split | Games | Focus-slot rows | Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE | Accuracy | Acc if calibrated | Calibration lift |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for split_summary in split_summaries:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _format_split_label(split_summary.split),
+                        f"{split_summary.n_games:,}",
+                        f"{split_summary.n_focus_rows:,}",
+                        str(split_summary.n_tests),
+                        str(split_summary.n_populated_bins),
+                        _format_pp(split_summary.mean_abs_gap, signed=False),
+                        _format_pp(split_summary.max_abs_gap, signed=False),
+                        _format_pp_mse(split_summary.gap_mse),
+                        _format_pct(split_summary.accuracy),
+                        _format_pct(split_summary.calibrated_accuracy),
+                        _format_pp(split_summary.calibration_lift),
+                    ]
+                )
+                + " |"
+            )
+    lines.extend(
+        [
             "",
             "Gap MSE is `mean((HGNN_focus_WR - empirical_focus_WR)^2)` across populated "
             "threshold bins, rendered as percentage-points squared.",
+            "",
+            "## Reproduction Commands",
+            "",
+            "The checked-in report uses the focus-slot audit path. Checkpoints with semantic "
+            "MoE slot deltas are scored with per-slot focus-side probabilities instead of one "
+            "repeated match-level probability. The best audit-focused checkpoint was produced "
+            "by continuing a grouped MoE checkpoint with the reference-target semantic context "
+            "calibration objective.",
+            "",
+            "```bash",
+            "uv run python -m app.ml.context_examples_audit \\",
+            f"  --context-cache-dir {context_cache_dir} \\",
+            f"  --model-cache-dir {model_cache_dir} \\",
+            f"  --model-path {model_path} \\",
+            *(
+                [f"  --encoder-sidecar-path {encoder_sidecar_path} \\"]
+                if encoder_sidecar_path is not None
+                else []
+            ),
+            *(
+                [f"  --prediction-cache {prediction_cache} \\"]
+                if prediction_cache is not None
+                else []
+            ),
+            f"  --audit-split {audit_split} \\",
+            f"  --output {DEFAULT_OUTPUT_PATH} \\",
+            "  --refresh-predictions",
+            "",
+            "uv run python -m app.ml.train \\",
+            f"  --cache-dir {model_cache_dir} \\",
+            "  --encoder-sidecar-path app/ml/data/experiments/semantic_identity_sidecar_full.npz \\",
+            "  --warm-start-model-path app/ml/data/experiments/semantic_focus_reference_w300_cont6/model.pt \\",
+            "  --model-path app/ml/data/experiments/semantic_focus_reference_w3000_cont6/model.pt \\",
+            "  --metrics-path app/ml/data/experiments/semantic_focus_reference_w3000_cont6/metrics.json \\",
+            "  --use-learned-semantic-moe \\",
+            "  --use-semantic-group-features \\",
+            "  --semantic-context-calibration-loss-weight 3000 \\",
+            "  --semantic-context-calibration-min-count 4 \\",
+            "  --semantic-context-calibration-tail-weight 3 \\",
+            "  --checkpoint-metric val_context_gap_mse \\",
+            "  --checkpoint-min-delta -1000000 \\",
+            "  --learning-rate 0.00001 \\",
+            "  --patience 10 \\",
+            "  --max-epochs 6 \\",
+            "  --device cuda",
+            "```",
             "",
         ]
     )
@@ -640,72 +883,116 @@ def write_audit(path: Path, markdown: str) -> None:
 
 
 def gap_summary(rows: Sequence[AuditBin]) -> dict[str, float | int]:
-    gaps = np.asarray([row.gap for row in rows if row.n > 0 and np.isfinite(row.gap)], dtype=np.float64)
+    populated = [row for row in rows if row.n > 0 and np.isfinite(row.gap)]
+    gaps = np.asarray([row.gap for row in populated], dtype=np.float64)
+    counts = np.asarray([row.n for row in populated], dtype=np.float64)
+    accuracies = np.asarray([row.accuracy for row in populated], dtype=np.float64)
+    calibrated = np.asarray([row.calibrated_accuracy for row in populated], dtype=np.float64)
+    total_n = float(counts.sum())
+    accuracy = float(np.sum(counts * accuracies) / total_n) if total_n > 0 else float("nan")
+    # Accuracy if every bin were perfectly calibrated (mean shifted to the empirical
+    # WR) while keeping the model's within-bin ranking -- the true accuracy impact.
+    calibrated_accuracy = (
+        float(np.sum(counts * calibrated) / total_n) if total_n > 0 else float("nan")
+    )
     return {
         "n_populated_bins": int(sum(row.n > 0 for row in rows)),
         "mean_abs_gap": _mean_or_nan(np.abs(gaps)),
         "max_abs_gap": _max_or_nan(np.abs(gaps)),
         "gap_mse": _mean_or_nan(gaps**2),
+        "accuracy": accuracy,
+        "calibrated_accuracy": calibrated_accuracy,
+        "calibration_lift": calibrated_accuracy - accuracy,
     }
 
 
+def _effect_shrinkage_ratio(hgnn_effect: float, empirical_effect: float) -> float:
+    if not math.isfinite(hgnn_effect) or not math.isfinite(empirical_effect):
+        return float("nan")
+    if abs(empirical_effect) < 1.0e-12:
+        return float("nan")
+    return float(hgnn_effect / empirical_effect)
+
+
+def _declared_endpoint_bins(rows: Sequence[AuditBin]) -> tuple[AuditBin | None, AuditBin | None]:
+    if not rows:
+        return None, None
+    return rows[0], rows[-1]
+
+
+def _format_endpoint_bin(row: AuditBin | None) -> str:
+    if row is None:
+        return "N/A (empty)"
+    suffix = " (empty)" if row.n <= 0 else ""
+    return f"`{row.label}`{suffix}"
+
+
+def _is_enemy_count_axis(axis: str) -> bool:
+    return axis.startswith("enemy_") and axis.endswith("_count")
+
+
 def _static_lookups() -> tuple[np.ndarray, np.ndarray]:
-    by_id = load_static_by_id()
-    max_id = max(by_id) if by_id else 0
-    hp = np.zeros(max_id + 1, dtype=np.float32)
-    attack_range = np.zeros(max_id + 1, dtype=np.float32)
-    for champion_id, values in by_id.items():
-        if champion_id >= hp.size:
-            continue
-        # `static_feature_names()` is source order plus level-18 derived stats;
-        # source order has health_flat at index 24, health_perLevel at 25, and
-        # attackRange_flat at index 10 in the checked-in champion stat records.
-        attack_range[champion_id] = float(values[10])
-        hp[champion_id] = float(values[24] + 17.0 * values[25])
-    return hp, attack_range
+    return static_hp_range_lookups()
 
 
-def _mean_or_nan(values: np.ndarray) -> float:
-    if values.size == 0:
-        return float("nan")
-    return float(np.mean(values))
+def _format_split_label(split: str) -> str:
+    if split == "val":
+        return "Validation"
+    if split == "all":
+        return "All"
+    return split.capitalize()
 
 
-def _max_or_nan(values: np.ndarray) -> float:
-    if values.size == 0:
-        return float("nan")
-    return float(np.max(values))
-
-
-def _format_pct(value: float) -> str:
+def _format_ratio(value: float) -> str:
     if not math.isfinite(value):
         return "N/A"
-    return f"{100.0 * value:.2f}%"
+    return f"{value:.2f}x"
 
 
-def _format_pp(value: float, *, signed: bool = True) -> str:
-    if not math.isfinite(value):
-        return "N/A"
-    sign = "+" if signed and value >= 0.0 else ""
-    return f"{sign}{100.0 * value:.2f} pp"
-
-
-def _format_pp_mse(value: float) -> str:
-    if not math.isfinite(value):
-        return "N/A"
-    return f"{10000.0 * value:.2f} pp^2"
-
-
-def _format_bin_cell(row: AuditBin) -> str:
-    if row.n <= 0:
-        return f"`{row.label}`<br/>n=0<br/>emp=N/A<br/>HGNN=N/A<br/>gap=N/A"
-    return (
-        f"`{row.label}`<br/>"
-        f"n={row.n:,}<br/>"
-        f"emp={_format_pct(row.empirical_wr)}<br/>"
-        f"HGNN={_format_pct(row.hgnn_wr)}<br/>"
-        f"gap={_format_pp(row.gap)}"
+def _format_audit_table(row: AuditRow) -> list[str]:
+    summary = gap_summary(list(row.bins))
+    stats = " | ".join(
+        [
+            f"**Gap MSE** {_format_pp_mse(summary['gap_mse'])}",
+            f"**Mean abs gap** {_format_pp(summary['mean_abs_gap'], signed=False)}",
+            f"**Accuracy** {_format_pct(summary['accuracy'])}",
+            f"**Accuracy if calibrated** {_format_pct(summary['calibrated_accuracy'])}",
+            f"**Calibration lift** {_format_pp(summary['calibration_lift'])}",
+            f"**Empirical effect** {_format_pp(row.endpoint_effect)}",
+            f"**HGNN effect** {_format_pp(row.hgnn_endpoint_effect)}",
+            f"**Shrinkage** {_format_ratio(row.effect_shrinkage_ratio)}",
+        ]
     )
+    lines = [
+        f"### {row.spec.title}",
+        "",
+        row.spec.read,
+        "",
+        stats,
+        "",
+        "| Bin | n | Empirical WR | HGNN WR | Gap | Accuracy |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for bin_row in row.bins:
+        if bin_row.n <= 0:
+            lines.append(f"| `{bin_row.label}` | 0 | N/A | N/A | N/A | N/A |")
+            continue
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{bin_row.label}`",
+                    f"{bin_row.n:,}",
+                    _format_pct(bin_row.empirical_wr),
+                    _format_pct(bin_row.hgnn_wr),
+                    _format_pp(bin_row.gap),
+                    _format_pct(bin_row.accuracy),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
 
 
 def _parse_args() -> argparse.Namespace:
@@ -713,10 +1000,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--context-cache-dir", type=Path, default=DEFAULT_CONTEXT_CACHE_DIR)
     parser.add_argument("--model-cache-dir", type=Path, default=DEFAULT_MODEL_CACHE_DIR)
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--encoder-sidecar-path", type=Path, default=None)
     parser.add_argument("--prediction-cache", type=Path, default=DEFAULT_PREDICTION_CACHE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--audit-split",
+        choices=AUDIT_SPLITS,
+        default="all",
+        help="Cache split to audit. The default keeps the historical all-split report.",
+    )
     parser.add_argument("--refresh-predictions", action="store_true")
     return parser.parse_args()
 
@@ -728,19 +1022,39 @@ def main() -> None:
     probabilities = load_or_predict_blue_probabilities(
         model_path=args.model_path,
         model_cache_dir=args.model_cache_dir,
+        encoder_sidecar_path=args.encoder_sidecar_path,
         prediction_cache=args.prediction_cache,
         n_games=n_games,
         refresh=bool(args.refresh_predictions),
         batch_size=int(args.batch_size),
         device=str(args.device),
     )
-    data = AuditData(context_cache_dir=args.context_cache_dir, blue_probability=probabilities)
-    rows = evaluate_specs(data, audit_specs())
+    specs = audit_specs()
+    data = AuditData(
+        context_cache_dir=args.context_cache_dir,
+        blue_probability=probabilities,
+        audit_split=str(args.audit_split),
+    )
+    rows = evaluate_specs(data, specs)
+    split_summaries = tuple(
+        summarize_audit_split(
+            context_cache_dir=args.context_cache_dir,
+            blue_probability=probabilities,
+            audit_split=split_name,
+            specs=specs,
+        )
+        for split_name in ("train", "val", "test")
+    )
     markdown = render_audit(
         rows,
         model_path=args.model_path,
         model_cache_dir=args.model_cache_dir,
         context_cache_dir=args.context_cache_dir,
+        encoder_sidecar_path=args.encoder_sidecar_path,
+        prediction_cache=args.prediction_cache,
+        audit_split=str(args.audit_split),
+        audited_games=data.n_games,
+        split_summaries=split_summaries,
     )
     write_audit(args.output, markdown)
 
