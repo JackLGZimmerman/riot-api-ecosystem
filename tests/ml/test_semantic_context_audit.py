@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -10,15 +12,23 @@ from app.ml.context_examples_audit import (
     AuditRow,
     AuditSplitSummary,
     AuditSpec,
+    FLAGGED_AUDIT_TITLES,
+    audit_json_payload,
+    gap_summary as context_gap_summary,
     _focus_side_probabilities_from_outputs,
+    _predict_split,
     render_audit,
 )
+from app.ml.dataset import SplitData
 from app.ml.semantic_context_audit import (
     ThresholdBin,
     evaluate_threshold_bins,
     gap_summary,
     render_model_alignment_audit,
     side_row_focus_probabilities,
+)
+from app.ml.train import (
+    _focus_side_probabilities_from_outputs as _train_focus_side_probabilities_from_outputs,
 )
 
 
@@ -189,6 +199,81 @@ def test_context_examples_audit_render_includes_effect_and_tail_shrinkage() -> N
     assert "| Enemy hard CC count | `enemy_hard_cc_count` | `0` | `2` |" not in markdown
 
 
+def test_context_examples_audit_json_tags_flagged_rows_and_weighted_gaps() -> None:
+    title = next(iter(FLAGGED_AUDIT_TITLES))
+    row = AuditRow(
+        spec=AuditSpec(
+            section="Flagged",
+            title=title,
+            read="Smoke-test row.",
+            axis="enemy_hard_cc_count",
+            bins=(),
+        ),
+        bins=(
+            AuditBin(
+                "0",
+                n=10,
+                empirical_wr=0.40,
+                hgnn_wr=0.50,
+                gap=0.10,
+                gap_ci95_low=0.01,
+                gap_ci95_high=0.20,
+                bootstrap_samples=32,
+            ),
+            AuditBin(
+                "empty",
+                n=0,
+                empirical_wr=float("nan"),
+                hgnn_wr=float("nan"),
+                gap=float("nan"),
+            ),
+        ),
+    )
+    summary = context_gap_summary(row.bins)
+
+    payload = audit_json_payload(
+        rows_by_split={"val": (row,)},
+        split_summaries=(),
+        model_path=Path("model.pt"),
+        model_cache_dir=Path("model-cache"),
+        context_cache_dir=Path("context-cache"),
+        encoder_sidecar_path=Path("sidecar.npz"),
+        prediction_cache=Path("predictions.npy"),
+        audit_split="val",
+        updated="2026-06-04",
+    )
+
+    val_payload = payload["splits"]["val"]
+    assert val_payload["rows"][0]["is_flagged"] is True
+    assert val_payload["rows"][0]["bins"][0]["bootstrap_samples"] == 32
+    assert val_payload["rows"][0]["bins"][0]["gap_ci95_low"] == pytest.approx(0.01)
+    assert val_payload["rows"][0]["bins"][1]["empirical_wr"] is None
+    assert val_payload["rows"][0]["level_gap"] == pytest.approx(0.10)
+    assert val_payload["rows"][0]["slope_gap"] is None
+    assert val_payload["rows"][0]["tail_gap"] == pytest.approx(0.10)
+    assert val_payload["rows"][0]["tail_bin_label"] == "0"
+    assert val_payload["rows"][0]["tail_bin_n"] == 10
+    assert val_payload["rows"][0]["direction_correct"] is None
+    assert val_payload["flagged_summary"]["support_weighted_gap_mse"] == pytest.approx(
+        summary["support_weighted_gap_mse"]
+    )
+    assert val_payload["flagged_summary"]["n_focus_rows"] == 10
+
+
+def test_context_examples_support_weighted_gap_math() -> None:
+    summary = context_gap_summary(
+        (
+            AuditBin("a", n=10, empirical_wr=0.5, hgnn_wr=0.6, gap=0.1),
+            AuditBin("b", n=30, empirical_wr=0.5, hgnn_wr=0.3, gap=-0.2),
+        )
+    )
+
+    assert summary["mean_abs_gap"] == pytest.approx(0.15)
+    assert summary["support_weighted_mean_abs_gap"] == pytest.approx(0.175)
+    assert summary["gap_mse"] == pytest.approx(0.025)
+    assert summary["support_weighted_gap_mse"] == pytest.approx(0.0325)
+
+
 def test_context_examples_audit_slices_full_prediction_cache_to_split(tmp_path) -> None:
     (tmp_path / "cache_meta.json").write_text(
         """
@@ -209,7 +294,7 @@ def test_context_examples_audit_slices_full_prediction_cache_to_split(tmp_path) 
     np.save(tmp_path / "blue_win.npy", np.array([1.0, 0.0, 1.0, 0.0]))
     np.save(tmp_path / "champion_id.npy", np.zeros((4, 10), dtype=np.int64))
     np.save(tmp_path / "build_id.npy", np.zeros((4, 10), dtype=np.int64))
-    np.save(tmp_path / "identity_context_raw.npy", np.zeros((4, 10, 8), dtype=np.float32))
+    np.save(tmp_path / "identity_context_raw.npy", np.zeros((4, 10, 14), dtype=np.float32))
     probabilities = np.arange(40, dtype=np.float32).reshape(4, 10) / 100.0
 
     data = AuditData(
@@ -221,6 +306,46 @@ def test_context_examples_audit_slices_full_prediction_cache_to_split(tmp_path) 
     assert data.n_games == 2
     assert data.blue_win.tolist() == [0.0, 1.0]
     assert np.allclose(data.predictions, probabilities[1:3])
+
+
+def test_context_examples_predict_split_passes_residual_feature_inputs(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    def fake_build_hgnn_inputs(**kwargs):
+        captured.append(kwargs)
+        return {"batch_size": kwargs["champion_id"].shape[0]}
+
+    class FakeModel:
+        def __call__(self, **inputs):
+            return {"final_logit": torch.zeros(int(inputs["batch_size"]))}
+
+    monkeypatch.setattr(
+        "app.ml.context_examples_audit.build_hgnn_inputs",
+        fake_build_hgnn_inputs,
+    )
+    split = SplitData(
+        win_rate=np.zeros((3, 10), dtype=np.float32),
+        p1_cnt=np.zeros((3, 10), dtype=np.float32),
+        blue_win=np.array([1.0, 0.0, 1.0]),
+        champion_id=np.zeros((3, 10), dtype=np.int64),
+        build_id=np.zeros((3, 10), dtype=np.int64),
+        loadout_features=np.arange(30, dtype=np.float32).reshape(3, 10),
+        patch_features=np.arange(6, dtype=np.float32).reshape(3, 2),
+    )
+
+    probabilities = _predict_split(
+        FakeModel(),
+        split,
+        batch_size=2,
+        strength=30.0,
+        device="cpu",
+    )
+
+    assert probabilities.shape == (3, 10)
+    assert np.array_equal(captured[0]["loadout_features"], split.loadout_features[:2])
+    assert np.array_equal(captured[0]["patch_features"], split.patch_features[:2])
+    assert np.array_equal(captured[1]["loadout_features"], split.loadout_features[2:])
+    assert np.array_equal(captured[1]["patch_features"], split.patch_features[2:])
 
 
 def test_context_examples_audit_focus_probabilities_use_slot_deltas() -> None:
@@ -249,3 +374,23 @@ def test_context_examples_audit_focus_probabilities_use_slot_deltas() -> None:
     assert focused.shape == (1, 10)
     assert focused[0, 0] > focused[0, 1]
     assert focused[0, 5] < focused[0, 6]
+
+    with_feature_logit = {
+        "base_logit": torch.tensor([0.2]),
+        "context_logit": torch.tensor([0.1]),
+        "semantic_moe_logit": torch.tensor([0.05]),
+        "feature_logit": torch.tensor([0.4]),
+        "semantic_moe_slot_delta": slot_delta,
+    }
+    without_feature_logit = {
+        key: value for key, value in with_feature_logit.items() if key != "feature_logit"
+    }
+
+    audit_focused = _focus_side_probabilities_from_outputs(with_feature_logit)
+    train_focused = _train_focus_side_probabilities_from_outputs(with_feature_logit)
+
+    assert torch.allclose(audit_focused, train_focused)
+    assert not torch.allclose(
+        audit_focused,
+        _focus_side_probabilities_from_outputs(without_feature_logit),
+    )

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -11,8 +10,6 @@ from typing import Any
 from database.clickhouse.client import get_client
 
 MODEL_THRESHOLD = 0.516
-MIN_REL_N = 100
-MIN_FULL_N = 50
 MIN_LOADOUT_N = 100
 
 SPELL_NAMES = {
@@ -78,10 +75,6 @@ def _mean(values: list[float | None]) -> float | None:
     return sum(present) / len(present)
 
 
-def _canon2(left: tuple[Any, ...], right: tuple[Any, ...]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
-    return (left, right) if left <= right else (right, left)
-
-
 def _load_champions(path: Path) -> dict[int, str]:
     champs: dict[int, str] = {}
     with path.open(encoding="utf-8") as handle:
@@ -97,42 +90,10 @@ def _slot_key(row: dict[str, Any]) -> tuple[int, str, str]:
     return (int(row["championid"]), str(row["teamposition"]), str(row["build"]))
 
 
-def _key_name(key: tuple[int, str, str], champs: dict[int, str]) -> str:
-    champion, role, build = key
-    return f"{champs.get(int(champion), str(champion))} {role} `{build}`"
-
-
 def _spell_pair_name(spell_a: int, spell_b: int) -> str:
     left = SPELL_NAMES.get(int(spell_a), str(spell_a))
     right = SPELL_NAMES.get(int(spell_b), str(spell_b))
     return f"{left}+{right}"
-
-
-def _matchup_blue_wr(
-    blue_key: tuple[int, str, str],
-    red_key: tuple[int, str, str],
-    full_matchup: dict[tuple[Any, ...], dict[str, Any]],
-) -> dict[str, float | int] | None:
-    left, right = _canon2(blue_key, red_key)
-    row = full_matchup.get((*left, *right))
-    if row is None:
-        return None
-    wr = float(row["left_win_rate"])
-    if left != blue_key:
-        wr = 1.0 - wr
-    return {"blue_wr": wr, "matchups": int(row["matchups"])}
-
-
-def _synergy_wr(
-    left_key: tuple[Any, ...],
-    right_key: tuple[Any, ...],
-    synergy_map: dict[tuple[Any, ...], dict[str, Any]],
-) -> dict[str, float | int] | None:
-    left, right = _canon2(left_key, right_key)
-    row = synergy_map.get((*left, *right))
-    if row is None:
-        return None
-    return {"wr": float(row["win_rate"]), "matchups": int(row["matchups"])}
 
 
 def _load_batch_participants(client, matchids: list[str]) -> list[dict[str, Any]]:
@@ -181,12 +142,6 @@ ORDER BY ps.matchid, ps.participantid
 def _build_key_sets(games: dict[str, list[dict[str, Any]]]) -> dict[str, set[tuple[Any, ...]]]:
     keys: dict[str, set[tuple[Any, ...]]] = {
         "solo": set(),
-        "full_matchup": set(),
-        "nb_matchup": set(),
-        "champ_matchup": set(),
-        "full_synergy": set(),
-        "nb_synergy": set(),
-        "champ_synergy": set(),
         "spell_full": set(),
         "spell_nb": set(),
         "rune_full": set(),
@@ -216,26 +171,6 @@ def _build_key_sets(games: dict[str, list[dict[str, Any]]]) -> dict[str, set[tup
                 )
             )
 
-        blue_keys = [_slot_key(row) for row in slots[:5]]
-        red_keys = [_slot_key(row) for row in slots[5:]]
-        for blue_key in blue_keys:
-            for red_key in red_keys:
-                left, right = _canon2(blue_key, red_key)
-                keys["full_matchup"].add((*left, *right))
-                keys["nb_matchup"].add((blue_key[0], blue_key[1], red_key[0], red_key[1]))
-                keys["champ_matchup"].add((blue_key[0], red_key[0]))
-        for team_keys in (blue_keys, red_keys):
-            for i in range(5):
-                for j in range(i + 1, 5):
-                    left, right = _canon2(team_keys[i], team_keys[j])
-                    keys["full_synergy"].add((*left, *right))
-                    nb_left, nb_right = _canon2(
-                        (team_keys[i][0], team_keys[i][1]),
-                        (team_keys[j][0], team_keys[j][1]),
-                    )
-                    keys["nb_synergy"].add((*nb_left, *nb_right))
-                    champ_left, champ_right = sorted((team_keys[i][0], team_keys[j][0]))
-                    keys["champ_synergy"].add((champ_left, champ_right))
     return keys
 
 
@@ -250,98 +185,6 @@ WHERE split = 'train'
   AND (championid, toString(teamposition), toString(build)) IN {_in_sql(keys["solo"])}
 """,
         key_cols=["championid", "teamposition", "build"],
-        value_cols=["matchups", "win_rate"],
-    )
-    maps["full_matchup"] = _query_map(
-        client,
-        f"""
-SELECT left_championid, toString(left_teamposition) AS left_teamposition, toString(left_build) AS left_build,
-       right_championid, toString(right_teamposition) AS right_teamposition, toString(right_build) AS right_build,
-       matchups, left_win_rate
-FROM game_data_filtered.matchup_1v1
-WHERE split = 'train'
-  AND (left_championid, toString(left_teamposition), toString(left_build),
-       right_championid, toString(right_teamposition), toString(right_build)) IN {_in_sql(keys["full_matchup"])}
-""",
-        key_cols=[
-            "left_championid",
-            "left_teamposition",
-            "left_build",
-            "right_championid",
-            "right_teamposition",
-            "right_build",
-        ],
-        value_cols=["matchups", "left_win_rate"],
-    )
-    maps["nb_matchup"] = _query_map(
-        client,
-        f"""
-SELECT blue_championid, toString(blue_teamposition) AS blue_teamposition,
-       red_championid, toString(red_teamposition) AS red_teamposition,
-       matchups, blue_win_rate
-FROM game_data_filtered.matchup_1v1_nobuild
-WHERE split = 'train'
-  AND (blue_championid, toString(blue_teamposition),
-       red_championid, toString(red_teamposition)) IN {_in_sql(keys["nb_matchup"])}
-""",
-        key_cols=["blue_championid", "blue_teamposition", "red_championid", "red_teamposition"],
-        value_cols=["matchups", "blue_win_rate"],
-    )
-    maps["champ_matchup"] = _query_map(
-        client,
-        f"""
-SELECT blue_championid, red_championid, matchups, blue_win_rate
-FROM game_data_filtered.matchup_1v1_champ
-WHERE split = 'train'
-  AND (blue_championid, red_championid) IN {_in_sql(keys["champ_matchup"])}
-""",
-        key_cols=["blue_championid", "red_championid"],
-        value_cols=["matchups", "blue_win_rate"],
-    )
-    maps["full_synergy"] = _query_map(
-        client,
-        f"""
-SELECT championid_1, toString(teamposition_1) AS teamposition_1, toString(build_1) AS build_1,
-       championid_2, toString(teamposition_2) AS teamposition_2, toString(build_2) AS build_2,
-       matchups, win_rate
-FROM game_data_filtered.synergy_2vx
-WHERE split = 'train'
-  AND (championid_1, toString(teamposition_1), toString(build_1),
-       championid_2, toString(teamposition_2), toString(build_2)) IN {_in_sql(keys["full_synergy"])}
-""",
-        key_cols=[
-            "championid_1",
-            "teamposition_1",
-            "build_1",
-            "championid_2",
-            "teamposition_2",
-            "build_2",
-        ],
-        value_cols=["matchups", "win_rate"],
-    )
-    maps["nb_synergy"] = _query_map(
-        client,
-        f"""
-SELECT championid_1, toString(teamposition_1) AS teamposition_1,
-       championid_2, toString(teamposition_2) AS teamposition_2,
-       matchups, win_rate
-FROM game_data_filtered.synergy_2vx_nobuild
-WHERE split = 'train'
-  AND (championid_1, toString(teamposition_1),
-       championid_2, toString(teamposition_2)) IN {_in_sql(keys["nb_synergy"])}
-""",
-        key_cols=["championid_1", "teamposition_1", "championid_2", "teamposition_2"],
-        value_cols=["matchups", "win_rate"],
-    )
-    maps["champ_synergy"] = _query_map(
-        client,
-        f"""
-SELECT championid_1, championid_2, matchups, win_rate
-FROM game_data_filtered.synergy_2vx_champ
-WHERE split = 'train'
-  AND (championid_1, championid_2) IN {_in_sql(keys["champ_synergy"])}
-""",
-        key_cols=["championid_1", "championid_2"],
         value_cols=["matchups", "win_rate"],
     )
     maps["spell_full"] = _query_map(
@@ -518,120 +361,6 @@ def _analyze_game(
             },
         }
 
-    def relationship_evidence() -> dict[str, Any]:
-        blue_keys = [_slot_key(row) for row in slots[:5]]
-        red_keys = [_slot_key(row) for row in slots[5:]]
-        matchup_items: list[dict[str, Any]] = []
-        for blue_key in blue_keys:
-            for red_key in red_keys:
-                item = _matchup_blue_wr(blue_key, red_key, maps["full_matchup"])
-                level = "champ-role-build matchup"
-                if item is None or int(item["matchups"]) < MIN_FULL_N:
-                    prior = maps["nb_matchup"].get((blue_key[0], blue_key[1], red_key[0], red_key[1]))
-                    if prior is not None:
-                        item = {
-                            "blue_wr": float(prior["blue_win_rate"]),
-                            "matchups": int(prior["matchups"]),
-                        }
-                        level = "champ-role matchup"
-                if item is None or int(item["matchups"]) < MIN_REL_N:
-                    prior = maps["champ_matchup"].get((blue_key[0], red_key[0]))
-                    if prior is not None:
-                        item = {
-                            "blue_wr": float(prior["blue_win_rate"]),
-                            "matchups": int(prior["matchups"]),
-                        }
-                        level = "champion matchup"
-                if item is None or int(item["matchups"]) < MIN_REL_N:
-                    continue
-                actual_wr = float(item["blue_wr"]) if actual == "blue" else 1.0 - float(item["blue_wr"])
-                matchup_items.append(
-                    {
-                        "level": level,
-                        "blue_wr": float(item["blue_wr"]),
-                        "actual_wr": actual_wr,
-                        "edge": actual_wr - 0.5,
-                        "matchups": int(item["matchups"]),
-                        "blue": _key_name(blue_key, champs),
-                        "red": _key_name(red_key, champs),
-                        "actual_side": actual,
-                    }
-                )
-
-        blue_matchup_avg = _mean([item["blue_wr"] for item in matchup_items])
-        actual_matchup_avg = None
-        if blue_matchup_avg is not None:
-            actual_matchup_avg = blue_matchup_avg if actual == "blue" else 1.0 - blue_matchup_avg
-
-        synergy_items: list[dict[str, Any]] = []
-        for side, team_keys in (("blue", blue_keys), ("red", red_keys)):
-            for i in range(5):
-                for j in range(i + 1, 5):
-                    item = _synergy_wr(team_keys[i], team_keys[j], maps["full_synergy"])
-                    level = "champ-role-build synergy"
-                    if item is None or int(item["matchups"]) < MIN_FULL_N:
-                        nb_left, nb_right = _canon2(
-                            (team_keys[i][0], team_keys[i][1]),
-                            (team_keys[j][0], team_keys[j][1]),
-                        )
-                        prior = maps["nb_synergy"].get((*nb_left, *nb_right))
-                        if prior is not None:
-                            item = {"wr": float(prior["win_rate"]), "matchups": int(prior["matchups"])}
-                            level = "champ-role synergy"
-                    if item is None or int(item["matchups"]) < MIN_REL_N:
-                        champ_left, champ_right = sorted((team_keys[i][0], team_keys[j][0]))
-                        prior = maps["champ_synergy"].get((champ_left, champ_right))
-                        if prior is not None:
-                            item = {"wr": float(prior["win_rate"]), "matchups": int(prior["matchups"])}
-                            level = "champion synergy"
-                    if item is None or int(item["matchups"]) < MIN_REL_N:
-                        continue
-                    synergy_items.append(
-                        {
-                            "side": side,
-                            "level": level,
-                            "wr": float(item["wr"]),
-                            "edge": float(item["wr"]) - 0.5,
-                            "matchups": int(item["matchups"]),
-                            "pair": [_key_name(team_keys[i], champs), _key_name(team_keys[j], champs)],
-                        }
-                    )
-
-        blue_synergy_avg = _mean([item["wr"] for item in synergy_items if item["side"] == "blue"])
-        red_synergy_avg = _mean([item["wr"] for item in synergy_items if item["side"] == "red"])
-        synergy_edge_for_actual = None
-        if blue_synergy_avg is not None and red_synergy_avg is not None:
-            synergy_edge_for_actual = (
-                blue_synergy_avg - red_synergy_avg
-                if actual == "blue"
-                else red_synergy_avg - blue_synergy_avg
-            )
-
-        components = []
-        if actual_matchup_avg is not None:
-            components.append(actual_matchup_avg - 0.5)
-        if synergy_edge_for_actual is not None:
-            components.append(synergy_edge_for_actual)
-
-        return {
-            "actual_relationship_edge": _mean(components),
-            "actual_matchup_avg_wr": actual_matchup_avg,
-            "blue_matchup_avg_wr": blue_matchup_avg,
-            "blue_synergy_avg_wr": blue_synergy_avg,
-            "red_synergy_avg_wr": red_synergy_avg,
-            "actual_synergy_edge_vs_predicted": synergy_edge_for_actual,
-            "top_matchups_for_actual": sorted(
-                matchup_items,
-                key=lambda item: (item["edge"], item["matchups"]),
-                reverse=True,
-            )[:3],
-            "top_synergies_for_actual": sorted(
-                [item for item in synergy_items if item["side"] == actual],
-                key=lambda item: (item["edge"], item["matchups"]),
-                reverse=True,
-            )[:3],
-        }
-
     def side_delta(items: list[dict[str, Any]], side: str) -> float | None:
         return _mean([item["delta"] for item in items if item["team"] == side])
 
@@ -640,7 +369,6 @@ def _analyze_game(
     solo_blue_edge = (_mean(blue_solo) or 0.5) - (_mean(red_solo) or 0.5)
     actual_solo_edge = solo_blue_edge if actual == "blue" else -solo_blue_edge
 
-    relationship = relationship_evidence()
     spell_deltas = [item for item in (spell_delta(row) for row in slots) if item is not None]
     rune_deltas = [item for item in (rune_delta(row) for row in slots) if item is not None]
     blue_spell = side_delta(spell_deltas, "blue")
@@ -697,14 +425,6 @@ def _analyze_game(
     )[:3]
 
     unaccounted: list[str] = []
-    rel_edge = relationship["actual_relationship_edge"]
-    if rel_edge is not None and rel_edge >= 0.015:
-        unaccounted.append("exact champion matchup/synergy priors disabled")
-    elif any(
-        item["edge"] >= 0.075 and item["matchups"] >= 300
-        for item in relationship["top_matchups_for_actual"]
-    ):
-        unaccounted.append("strong individual champion matchup prior disabled")
     if spell_edge is not None and spell_edge >= 0.012:
         unaccounted.append("summoner spell conditioned prior absent")
     elif any(item["delta"] >= 0.045 and item["n"] >= 250 for item in top_spell_actual):
@@ -731,7 +451,6 @@ def _analyze_game(
         "red_p1_mean_from_candidate": cand.get("red_p1_mean"),
         "solo_blue_edge_train_table": solo_blue_edge,
         "actual_solo_edge_train_table": actual_solo_edge,
-        "relationship": relationship,
         "spell_edge_for_actual": spell_edge,
         "top_spell_actual": top_spell_actual,
         "rune_edge_for_actual": rune_edge,
@@ -788,11 +507,10 @@ def analyze_candidate_file(candidate_path: Path, output_path: Path) -> dict[str,
             unaccounted_counter[label] += 1
 
     def rank_score(row: dict[str, Any]) -> float:
-        rel = row["relationship"]["actual_relationship_edge"] or 0.0
         spell = row["spell_edge_for_actual"] or 0.0
         rune = row["rune_edge_for_actual"] or 0.0
         patch = row["patch_edge_for_actual_train_overlap"] or 0.0
-        return len(row["unaccounted_influences"]) * 10.0 + rel + spell + rune + patch
+        return len(row["unaccounted_influences"]) * 10.0 + spell + rune + patch
 
     representative = sorted(
         [row for row in results if row["unaccounted_influences"]],

@@ -58,6 +58,25 @@ def _config() -> FullGameSemanticConfig:
     )
 
 
+def _semantic_config(target_dim: int = 2) -> FullGameSemanticConfig:
+    return FullGameSemanticConfig(
+        n_champions=4,
+        n_teampositions=3,
+        n_builds=2,
+        metrics_dim=len(METRICS),
+        latent_dim=5,
+        champion_embedding_dim=3,
+        teamposition_embedding_dim=2,
+        build_embedding_dim=2,
+        metrics_embedding_dim=4,
+        metrics_hidden_dims=(6,),
+        fusion_hidden_dims=(7,),
+        decoder_hidden_dims=(7,),
+        semantic_target_dim=target_dim,
+        semantic_decoder_hidden_dims=(6,),
+    )
+
+
 def test_training_helper_defaults_match_locked_production_recipe() -> None:
     train_signature = inspect.signature(train_autoencoder)
     frame_signature = inspect.signature(train_from_dataframe_or_csv)
@@ -80,6 +99,8 @@ def test_training_helper_defaults_match_locked_production_recipe() -> None:
     assert config.metrics_hidden_dims == (320, 160)
     assert config.decoder_hidden_dims == (512, 384)
     assert config.latent_dropout == 0.10
+    assert config.semantic_target_dim == 0
+    assert train_signature.parameters["semantic_loss_weight"].default == 0.0
 
 
 def test_dataset_from_dataframe_returns_expected_tensors() -> None:
@@ -93,15 +114,58 @@ def test_dataset_from_dataframe_returns_expected_tensors() -> None:
     assert row["build_id"].dtype == torch.long
     assert row["metrics"].dtype == torch.float32
     assert row["metrics"].shape == (len(METRICS),)
+    assert row["sample_weight"].dtype == torch.float32
+    assert row["sample_weight"] == pytest.approx(1.0)
+
+
+def test_dataset_accepts_optional_sample_weights() -> None:
+    weights = np.array([1.0, 0.5, 2.0, 0.0, 3.0], dtype=np.float32)
+
+    dataset = FullGameProfileDataset(_frame(5), METRICS, sample_weight=weights)
+
+    assert torch.allclose(dataset.sample_weight, torch.from_numpy(weights))
+
+
+def test_dataset_accepts_optional_semantic_targets() -> None:
+    targets = np.linspace(0.0, 1.0, 10, dtype=np.float32).reshape(5, 2)
+
+    dataset = FullGameProfileDataset(_frame(5), METRICS, semantic_targets=targets)
+    row = dataset[0]
+
+    assert row["semantic_targets"].dtype == torch.float32
+    assert row["semantic_targets"].shape == (2,)
+    assert torch.allclose(dataset.semantic_targets, torch.from_numpy(targets))
+
+
+def test_dataset_rejects_invalid_sample_weights() -> None:
+    with pytest.raises(ValueError, match="sample_weight"):
+        FullGameProfileDataset(_frame(5), METRICS, sample_weight=np.ones(4))
+    with pytest.raises(ValueError, match="sample_weight"):
+        FullGameProfileDataset(_frame(5), METRICS, sample_weight=np.zeros(5))
+    with pytest.raises(ValueError, match="sample_weight"):
+        FullGameProfileDataset(_frame(5), METRICS, sample_weight=[1.0, -1.0, 1.0, 1.0, 1.0])
+
+
+def test_dataset_rejects_invalid_semantic_targets() -> None:
+    with pytest.raises(ValueError, match="semantic_targets"):
+        FullGameProfileDataset(_frame(5), METRICS, semantic_targets=np.ones(4))
+    with pytest.raises(ValueError, match="semantic_targets"):
+        FullGameProfileDataset(_frame(5), METRICS, semantic_targets=np.ones((4, 2)))
+    targets = np.ones((5, 2), dtype=np.float32)
+    targets[0, 0] = np.nan
+    with pytest.raises(ValueError, match="semantic_targets"):
+        FullGameProfileDataset(_frame(5), METRICS, semantic_targets=targets)
 
 
 def test_default_metric_columns_use_all_raw_derived_and_context_metrics() -> None:
     columns = full_game_metric_columns()
+    expected_raw = tuple(name for name in ALL_METRICS if name != "win")
 
-    assert set(ALL_METRICS).issubset(columns)
+    assert set(expected_raw).issubset(columns)
     assert set(DERIVED_METRIC_FUNCS).issubset(columns)
     assert set(CONTEXT_FEATURE_NAMES).issubset(columns)
-    assert len(columns) == len(ALL_METRICS) + len(DERIVED_METRIC_FUNCS) + len(CONTEXT_FEATURE_NAMES)
+    assert len(columns) == len(expected_raw) + len(DERIVED_METRIC_FUNCS) + len(CONTEXT_FEATURE_NAMES)
+    assert "win" not in columns
     assert "physicaldamagedealttochampions_share" in columns
     # Added intra-identity ratio + difference families.
     assert "physicaldamagetaken_share" in columns
@@ -114,11 +178,36 @@ def test_default_metric_columns_use_all_raw_derived_and_context_metrics() -> Non
 def test_profile_only_metric_columns_exclude_context_features() -> None:
     profile_only = full_game_metric_columns(include_context=False)
     with_context = full_game_metric_columns()
+    expected_raw = tuple(name for name in ALL_METRICS if name != "win")
 
-    assert len(profile_only) == len(ALL_METRICS) + len(DERIVED_METRIC_FUNCS)
+    assert len(profile_only) == len(expected_raw) + len(DERIVED_METRIC_FUNCS)
     assert with_context[: len(profile_only)] == profile_only
     assert with_context[len(profile_only):] == CONTEXT_FEATURE_NAMES
     assert not any(name in profile_only for name in CONTEXT_FEATURE_NAMES)
+    assert "win" not in profile_only
+
+
+def test_metric_columns_can_opt_into_oracle_outcome_metrics() -> None:
+    columns = full_game_metric_columns(include_outcome_metrics=True)
+
+    assert set(ALL_METRICS).issubset(columns)
+    assert "win" in columns
+
+
+def test_dataset_rejects_outcome_metrics_without_oracle_opt_in() -> None:
+    frame = _frame(5)
+    frame["win"] = np.linspace(0.0, 1.0, len(frame))
+
+    with pytest.raises(ValueError, match="outcome/prior"):
+        FullGameProfileDataset(frame, (*METRICS, "win"))
+
+    dataset = FullGameProfileDataset(
+        frame,
+        (*METRICS, "win"),
+        allow_outcome_metrics=True,
+    )
+
+    assert dataset.metric_columns[-1] == "win"
 
 
 def test_encoder_trains_on_supplied_context_columns() -> None:
@@ -188,6 +277,21 @@ def test_autoencoder_outputs_reconstruction_and_latent_shapes() -> None:
     assert torch.allclose(latent.mean(dim=0), torch.zeros(5), atol=1.0e-5)
 
 
+def test_autoencoder_optional_semantic_head_scores_latents() -> None:
+    model = FullGameAutoencoder(_semantic_config(target_dim=2))
+    batch = next(iter(DataLoader(FullGameProfileDataset(_frame(6), METRICS), batch_size=6)))
+
+    _reconstruction, latent = model(
+        batch["champion_id"],
+        batch["teamposition_id"],
+        batch["build_id"],
+        batch["metrics"],
+    )
+    semantic_prediction = model.predict_semantic_targets(latent)
+
+    assert semantic_prediction.shape == (6, 2)
+
+
 def test_full_game_encoder_always_includes_champion_role_build_identity() -> None:
     config = FullGameSemanticConfig(
         n_champions=20,
@@ -221,6 +325,40 @@ def test_full_game_encoder_always_includes_champion_role_build_identity() -> Non
     # The encoder is fixed at the (champion, role, build) grain, so the same
     # metrics under different identities must produce different latents.
     assert not torch.allclose(latent_a, latent_b)
+
+
+def test_full_game_encoder_identity_disabled_ignores_champion_role_build_ids() -> None:
+    config = FullGameSemanticConfig(
+        n_champions=20,
+        n_teampositions=5,
+        n_builds=4,
+        metrics_dim=len(METRICS),
+        latent_dim=5,
+        metrics_embedding_dim=4,
+        metrics_hidden_dims=(6,),
+        fusion_hidden_dims=(7,),
+        decoder_hidden_dims=(7,),
+        latent_norm="none",
+        identity_mode="disabled",
+    )
+    model = FullGameAutoencoder(config).eval()
+    metrics = torch.randn(2, len(METRICS))
+
+    with torch.no_grad():
+        latent_a = model.encoder(
+            torch.tensor([1, 2]),
+            torch.tensor([0, 1]),
+            torch.tensor([0, 1]),
+            metrics,
+        )
+        latent_b = model.encoder(
+            torch.tensor([9, 8]),
+            torch.tensor([4, 3]),
+            torch.tensor([3, 2]),
+            metrics,
+        )
+
+    assert torch.allclose(latent_a, latent_b)
 
 
 def test_batch_norm_latent_supports_single_row_training_batch() -> None:
@@ -345,6 +483,40 @@ def test_short_training_run_returns_finite_loss_history() -> None:
     assert all(np.isfinite(row["loss"]) for row in history)
 
 
+def test_training_helper_supports_semantic_targets() -> None:
+    targets = np.linspace(0.0, 1.0, 32, dtype=np.float32).reshape(16, 2)
+
+    model, history = train_from_dataframe_or_csv(
+        _frame(16),
+        METRICS,
+        config=_semantic_config(target_dim=2),
+        batch_size=4,
+        epochs=1,
+        semantic_targets=targets,
+        semantic_loss_weight=0.5,
+        pin_memory=False,
+        amp=False,
+    )
+
+    assert isinstance(model, FullGameAutoencoder)
+    assert np.isfinite(history[0]["semantic_loss"])
+    assert history[0]["loss"] >= history[0]["reconstruction_loss"]
+
+
+def test_training_helper_rejects_semantic_loss_without_targets() -> None:
+    with pytest.raises(ValueError, match="semantic_targets"):
+        train_from_dataframe_or_csv(
+            _frame(16),
+            METRICS,
+            config=_semantic_config(target_dim=2),
+            batch_size=4,
+            epochs=1,
+            semantic_loss_weight=0.5,
+            pin_memory=False,
+            amp=False,
+        )
+
+
 def test_gpu_option_helpers_are_cpu_safe() -> None:
     assert not full_game_encoder._resolve_amp(True, torch.device("cpu"))
     assert full_game_encoder._resolve_amp(True, torch.device("cuda"))
@@ -385,6 +557,20 @@ def test_evaluate_autoencoder_can_score_metric_neighbor_preservation() -> None:
     assert metrics["latent_metric_neighbor_k"] == 2.0
     assert 0.0 <= metrics["latent_metric_neighbor_recall"] <= 1.0
     assert np.isfinite(metrics["latent_metric_distance_corr"])
+
+
+def test_evaluate_autoencoder_scores_optional_semantic_targets() -> None:
+    targets = np.linspace(0.0, 1.0, 16, dtype=np.float32).reshape(8, 2)
+    model = FullGameAutoencoder(_semantic_config(target_dim=2))
+    dataloader = DataLoader(
+        FullGameProfileDataset(_frame(8), METRICS, semantic_targets=targets),
+        batch_size=4,
+    )
+
+    metrics = evaluate_autoencoder(model, dataloader, "auto")
+
+    assert "semantic_mse" in metrics
+    assert np.isfinite(metrics["semantic_mse"])
 
 
 def test_evaluate_autoencoder_handles_single_row_latent_summary() -> None:
@@ -430,6 +616,23 @@ def test_training_helper_supports_optional_denoising() -> None:
     assert np.isfinite(history[0]["loss"])
     assert np.isfinite(history[0]["reconstruction_loss"])
     assert np.isfinite(history[0]["latent_decorrelation_loss"])
+
+
+def test_training_helper_supports_sample_weights() -> None:
+    model, history = train_from_dataframe_or_csv(
+        _frame(16),
+        METRICS,
+        config=_config(),
+        batch_size=4,
+        epochs=1,
+        sample_weight=np.linspace(0.1, 2.0, 16, dtype=np.float32),
+        pin_memory=False,
+        amp=False,
+    )
+
+    assert isinstance(model, FullGameAutoencoder)
+    assert np.isfinite(history[0]["loss"])
+    assert np.isfinite(history[0]["reconstruction_loss"])
 
 
 def test_training_helper_supports_latent_decorrelation_regularizer() -> None:

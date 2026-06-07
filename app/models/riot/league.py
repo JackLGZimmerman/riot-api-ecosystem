@@ -161,7 +161,7 @@ ELITE_BOUNDS: EliteBoundsConfig = {
     Queues.RANKED_SOLO_5x5: EliteBoundConfig(
         collect=True,
         upper=EliteTiers.CHALLENGER,
-        lower=EliteTiers.GRANDMASTER,
+        lower=EliteTiers.CHALLENGER,
     ),
     Queues.RANKED_FLEX_SR: EliteBoundConfig(
         collect=False,

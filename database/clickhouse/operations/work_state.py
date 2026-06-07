@@ -57,23 +57,8 @@ def _mark_seeded(client, run_id: UUID) -> None:
     )
 
 
-def seed_from_latest_matchids() -> int:
-    client = get_client()
-    latest_run_id = _load_latest_run_id(client=client, name=PUUID_DATA_TIMESTAMP_NAME)
-    if latest_run_id is None:
-        return 0
-
-    if (
-        _load_latest_run_id(client=client, name=MATCHDATA_SEEDED_RUN_NAME)
-        == latest_run_id
-    ):
-        logger.debug(
-            "Matchdata seed skipped latest_run_id=%s (already seeded)", latest_run_id
-        )
-        return 0
-
-    rows = client.query(
-        f"""
+def _seed_candidates_select() -> str:
+    return f"""
         WITH completed_matchids AS
         (
             SELECT DISTINCT matchid FROM game_data.info WHERE matchid != ''
@@ -89,23 +74,49 @@ def seed_from_latest_matchids() -> int:
           AND toString(m.matchid) NOT IN (
               SELECT DISTINCT matchid FROM {MATCHDATA_STATE_TABLE}
           )
+    """
+
+
+def seed_from_latest_matchids() -> int:
+    client = get_client()
+    latest_run_id = _load_latest_run_id(client=client, name=PUUID_DATA_TIMESTAMP_NAME)
+    if latest_run_id is None:
+        return 0
+
+    if (
+        _load_latest_run_id(client=client, name=MATCHDATA_SEEDED_RUN_NAME)
+        == latest_run_id
+    ):
+        logger.debug(
+            "Matchdata seed skipped latest_run_id=%s (already seeded)", latest_run_id
+        )
+        return 0
+
+    candidates_select = _seed_candidates_select()
+    rows = client.query(
+        f"""
+        SELECT count()
+        FROM ({candidates_select})
         """,
         parameters={"run_id": latest_run_id},
     ).result_rows
-    if not rows:
+    pending = int(rows[0][0]) if rows else 0
+    if pending == 0:
         _mark_seeded(client, latest_run_id)
         return 0
 
-    client.insert(
-        table=MATCHDATA_STATE_TABLE,
-        data=[(run_id, _as_text(matchid)) for run_id, matchid in rows],
-        column_names=("run_id", "matchid"),
+    client.command(
+        f"""
+        INSERT INTO {MATCHDATA_STATE_TABLE} (run_id, matchid)
+        {candidates_select}
+        """,
+        parameters={"run_id": latest_run_id},
     )
     _mark_seeded(client, latest_run_id)
     logger.debug(
-        "Seeded matchdata queue rows=%d latest_run_id=%s", len(rows), latest_run_id
+        "Seeded matchdata queue rows=%d latest_run_id=%s", pending, latest_run_id
     )
-    return len(rows)
+    return pending
 
 
 def claim_pending_matchids(*, batch_size: int) -> list[str]:

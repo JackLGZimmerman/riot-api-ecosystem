@@ -20,6 +20,7 @@ shrinkage (Efron & Morris 1975).
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,7 +36,8 @@ from app.ml.dataset import SPLIT_ORDER
 
 DEFAULT_CONTEXT_CACHE_DIR = Path("app/ml/data/cache")
 DEFAULT_PREDICTION_CACHE = Path(
-    "app/ml/data/experiments/semantic_focus_reference_w3000_cont6/audit_focus_side_probability.npy"
+    "app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/"
+    "convex_encoder_mix_seed4/audit_focus_side_probability.npy"
 )
 
 
@@ -171,10 +173,22 @@ def main() -> None:
     ap.add_argument("--context-cache-dir", type=Path, default=DEFAULT_CONTEXT_CACHE_DIR)
     ap.add_argument("--prediction-cache", type=Path, default=DEFAULT_PREDICTION_CACHE)
     ap.add_argument("--per-row", action="store_true", help="print per-row EB gap detail")
+    ap.add_argument(
+        "--json-output",
+        type=Path,
+        default=None,
+        help="Optional machine-readable summary path for experiment reports.",
+    )
     args = ap.parse_args()
 
     blue_probability = np.load(args.prediction_cache, mmap_mode="r")
     specs = group_audit_specs()
+    payload: dict[str, object] = {
+        "prediction_cache": str(args.prediction_cache),
+        "context_cache_dir": str(args.context_cache_dir),
+        "n_groups": len(specs),
+        "splits": {},
+    }
     print(f"prediction cache: {args.prediction_cache}")
     print(f"groups: {len(specs)}\n")
 
@@ -189,6 +203,7 @@ def main() -> None:
         )
         rows = build_group_rows(data, specs)
         s = summarize(rows)
+        payload["splits"][split] = s
         if not s:
             print(f"{split:<6} (no populated bins)")
             continue
@@ -205,18 +220,50 @@ def main() -> None:
             for r in rows:
                 for b in r.bins:
                     eb_gap = (b.hgnn_wr - b.eb_target) * 100
-                    detail.append((eb_gap**2 - b.eb_var, r.spec.title, b.label, b.n, b.empirical_wr, b.eb_target, b.hgnn_wr, eb_gap))
-            for sysv, title, lab, n, e, eb, h, g in sorted(detail, reverse=True)[:15]:
+                    detail.append(
+                        (
+                            eb_gap**2 - b.eb_var,
+                            r.spec.title,
+                            b.label,
+                            b.n,
+                            b.empirical_wr,
+                            b.eb_target,
+                            b.hgnn_wr,
+                            eb_gap,
+                        )
+                    )
+            top_rows = sorted(detail, reverse=True)[:15]
+            payload["val_top_systematic_rows"] = [
+                {
+                    "systematic_gap_mse": float(sysv),
+                    "title": title,
+                    "label": lab,
+                    "n": int(n),
+                    "empirical_wr": float(e),
+                    "eb_target": float(eb),
+                    "hgnn_wr": float(h),
+                    "eb_gap_pp": float(g),
+                }
+                for sysv, title, lab, n, e, eb, h, g in top_rows
+            ]
+            for sysv, title, lab, n, e, eb, h, g in top_rows:
                 print(f"    {sysv:7.2f}  {title[:42]:42} [{lab:>10}] n={n:>7} emp={e*100:5.1f} eb={eb*100:5.1f} hgnn={h*100:5.1f} gap={g:+5.1f}")
 
     print()
     drift = drift_decomposition(
         cache_dir=args.context_cache_dir, blue_probability=blue_probability, specs=specs
     )
+    payload["drift"] = drift
     print(
         f"train->test drift (EB target movement): mse={drift['drift_mse']:.2f} pp^2  "
         f"mean|d|={drift['drift_mean_abs']:.2f}  max|d|={drift['drift_max_abs']:.2f}  (n={drift['n']})"
     )
+    if args.json_output is not None:
+        args.json_output.parent.mkdir(parents=True, exist_ok=True)
+        args.json_output.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

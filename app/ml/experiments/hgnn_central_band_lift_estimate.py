@@ -14,9 +14,7 @@ from statistics import mean
 from typing import Any
 
 
-DEFAULT_METRICS_PATH = Path(
-    "app/ml/data/experiments/semantic_focus_reference_w3000_cont6/metrics.json"
-)
+DEFAULT_METRICS_PATH = Path("app/ml/data/metrics_latest.json")
 MODEL_THRESHOLD = 0.516
 
 
@@ -52,9 +50,7 @@ def _positive(value: Any) -> float:
 
 
 def _edge_sum(allowed: dict[str, Any], deep: dict[str, Any]) -> float:
-    relationship = allowed.get("relationship", {})
     values = [
-        relationship.get("actual_relationship_edge"),
         allowed.get("spell_edge_for_actual"),
         allowed.get("rune_edge_for_actual"),
         allowed.get("patch_edge_for_actual_train_overlap"),

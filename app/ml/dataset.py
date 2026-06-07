@@ -27,31 +27,25 @@ LEGACY_CACHE_FORMATS = frozenset(
         "npy-memmap-v25",
         "npy-memmap-v26",
         "npy-memmap-v27",
+        "npy-memmap-v28",
     }
 )
-COUNT_ARRAY_NAMES = ("p1_cnt", "m1v1_cnt", "s2vx_cnt")
+COUNT_ARRAY_NAMES = ("p1_cnt",)
 SPLIT_ORDER = ("train", "val", "test")
-# Effective sample size per interaction edge after nested EB pooling (cache
-# v18+); legacy caches fall back to the raw support counts (no backoff info).
-EFF_N_FALLBACK = {"m1v1_eff_n": "m1v1_cnt", "s2vx_eff_n": "s2vx_cnt"}
 
 
 @dataclass(frozen=True)
 class SplitData:
     win_rate: np.ndarray
-    matchup_1v1: np.ndarray
-    synergy_2vx: np.ndarray
     p1_cnt: np.ndarray
-    m1v1_cnt: np.ndarray
-    s2vx_cnt: np.ndarray
     blue_win: np.ndarray
-    # Effective sample size per interaction edge after nested pooling; loaded by
-    # load_splits, defaulting to the raw counts for legacy caches.
-    m1v1_eff_n: np.ndarray | None = None
-    s2vx_eff_n: np.ndarray | None = None
     # Per-slot identity ids (HGNN identity embeddings); None for legacy caches.
     champion_id: np.ndarray | None = None
     build_id: np.ndarray | None = None
+    # Production game-level residual features. Signed edge columns are already
+    # blue-minus-red; coverage columns are unsigned.
+    loadout_features: np.ndarray | None = None
+    patch_features: np.ndarray | None = None
     # Optional frozen three-encoder sidecar blocks; None for caches built
     # without an encoder_sidecar_path.
     identity_static_sidecar: np.ndarray | None = None
@@ -61,6 +55,9 @@ class SplitData:
     # Optional compact semantic audit-group features [games, 10, G]. Loaded only
     # when the learned semantic MoE group-feature flag is enabled.
     semantic_group_features: np.ndarray | None = None
+    # Raw identity/context audit axes [games, 10, C]. Loaded only when train-time
+    # audit metrics need to match the markdown/group audit hard-bin lens.
+    context_raw: np.ndarray | None = None
 
 
 def _slice(arrays: dict[str, np.ndarray], lo: int, hi: int) -> SplitData:
@@ -87,6 +84,14 @@ def identity_meta(cfg: DatasetConfig) -> dict:
     identity = dict(meta["identity"])
     if "identity_encoder_sidecar" in meta:
         identity["identity_encoder_sidecar"] = meta["identity_encoder_sidecar"]
+    features = meta.get("production_features")
+    if isinstance(features, dict):
+        loadout_names = tuple(str(name) for name in features.get("loadout_feature_names", ()))
+        patch_names = tuple(str(name) for name in features.get("patch_feature_names", ()))
+        identity["loadout_feature_names"] = loadout_names
+        identity["patch_feature_names"] = patch_names
+        identity["loadout_feature_dim"] = len(loadout_names)
+        identity["patch_feature_dim"] = len(patch_names)
     return identity
 
 
@@ -178,6 +183,8 @@ def load_splits(
     *,
     require_counts: bool = False,
     load_semantic_group_features: bool = False,
+    semantic_group_feature_dim: int | None = None,
+    load_context_raw: bool = False,
 ) -> dict[str, SplitData]:
     meta = json.loads((cfg.cache_dir / CACHE_META_FILE).read_text())
     cache_format = meta.get("format")
@@ -198,8 +205,6 @@ def load_splits(
     paths = array_paths(cfg.cache_dir)
     arrays = {
         "win_rate": np.load(paths["win_rate"], mmap_mode="r")[:n],
-        "matchup_1v1": np.load(paths["matchup_1v1"], mmap_mode="r")[:n],
-        "synergy_2vx": np.load(paths["synergy_2vx"], mmap_mode="r")[:n],
         "blue_win": np.load(paths["blue_win"], mmap_mode="r")[:n].astype(np.float64),
     }
     for name in COUNT_ARRAY_NAMES:
@@ -212,23 +217,33 @@ def load_splits(
                 "rebuild the cache."
             )
         else:
-            if name == "p1_cnt":
-                shape = arrays["win_rate"].shape
-            elif name == "m1v1_cnt":
-                shape = arrays["matchup_1v1"].shape
-            else:
-                shape = arrays["synergy_2vx"].shape
-            arrays[name] = np.zeros(shape, dtype=np.float32)
-    for name, fallback in EFF_N_FALLBACK.items():
-        path = paths[name]
-        if path.exists():
-            arrays[name] = np.load(path, mmap_mode="r")[:n]
-        else:
-            # Legacy cache without nested pooling: effective N is the raw count.
-            arrays[name] = arrays[fallback]
+            arrays[name] = np.zeros(arrays["win_rate"].shape, dtype=np.float32)
     for name in ("champion_id", "build_id"):
         if paths[name].exists():
             arrays[name] = np.load(paths[name], mmap_mode="r")[:n]
+    feature_meta = meta.get("production_features")
+    feature_dims = {}
+    if isinstance(feature_meta, dict):
+        feature_dims = {
+            "loadout_features": len(feature_meta.get("loadout_feature_names", ())),
+            "patch_features": len(feature_meta.get("patch_feature_names", ())),
+        }
+    for name in ("loadout_features", "patch_features"):
+        path = paths[name]
+        if path.exists():
+            value = np.load(path, mmap_mode="r")[:n]
+            expected_dim = feature_dims.get(name, 0)
+            if expected_dim > 0 and (value.ndim != 2 or value.shape[1] != expected_dim):
+                raise ValueError(
+                    f"Dataset cache {name} must have shape [games, {expected_dim}]; "
+                    "rebuild the cache."
+                )
+            arrays[name] = value
+        elif feature_dims.get(name, 0) > 0:
+            raise ValueError(
+                f"Dataset cache metadata declares {name}, but {path.name} is missing; "
+                "rebuild the cache."
+            )
     for name, path in sidecar_array_paths(cfg.cache_dir).items():
         if path.exists():
             arrays[name] = np.load(path, mmap_mode="r")[:n]
@@ -236,10 +251,43 @@ def load_splits(
         identity = meta.get("identity")
         if not isinstance(identity, dict) or "build_vocab" not in identity:
             raise ValueError("Cache metadata is missing identity.build_vocab; rebuild the cache.")
-        arrays["semantic_group_features"] = materialize_semantic_group_feature_cache(
-            cache_dir=cfg.cache_dir,
-            n_games=n,
-            build_vocab=tuple(identity["build_vocab"]),
-        )
+        try:
+            arrays["semantic_group_features"] = materialize_semantic_group_feature_cache(
+                cache_dir=cfg.cache_dir,
+                n_games=n,
+                build_vocab=tuple(identity["build_vocab"]),
+            )
+        except ValueError as exc:
+            if semantic_group_feature_dim is None:
+                raise
+            feature_path = cfg.cache_dir / "semantic_group_features.npy"
+            if not feature_path.exists():
+                raise
+            features = np.load(feature_path, mmap_mode="r")[:n]
+            expected_dim = int(semantic_group_feature_dim)
+            if (
+                features.ndim != 3
+                or features.shape[0] != n
+                or features.shape[1] != 10
+                or features.shape[2] != expected_dim
+            ):
+                raise ValueError(
+                    "semantic_group_features.npy is incompatible with the saved "
+                    f"model; expected [games, 10, {expected_dim}]."
+                ) from exc
+            arrays["semantic_group_features"] = features
+    if load_context_raw:
+        context_path = cfg.cache_dir / "identity_context_raw.npy"
+        if not context_path.exists():
+            raise ValueError(
+                "Dataset cache is missing identity_context_raw.npy; rebuild the cache."
+            )
+        context_raw = np.load(context_path, mmap_mode="r")[:n]
+        if context_raw.ndim != 3 or context_raw.shape[1] != 10:
+            raise ValueError(
+                "identity_context_raw.npy must have shape [games, 10, context_dim]; "
+                "rebuild the cache."
+            )
+        arrays["context_raw"] = context_raw
     _validate_blue_win(arrays["blue_win"])
     return {name: _slice(arrays, *split_ranges[name]) for name in SPLIT_ORDER}

@@ -37,8 +37,9 @@ report supersedes them with the reproducible samples above.
 
 ## Model Context
 
-Reference checkpoint:
-`app/ml/data/experiments/semantic_focus_reference_w3000_cont6/model.pt`.
+Historical reference checkpoint: a superseded semantic-focus checkpoint. This
+review predates the promoted seed-4 `convex_encoder_mix` production model, so
+use it as central-band diagnosis rather than as the current production audit.
 
 The checkpoint accounts for champion/build identity, 1vX champion-role-build
 priors, support counts, and the learned semantic MoE/group context path. It does
@@ -120,6 +121,82 @@ Secondary build and build-margin signals come from
 `participant_item_value_totals`, so they are useful forensic evidence about
 build intent but would need a draft-safe source, declared build intent, or a
 leakage-safe build-intent predictor before being used for pregame prediction.
+
+An earlier follow-up residual treated `highest_build_label` and related
+build-intent archetype refinements as directly available inputs. It reached the
+raw 60% gate on full held-out splits:
+
+| Ablation | Train games | Validation games | Test games | Raw val accuracy | Raw test accuracy |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Frozen current-shape baseline | 200,000 | 143,131 | 143,131 | 57.29% | 56.85% |
+| Baseline + build-intent residual | 200,000 | 143,131 | 143,131 | **60.98%** | **60.40%** |
+
+The old build-intent probe artifact has been removed from the maintained
+workspace. The result remains diagnostic only because it depends on
+completed-game build-profile labels and margins.
+
+Under the current leakage policy, this is diagnostic/RL-search evidence rather
+than an accepted pregame validation result. The fitted lift comes from
+completed-game build-profile labels and margins derived from
+`participant_item_value_totals`. Those values describe a valuable latent build
+shape, but they should not be fed directly into held-out pregame evaluation
+unless supplied by a draft-safe declaration, a pregame build-intent predictor,
+or an RL search over allowed build shapes.
+
+## Non-Relationship Full-Split Checks
+
+This section is historical. Loadout and patch-only Temporal have since been
+promoted into the production model and are no longer active ablation families.
+The current ablation scripts from this session now test build-intent diagnostics
+only.
+
+The leakage-safe follow-up checked all non-relationship families except direct
+matchup/relationship priors. The run uses the current basic-1vX-compatible
+checkpoint `app/ml/data/experiments/live_basic_1vx/model.pt`, fits residual
+heads on the full 1,145,051-game train split, evaluates the full 143,131-game
+validation and test splits, uses train-only aggregates with leave-one-out train
+adjustment, and does not project player identity or observed held-out
+build-profile features. Rune joins use `puuid` only inside ClickHouse
+predicates.
+
+The live baseline checkpoint is a freshly trained basic-1vX HGNN under the
+current code surface. It uses champion id, fixed slot/position role, build id,
+1vX champion-role-build prior/support, and team-swap augmentation. No sidecars,
+semantic heads, relationship priors, or player identity features are enabled.
+
+The old non-relationship full-split diagnostic artifact has been removed from
+the maintained workspace.
+
+The earlier `non_relationship_full_split.json` result is discarded: it used
+`app/ml/data/experiments/baseline.pt`, which is a non-HGNN structured checkpoint
+that was previously accepted by an overly permissive loader. The loader now
+rejects non-HGNN artifacts and requires strict live-shape state loading.
+
+| Ablation | Raw val accuracy | Raw test accuracy | Val gain | Test gain |
+| --- | ---: | ---: | ---: | ---: |
+| Current live basic-1vX baseline | 56.52% | 56.05% | - | - |
+| Temporal residual (`T`) | 56.75% | 56.20% | +0.23 pp | +0.15 pp |
+| Loadout residual (`L`) | 57.67% | 56.95% | +1.14 pp | +0.90 pp |
+| Semantic residual (`S`) | 56.88% | 56.47% | +0.36 pp | +0.42 pp |
+| `T+L` residual | 57.15% | 56.49% | +0.63 pp | +0.44 pp |
+| `T+S` residual | 56.70% | 56.29% | +0.18 pp | +0.23 pp |
+| `L+S` residual | **57.68%** | **57.01%** | **+1.16 pp** | **+0.95 pp** |
+| `T+L+S` residual | 57.17% | 56.49% | +0.65 pp | +0.44 pp |
+
+No non-relationship family or combination clears the hard `>=60%` raw
+validation and test gate on this live basic checkpoint. The result confirms
+that loadout is the strongest leakage-safe non-relationship family, semantic
+features add modest extra signal, and temporal features are not enough to close
+the gap when direct matchup/relationship priors are intentionally excluded.
+
+The `T+L` regression in the all-train residual fit is a calibration washout, not
+evidence that loadout is redundant. The diagnostic `T` block contained both
+champion-role patch deltas and a patch blue-side intercept, fitted in the same
+linear residual as loadout. Loadout coefficients stayed materially unchanged,
+but the temporal terms shifted central-band scores upward and worsened
+validation/test NLL and raw accuracy versus `L` alone. Production narrows
+temporal to patch blue-side drift only and keeps it in a separate bounded
+residual head from the loadout branch.
 
 ## Representative Deep Games
 
@@ -229,8 +306,7 @@ next ablation targets.
 
 ## Accuracy-Lift Estimate
 
-Reference checkpoint current accuracy from
-`semantic_focus_reference_w3000_cont6/metrics.json`:
+Historical checkpoint accuracy used for this review:
 
 | Split | Raw `0.5` accuracy | Tuned `0.516` threshold accuracy |
 | --- | ---: | ---: |
@@ -273,25 +349,23 @@ the ablations," not as expected production accuracy.
 
 ## Direction
 
-The highest-signal expansion path is to reintroduce allowed, non-identity
-relationship, loadout, and temporal inputs with support gating:
+The active ablation direction from this session is build intent only. Loadout
+and patch-only Temporal are production inputs now, and direct relationship /
+matchup priors remain intentionally excluded from the current scope.
 
-1. Add a leakage-safe temporal wrapper first: patch/date base-rate offsets,
-   blue-side rate, role/meta drift, support aging, and rolling priors computed
-   only from games before the candidate timestamp.
-2. Enable or rebuild calibrated exact relationship paths for 1v1 and 2vX priors,
-   then add role-restricted variants for same-lane, `BOTTOM+UTILITY`,
-   `JUNGLE+UTILITY`, and `JUNGLE+MIDDLE` contexts.
-3. Add pregame loadout features: summoner-spell pairs, full rune pages,
-   secondary rune pairs, stat shards, and joint rune/spell/build priors with
-   empirical-Bayes shrinkage and champion-role fallback.
-4. Treat secondary build label and build-margin profile as research signals
-   until a draft-safe build-intent source exists.
-5. Audit semantic-context residuals with fixed composition features and
-   patch-stratified ablations rather than relying on generic composition
-   explanations.
-6. Evaluate every addition as an ablation on validation/test central-band
-   accuracy and overall `val_threshold_accuracy`/`test_threshold_accuracy`.
+1. Keep observed secondary build labels and build-margin profiles as oracle
+   diagnostics while they are read from held-out
+   `participant_item_value_totals`.
+2. Build a draft-safe build-intent surface: declared intent, pregame-only
+   inferred distribution, marginalised unknown-build candidates, or RL/search
+   candidate profiles.
+3. Test primary build plus secondary label-set shape, not final item value or
+   game-length-derived build state.
+4. Fit train-only empirical-Bayes priors with support-gated fallback for
+   `(champion, role, primary_build)` and
+   `(champion, role, primary_build, secondary_label_set)`.
+5. Report observed final-build runs as oracle diagnostics only; do not mix them
+   into accepted pregame validation/test accuracy.
 
 The tight `0.475-0.525` band contains 163,910 held-out games and sits near
 52.4% accuracy. The wider `0.425-0.575` band contains 277,652 held-out games and

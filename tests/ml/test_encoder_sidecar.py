@@ -12,10 +12,6 @@ from app.ml.encoder_sidecar import (
     validate_static_metadata,
     validate_train_only_metadata,
 )
-from app.ml.experiments.context_ablation import (
-    SIDECAR_VARIANTS,
-    sidecar_variant_overrides,
-)
 from app.ml.hgnn_model import HGNNConfig, HGNNWinModel, build_hgnn_inputs, swap_hgnn_inputs
 from app.ml.semantic_group_features import SEMANTIC_GROUP_FEATURE_DIM
 from app.ml.train import _SidecarGatherer
@@ -93,7 +89,6 @@ def _semantic_moe_config(**overrides) -> HGNNConfig:
         "gate_hidden": (),
         "node_init_hidden": (),
         "readout_hidden": (),
-        "residual_head_hidden": (),
         "dropout": 0.0,
         "identity_static_sidecar_dim": 2,
         "identity_full_game_sidecar_dim": 3,
@@ -206,6 +201,11 @@ def test_hgnn_sidecar_inputs_swap_and_preserve_structural_antisymmetry() -> None
     full_game = rng.normal(size=(2, 10, 3)).astype(np.float32)
     temporal = rng.normal(size=(2, 10, 4)).astype(np.float32)
     support = rng.uniform(0.0, 80.0, size=(2, 10)).astype(np.float32)
+    loadout_features = np.array(
+        [[0.2, 1.0, -0.3, 0.5, 0.1, 0.8, -0.4, 0.2, 0.6, 0.9]],
+        dtype=np.float32,
+    ).repeat(2, axis=0)
+    patch_features = np.array([[0.05, 1.0]], dtype=np.float32).repeat(2, axis=0)
     group_features = rng.uniform(
         0.0,
         1.0,
@@ -222,12 +222,18 @@ def test_hgnn_sidecar_inputs_swap_and_preserve_structural_antisymmetry() -> None
         identity_temporal_sidecar=temporal,
         identity_encoder_support=support,
         semantic_group_features=group_features,
+        loadout_features=loadout_features,
+        patch_features=patch_features,
     )
 
     swapped = swap_hgnn_inputs(inputs)
     assert torch.equal(swapped["identity_static_sidecar"][:, :5], inputs["identity_static_sidecar"][:, 5:])
     assert torch.equal(swapped["identity_encoder_support"][:, 5:], inputs["identity_encoder_support"][:, :5])
     assert torch.equal(swapped["semantic_group_features"][:, :5], inputs["semantic_group_features"][:, 5:])
+    assert torch.allclose(swapped["loadout_features"][:, [0, 2, 4, 6, 8]], -inputs["loadout_features"][:, [0, 2, 4, 6, 8]])
+    assert torch.allclose(swapped["loadout_features"][:, [1, 3, 5, 7, 9]], inputs["loadout_features"][:, [1, 3, 5, 7, 9]])
+    assert torch.allclose(swapped["patch_features"][:, 0], -inputs["patch_features"][:, 0])
+    assert torch.allclose(swapped["patch_features"][:, 1], inputs["patch_features"][:, 1])
 
     model = HGNNWinModel(
         HGNNConfig(
@@ -240,6 +246,8 @@ def test_hgnn_sidecar_inputs_swap_and_preserve_structural_antisymmetry() -> None
             use_identity_static_sidecar=True,
             use_identity_full_game_sidecar=True,
             use_identity_temporal_sidecar=True,
+            loadout_feature_dim=10,
+            patch_feature_dim=2,
             structural_antisymmetry=True,
         )
     ).eval()
@@ -293,10 +301,19 @@ def test_hgnn_semantic_context_head_returns_noop_decomposed_logits() -> None:
     with torch.no_grad():
         outputs = model(**inputs)
 
-    assert set(outputs) == {"base_logit", "context_logit", "final_logit"}
+    assert set(outputs) == {
+        "base_logit",
+        "context_logit",
+        "loadout_logit",
+        "patch_logit",
+        "feature_logit",
+        "final_logit",
+    }
     assert outputs["base_logit"].shape == (2,)
     assert outputs["context_logit"].shape == (2,)
+    assert outputs["feature_logit"].shape == (2,)
     assert torch.allclose(outputs["context_logit"], torch.zeros_like(outputs["context_logit"]))
+    assert torch.allclose(outputs["feature_logit"], torch.zeros_like(outputs["feature_logit"]))
     assert torch.allclose(outputs["final_logit"], outputs["base_logit"])
 
 
@@ -335,8 +352,16 @@ def test_learned_semantic_moe_flag_disabled_preserves_old_outputs() -> None:
         without_sidecars = model(**base_inputs)
         with_ignored_sidecars = model(**inputs)
 
-    assert set(without_sidecars) == {"base_logit", "context_logit", "final_logit"}
+    assert set(without_sidecars) == {
+        "base_logit",
+        "context_logit",
+        "loadout_logit",
+        "patch_logit",
+        "feature_logit",
+        "final_logit",
+    }
     assert torch.allclose(without_sidecars["context_logit"], torch.zeros(2))
+    assert torch.allclose(without_sidecars["feature_logit"], torch.zeros(2))
     assert torch.allclose(without_sidecars["base_logit"], with_ignored_sidecars["base_logit"])
     assert torch.allclose(without_sidecars["final_logit"], with_ignored_sidecars["final_logit"])
 
@@ -374,6 +399,75 @@ def test_learned_semantic_moe_forward_shapes_topk_and_usage_stats() -> None:
     assert "semantic_moe_expert_usage" in stats
     assert "semantic_moe_router_entropy" in stats
     assert "semantic_moe_factor_std_min" in stats
+
+
+def test_learned_semantic_moe_convex_encoder_mix_preserves_slot_delta_and_view_stats() -> None:
+    inputs = _semantic_hgnn_inputs(batch_size=3, seed=122)
+    model = HGNNWinModel(
+        _semantic_moe_config(
+            semantic_moe_architecture="convex_encoder_mix",
+            semantic_moe_view_top_k=2,
+        )
+    ).eval()
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    assert outputs["semantic_moe_slot_delta"].shape == (3, 10)
+    assert outputs["semantic_moe_router_probs"].shape == (3, 10, 4)
+    assert outputs["semantic_moe_view_usage"].shape == (3,)
+    assert outputs["semantic_moe_view_selected_fraction"].shape == (3,)
+    assert torch.allclose(
+        outputs["semantic_moe_view_usage"].sum(),
+        torch.ones(()),
+        atol=1.0e-6,
+    )
+    assert outputs["semantic_moe_view_top_k"].item() == pytest.approx(2.0)
+    assert outputs["semantic_moe_convex_encoder_mix_enabled"].item() == pytest.approx(1.0)
+
+
+def test_learned_semantic_moe_convex_encoder_mix_team_swap_flips_context_sign() -> None:
+    inputs = _semantic_hgnn_inputs(batch_size=3, seed=123)
+    model = HGNNWinModel(_semantic_moe_config(semantic_moe_architecture="convex_encoder_mix")).eval()
+    _make_moe_experts_nonzero(model)
+
+    with torch.no_grad():
+        direct = model(**inputs)
+        mirrored = model(**swap_hgnn_inputs(inputs))
+
+    assert float(direct["context_logit"].abs().sum()) > 0.0
+    assert torch.allclose(direct["context_logit"], -mirrored["context_logit"], atol=1.0e-5)
+
+
+def test_semantic_moe_caps_combined_slot_delta() -> None:
+    inputs = _semantic_hgnn_inputs(batch_size=3, seed=126)
+    cap = 0.025
+    model = HGNNWinModel(
+        _semantic_moe_config(
+            semantic_moe_architecture="convex_encoder_mix",
+            semantic_moe_max_abs_slot_delta=cap,
+        )
+    ).eval()
+    _make_moe_experts_nonzero(model)
+    head = model.learned_semantic_moe
+    assert head is not None
+    with torch.no_grad():
+        for expert in head.experts:
+            last = expert[-1]
+            assert isinstance(last, torch.nn.Linear)
+            last.weight.fill_(100.0)
+            if last.bias is not None:
+                last.bias.fill_(100.0)
+        outputs = model(**inputs)
+
+    assert float(torch.max(torch.abs(outputs["semantic_moe_slot_delta"]))) <= cap + 1.0e-6
+    assert outputs["semantic_moe_max_abs_slot_delta"].item() == pytest.approx(cap)
+    assert float(outputs["semantic_moe_slot_delta_max_abs"]) <= cap + 1.0e-6
+
+
+def test_learned_semantic_moe_unknown_architecture_fails() -> None:
+    with pytest.raises(ValueError, match="semantic_moe_architecture"):
+        HGNNWinModel(_semantic_moe_config(semantic_moe_architecture="sideways"))
 
 
 def test_learned_semantic_moe_team_swap_flips_context_sign() -> None:
@@ -545,55 +639,3 @@ def test_semantic_context_scale_amplifies_context_logit() -> None:
 
     assert float(base.abs().sum()) > 0.0
     assert torch.allclose(scaled, 2.0 * base, atol=1.0e-5)
-
-
-def test_context_ablation_registry_exposes_three_encoder_variants() -> None:
-    assert set(SIDECAR_VARIANTS) == {
-        "static_only",
-        "full_game_only",
-        "temporal_only",
-        "static_full_game",
-        "static_temporal",
-        "full_game_temporal",
-        "all_three",
-        "semantic_context_only",
-        "learned_semantic_moe_only",
-        "learned_semantic_moe_group_features_only",
-        "all_three_plus_semantic_context",
-        "all_three_plus_learned_semantic_moe",
-        "all_three_plus_learned_semantic_moe_group_features",
-        "all_three_plus_raw_context",
-    }
-    all_three = sidecar_variant_overrides("all_three")
-    assert all_three["use_identity_static_sidecar"] is True
-    assert all_three["use_identity_full_game_sidecar"] is True
-    assert all_three["use_identity_temporal_sidecar"] is True
-    semantic = sidecar_variant_overrides("all_three_plus_semantic_context")
-    assert semantic["use_identity_static_sidecar"] is True
-    assert semantic["use_identity_full_game_sidecar"] is True
-    assert semantic["use_identity_temporal_sidecar"] is True
-    assert semantic["use_identity_semantic_context_head"] is True
-    semantic_only = sidecar_variant_overrides("semantic_context_only")
-    assert semantic_only["use_identity_static_sidecar"] is False
-    assert semantic_only["use_identity_semantic_context_head"] is True
-    learned_moe = sidecar_variant_overrides("all_three_plus_learned_semantic_moe")
-    assert learned_moe["use_identity_static_sidecar"] is True
-    assert learned_moe["use_identity_full_game_sidecar"] is True
-    assert learned_moe["use_identity_temporal_sidecar"] is True
-    assert learned_moe["use_learned_semantic_moe"] is True
-    learned_moe_only = sidecar_variant_overrides("learned_semantic_moe_only")
-    assert learned_moe_only["use_identity_static_sidecar"] is False
-    assert learned_moe_only["use_learned_semantic_moe"] is True
-    learned_moe_grouped = sidecar_variant_overrides(
-        "learned_semantic_moe_group_features_only"
-    )
-    assert learned_moe_grouped["use_learned_semantic_moe"] is True
-    assert learned_moe_grouped["use_semantic_group_features"] is True
-    all_three_grouped = sidecar_variant_overrides(
-        "all_three_plus_learned_semantic_moe_group_features"
-    )
-    assert all_three_grouped["use_identity_static_sidecar"] is True
-    assert all_three_grouped["use_semantic_group_features"] is True
-    assert sidecar_variant_overrides("all_three_plus_raw_context")[
-        "use_relationship_integrations"
-    ] is True

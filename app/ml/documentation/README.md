@@ -1,15 +1,16 @@
 # ML Win-Rate Model
 
-As of 2026-06-03, production uses champion/build identity embeddings on top of
-the smoothed 1vX player prior. The old classification-derived semantic,
-profile, and context inputs have been removed from the HGNN contract.
+As of 2026-06-04, production uses champion/build identity embeddings on top of
+the smoothed 1vX player prior, plus the promoted all-encoder learned semantic
+MoE over frozen static, full-game, and temporal identity latents. The old
+classification-derived semantic, profile, and context inputs have been removed
+from the HGNN contract.
 
-Direct 1v1 and 2vX relationship integrations remain as explicit research
-capacity behind `HGNNConfig.use_relationship_integrations=True`; default
-training and serving leave them disabled. Identity-encoder sidecars
-(static / full-game / temporal) are the current identity-signal research
-surface, and the semantic context head can aggregate those latents into
-ally/enemy context logits. Both are disabled by default — see
+Direct 1v1 and 2vX relationship integrations remain removed from production.
+The current identity-signal surface is the frozen identity-encoder sidecar
+artifact. Production consumes all three sidecar blocks through
+`semantic_moe_architecture="convex_encoder_mix"`; the older node-init sidecar
+MLPs remain disabled by default. See
 [HGNN_CURRENT.md](HGNN_CURRENT.md#identity-encoder-sidecars).
 
 ## Production Path
@@ -18,7 +19,7 @@ ally/enemy context logits. Both are disabled by default — see
 cache/prior arrays
 -> posterior and support features
 -> champion/role/build identity + 1vX node prior
--> optional static/full-game/temporal sidecars and semantic context head
+-> static/full-game/temporal sidecars into convex semantic MoE
 -> blue/red mean + attention team readout
 -> final logit
 -> sigmoid = P(blue wins)
@@ -34,7 +35,7 @@ Training writes:
 
 | File | Meaning |
 | --- | --- |
-| `app/ml/data/structured_winrate_model.pt` | HGNN config, confidence strength, and state dict |
+| `app/ml/data/hgnn_production_model.pt` | HGNN config, confidence strength, and state dict |
 | `app/ml/data/metrics_latest.json` | Train/val/test metrics and epoch history |
 
 Runtime prediction uses `load_predictor()` from `app/ml/predictor.py`.
@@ -79,19 +80,17 @@ confidence       = raw_count / (raw_count + confidence_strength)
 missing          = raw_count <= 0
 ```
 
-The default model path does not feed those tensors into the head.
+The default model path now points at the promoted `convex_encoder_mix` semantic
+MoE checkpoint copied into `app/ml/data/hgnn_production_model.pt`.
 
 ## Identity Semantic Context
 
-`HGNNConfig.use_identity_semantic_context_head=True` enables an opt-in
-side-logit over the frozen static, full-game, and temporal identity sidecars.
-It projects the three latent blocks into a shared semantic vector, builds
-support-weighted ally and enemy summaries for each slot, scores the interaction,
-and returns `base_logit`, `context_logit`, and `final_logit`. The final context
-layer is zero-initialised, so enabling the flag starts as a no-op.
-
-The recommended experiment variant is `all_three_plus_semantic_context` in
-`app/ml/experiments/context_ablation.py`.
+`HGNNConfig.use_learned_semantic_moe=True` enables the production side-logit over
+the frozen static, full-game, and temporal identity sidecars. The promoted
+architecture is `convex_encoder_mix`, selected because it kept all three encoder
+views present while producing the lowest validation group-EB semantic gap in the
+architecture matrix. The older `use_identity_semantic_context_head` path remains
+available as research capacity, but it is not the promoted default.
 
 ## Training
 

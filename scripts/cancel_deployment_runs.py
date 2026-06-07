@@ -25,7 +25,23 @@ ACTIVE_STATE_TYPES = (
 )
 
 
+def _ensure_prefect_state_create_is_defined() -> None:
+    """Rebuild Prefect's StateCreate schema when Pydantic sees a lazy forward ref."""
+    from prefect.client.schemas.actions import StateCreate
+
+    if StateCreate.__pydantic_complete__:
+        return
+
+    from prefect.results import ResultRecordMetadata
+
+    StateCreate.model_rebuild(
+        _types_namespace={"ResultRecordMetadata": ResultRecordMetadata},
+    )
+
+
 async def cancel_deployment_runs(deployment_name: str) -> int:
+    _ensure_prefect_state_create_is_defined()
+
     async with get_client() as client:
         deployment = await client.read_deployment_by_name(deployment_name)
         flow_runs = await client.read_flow_runs(

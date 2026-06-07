@@ -51,6 +51,22 @@ extracted latents stay clean. Optional denoising on the metric input only:
 `latent_decorrelation_weight=0.0005`. Omitted vocab sizes are inferred as
 `max(id)+1` from the frame.
 
+## Throughput Default
+
+Use `batch_size=5518` / `--batch-size 5518` for every full-game autoencoder
+experiment on the current 5518-row identity table unless the experiment is
+explicitly a batch-size sweep. On the local RTX 5070 Ti, the documented
+215-metric, 640-latent recipe peaked at `60,478` samples/s with the whole
+identity table in one batch:
+
+| Batch size | Samples/s |
+| ---: | ---: |
+| `512` | `38,349` |
+| `1024` | `40,819` |
+| `2048` | `47,037` |
+| `4096` | `56,535` |
+| `5518` | **`60,478`** |
+
 ## Python Usage
 
 ```python
@@ -68,7 +84,7 @@ metric_columns = ("damage_per_min", "gold_per_min", "cc_per_min")
 frame = pd.read_csv("profiles.csv")
 
 model, history = train_from_dataframe_or_csv(
-    frame, metric_columns, epochs=7200, batch_size=1024, device="auto",
+    frame, metric_columns, epochs=7200, batch_size=5518, device="auto",
     noise_std=0.003, mask_prob=0.0, latent_decorrelation_weight=0.0005,
 )
 
@@ -87,7 +103,7 @@ latents = extract_full_game_latents(model, dataloader, "auto")
 uv run python -m app.classification.full_game_encoder \
   --csv path/to/profiles.csv \
   --epochs 7200 \
-  --batch-size 1024 \
+  --batch-size 5518 \
   --device auto \
   --noise-std 0.003 \
   --latent-dropout 0.10 \
@@ -100,8 +116,9 @@ uv run python -m app.classification.full_game_encoder \
   60 context columns + raw/derived profile columns or their sources);
   `--profile-only` selects the legacy 155-column surface.
 - `device="auto"` uses CUDA (AMP + TF32 + pinned/non-blocking transfers) when
-  available. `--batch-size auto` probes the largest fitting batch; `--max-batch-size`
-  caps it; `--no-amp` / `--no-pin-memory` for debugging.
+  available. Use `--batch-size 5518` for current full-game experiments;
+  `--batch-size auto` probes the largest fitting batch and `--max-batch-size`
+  caps it for explicit sweeps; `--no-amp` / `--no-pin-memory` for debugging.
 - For semantic grouping, key on the three id columns and cluster only `latent_*`;
   keep `--neighbor-k 10` so neighbor recall / distance correlation are reported.
   `neighbor_recall@k` and `distance_corr` are neighborhood-preservation

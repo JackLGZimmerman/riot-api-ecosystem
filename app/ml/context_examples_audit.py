@@ -21,24 +21,19 @@ from app.ml.audit_format import (
     _mean_or_nan,
 )
 from app.ml.config import DatasetConfig
-from app.ml.context_audit_specs import AuditSpec, BinSpec, POSITIONS, audit_specs
+from app.ml.context_audit_lens import AuditLens
+from app.ml.context_audit_specs import AuditSpec, BinSpec, audit_specs
 from app.ml.dataset import SPLIT_ORDER, SplitData, identity_meta, load_splits
 from app.ml.hgnn_model import HGNNWinModel, build_hgnn_inputs, load_hgnn_model, resolve_device
 from app.ml.semantic_group_features import (
     BURST_DAMAGE_THRESHOLD,
-    CONTEXT_AXIS_INDEX,
     FOCUS_HP_LOW_THRESHOLD,
     HARD_CC_THRESHOLD,
     HEAVY_TAKEN_THRESHOLD,
     HIGH_HP_THRESHOLD,
-    LOW_OWN_DAMAGE_THRESHOLD,
     RANGED_ATTACK_RANGE_THRESHOLD,
-    SELECTED_ENCHANTER_BUILDS,
-    SELECTED_ENCHANTERS,
     SEMANTIC_GROUP_FEATURE_DIM,
     SEMANTIC_GROUP_FEATURE_SCHEMA_VERSION,
-    SKIRMISH_CHAMPIONS,
-    TANK_BUILD_LABELS,
     static_hp_range_lookups,
 )
 from app.ml.train import _SidecarGatherer, _build_sidecar_gatherer, _model_uses_sidecar
@@ -52,12 +47,32 @@ DEFAULT_PREDICTION_CACHE = Path(
 )
 
 __all__ = [
+    "AuditBin",
+    "AuditData",
+    "AuditRow",
     "AuditSpec",
+    "AuditSplitSummary",
     "BinSpec",
+    "FLAGGED_AUDIT_TITLES",
+    "audit_json_payload",
     "audit_specs",
+    "evaluate_specs",
+    "evaluate_specs_with_bootstrap",
+    "gap_summary",
+    "write_audit_json",
 ]
 
 AUDIT_SPLITS = ("all", *SPLIT_ORDER)
+FLAGGED_AUDIT_TITLES = frozenset(
+    {
+        "Ezreal BOTTOM `attack_damage` vs enemy hard CC",
+        "LeeSin JUNGLE `ad_off_tank` vs enemy magic",
+        "Ambessa TOP `attack_damage` vs enemy damage",
+        "MasterYi JUNGLE any build vs enemy hard CC",
+        "Vayne BOTTOM `on_hit` vs enemy frontline count",
+        "Karma UTILITY any build vs enemy frontline count",
+    }
+)
 
 
 def _audit_split_range(meta: dict, audit_split: str) -> tuple[int, int]:
@@ -118,6 +133,9 @@ class AuditBin:
     empirical_wr: float
     hgnn_wr: float
     gap: float
+    gap_ci95_low: float = float("nan")
+    gap_ci95_high: float = float("nan")
+    bootstrap_samples: int = 0
     # focus-row classification accuracy at the 0.5 threshold
     accuracy: float = float("nan")
     # accuracy after shifting this bin's predictions by -gap (mean matches the
@@ -147,6 +165,10 @@ class AuditRow:
     @property
     def effect_shrinkage_ratio(self) -> float:
         return _effect_shrinkage_ratio(self.hgnn_endpoint_effect, self.endpoint_effect)
+
+    @property
+    def is_flagged(self) -> bool:
+        return self.spec.title in FLAGGED_AUDIT_TITLES
 
 
 @dataclass(frozen=True)
@@ -195,16 +217,20 @@ class AuditData:
             )
         self.audit_split = audit_split
         self.build_vocab = tuple(meta["identity"]["build_vocab"])
-        self.build_to_idx = {label: idx for idx, label in enumerate(self.build_vocab)}
         self.blue_win = np.load(context_cache_dir / "blue_win.npy", mmap_mode="r")[self.game_slice]
         self.champion_id = np.load(context_cache_dir / "champion_id.npy", mmap_mode="r")[self.game_slice]
         self.build_id = np.load(context_cache_dir / "build_id.npy", mmap_mode="r")[self.game_slice]
         self.context_raw = np.load(context_cache_dir / "identity_context_raw.npy", mmap_mode="r")[self.game_slice]
         self.blue_probability = np.asarray(selected_probability, dtype=np.float64)
-        self._axis_cache: dict[str, np.ndarray] = {}
         self._hp_lookup, self._range_lookup = _static_lookups()
-        self._slot_hp_cache: np.ndarray | None = None
-        self._slot_range_cache: np.ndarray | None = None
+        self._lens = AuditLens(
+            champion_id=self.champion_id,
+            build_id=self.build_id,
+            context_raw=self.context_raw,
+            build_vocab=self.build_vocab,
+            hp_lookup=self._hp_lookup,
+            range_lookup=self._range_lookup,
+        )
 
     @property
     def labels(self) -> np.ndarray:
@@ -231,124 +257,35 @@ class AuditData:
 
     @property
     def slot_hp(self) -> np.ndarray:
-        if self._slot_hp_cache is None:
-            self._slot_hp_cache = self._hp_lookup[self.champion_id]
-        return self._slot_hp_cache
+        return self._lens.slot_hp
 
     @property
     def slot_range(self) -> np.ndarray:
-        if self._slot_range_cache is None:
-            self._slot_range_cache = self._range_lookup[self.champion_id]
-        return self._slot_range_cache
+        return self._lens.slot_range
 
     def axis(self, name: str) -> np.ndarray:
-        if name not in self._axis_cache:
-            self._axis_cache[name] = self._build_axis(name)
-        return self._axis_cache[name]
-
-    def _build_axis(self, name: str) -> np.ndarray:
-        if name.startswith("enemy_") and name.removeprefix("enemy_") in CONTEXT_AXIS_INDEX:
-            return self._team_context(CONTEXT_AXIS_INDEX[name.removeprefix("enemy_")], enemy=True)
-        if name.startswith("ally_") and name.removeprefix("ally_") in CONTEXT_AXIS_INDEX:
-            return self._team_context(CONTEXT_AXIS_INDEX[name.removeprefix("ally_")], enemy=False)
-        if name == "enemy_burst_count":
-            non_tank = ~np.isin(self.build_id, [self.build_to_idx[label] for label in TANK_BUILD_LABELS])
-            burst_slot = (
-                self.context_raw[:, :, CONTEXT_AXIS_INDEX["damage"]] >= BURST_DAMAGE_THRESHOLD
-            ) & non_tank
-            return self._enemy_count(burst_slot)
-        if name == "enemy_hard_cc_count":
-            return self._enemy_count(
-                self.context_raw[:, :, CONTEXT_AXIS_INDEX["cc"]] >= HARD_CC_THRESHOLD
-            )
-        if name == "enemy_frontline_count":
-            tank_ids = [self.build_to_idx[label] for label in TANK_BUILD_LABELS]
-            return self._enemy_count(np.isin(self.build_id, tank_ids))
-        if name == "enemy_heavy_taken_count":
-            return self._enemy_count(
-                self.context_raw[:, :, CONTEXT_AXIS_INDEX["damage_taken"]]
-                >= HEAVY_TAKEN_THRESHOLD
-            )
-        if name == "enemy_high_hp_count":
-            return self._enemy_count(self.slot_hp >= HIGH_HP_THRESHOLD)
-        if name == "enemy_ranged_count":
-            return self._enemy_count(self.slot_range > RANGED_ATTACK_RANGE_THRESHOLD)
-        if name == "same_role_range":
-            return np.concatenate([self.slot_range[:, 5:], self.slot_range[:, :5]], axis=1)
-        if name == "ally_skirmish_count":
-            return self._ally_count(np.isin(self.champion_id, list(SKIRMISH_CHAMPIONS)))
-        raise ValueError(f"unknown audit axis: {name}")
-
-    def _team_context(self, dim: int, *, enemy: bool) -> np.ndarray:
-        blue = self.context_raw[:, :5, dim].mean(axis=1)
-        red = self.context_raw[:, 5:, dim].mean(axis=1)
-        blue_focus = red if enemy else blue
-        red_focus = blue if enemy else red
-        return np.concatenate(
-            [
-                np.repeat(blue_focus[:, None], 5, axis=1),
-                np.repeat(red_focus[:, None], 5, axis=1),
-            ],
-            axis=1,
-        )
-
-    @staticmethod
-    def _side_count(slot_mask: np.ndarray, *, enemy: bool) -> np.ndarray:
-        blue = slot_mask[:, :5].sum(axis=1).astype(np.float64)
-        red = slot_mask[:, 5:].sum(axis=1).astype(np.float64)
-        blue_focus = red if enemy else blue
-        red_focus = blue if enemy else red
-        return np.concatenate(
-            [
-                np.repeat(blue_focus[:, None], 5, axis=1),
-                np.repeat(red_focus[:, None], 5, axis=1),
-            ],
-            axis=1,
-        )
-
-    def _enemy_count(self, slot_mask: np.ndarray) -> np.ndarray:
-        return self._side_count(slot_mask, enemy=True)
-
-    def _ally_count(self, slot_mask: np.ndarray) -> np.ndarray:
-        return self._side_count(slot_mask, enemy=False)
+        return self._lens.axis(name)
 
     def focus_mask(self, spec: AuditSpec) -> np.ndarray:
-        mask = np.ones((self.n_games, 10), dtype=bool)
-        if spec.champions:
-            mask &= np.isin(self.champion_id, list(spec.champions))
-        if spec.positions:
-            slot_mask = np.zeros(10, dtype=bool)
-            for pos in spec.positions:
-                idx = POSITIONS.index(pos)
-                slot_mask[idx] = True
-                slot_mask[idx + 5] = True
-            mask &= slot_mask[None, :]
-        if spec.builds:
-            mask &= np.isin(self.build_id, [self.build_to_idx[label] for label in spec.builds])
-        if spec.focus_condition == "low_own_damage":
-            side_anchor = np.zeros(10, dtype=bool)
-            side_anchor[[0, 5]] = True
-            mask &= side_anchor[None, :]
-            mask &= self.axis("ally_damage") <= LOW_OWN_DAMAGE_THRESHOLD
-        elif spec.focus_condition == "focus_hp_low":
-            mask &= self.slot_hp <= FOCUS_HP_LOW_THRESHOLD
-        elif spec.focus_condition == "focus_hp_high":
-            mask &= self.slot_hp >= HIGH_HP_THRESHOLD
-        elif spec.focus_condition == "selected_enchanter":
-            mask &= np.isin(self.champion_id, list(SELECTED_ENCHANTERS))
-            mask &= np.isin(
-                self.build_id,
-                [self.build_to_idx[label] for label in SELECTED_ENCHANTER_BUILDS],
-            )
-        elif spec.focus_condition is not None:
-            raise ValueError(f"unknown focus condition: {spec.focus_condition}")
-        return mask
+        return self._lens.focus_mask(spec)
 
 
 def evaluate_specs(data: AuditData, specs: Sequence[AuditSpec]) -> tuple[AuditRow, ...]:
+    return evaluate_specs_with_bootstrap(data, specs, bootstrap_samples=0, bootstrap_seed=0)
+
+
+def evaluate_specs_with_bootstrap(
+    data: AuditData,
+    specs: Sequence[AuditSpec],
+    *,
+    bootstrap_samples: int = 0,
+    bootstrap_seed: int = 0,
+) -> tuple[AuditRow, ...]:
     labels = data.labels
     predictions = data.predictions
     rows: list[AuditRow] = []
+    bootstrap_samples = max(int(bootstrap_samples), 0)
+    rng = np.random.default_rng(int(bootstrap_seed))
     for spec in specs:
         focus = data.focus_mask(spec)
         axis = data.axis(spec.axis)
@@ -361,6 +298,12 @@ def evaluate_specs(data: AuditData, specs: Sequence[AuditSpec]) -> tuple[AuditRo
             empirical = _mean_or_nan(bin_labels)
             hgnn = _mean_or_nan(bin_predictions)
             gap = hgnn - empirical
+            ci_low, ci_high = _bootstrap_gap_ci(
+                bin_labels,
+                bin_predictions,
+                samples=bootstrap_samples,
+                rng=rng,
+            )
             correct = (bin_predictions >= 0.5).astype(np.float64) == bin_labels
             # Perfect calibration of this bin: shift predictions so the bin mean
             # matches the empirical WR, keeping the within-bin ranking, re-threshold.
@@ -372,6 +315,9 @@ def evaluate_specs(data: AuditData, specs: Sequence[AuditSpec]) -> tuple[AuditRo
                     empirical_wr=empirical,
                     hgnn_wr=hgnn,
                     gap=gap,
+                    gap_ci95_low=ci_low,
+                    gap_ci95_high=ci_high,
+                    bootstrap_samples=bootstrap_samples,
                     accuracy=_mean_or_nan(correct.astype(np.float64)),
                     calibrated_accuracy=_mean_or_nan(calibrated_correct.astype(np.float64)),
                 )
@@ -427,6 +373,7 @@ def predict_blue_probabilities(
         dataset_cfg,
         require_counts=True,
         load_semantic_group_features=load_semantic_group_features,
+        semantic_group_feature_dim=int(config.semantic_group_feature_dim),
     )
     gatherer = None
     if _model_uses_sidecar(config) and splits["train"].identity_static_sidecar is None:
@@ -498,10 +445,6 @@ def _predict_split(
                 win_rate=split.win_rate[rows],
                 p1_cnt=split.p1_cnt[rows],
                 strength=strength,
-                matchup_1v1=split.matchup_1v1[rows],
-                synergy_2vx=split.synergy_2vx[rows],
-                m1v1_cnt=split.m1v1_cnt[rows],
-                s2vx_cnt=split.s2vx_cnt[rows],
                 identity_static_sidecar=identity_static_sidecar,
                 identity_full_game_sidecar=identity_full_game_sidecar,
                 identity_temporal_sidecar=identity_temporal_sidecar,
@@ -511,7 +454,14 @@ def _predict_split(
                     if split.semantic_group_features is None
                     else split.semantic_group_features[rows]
                 ),
-                include_relationship_features=bool(model.config.use_relationship_integrations),
+                loadout_features=(
+                    None
+                    if split.loadout_features is None
+                    else split.loadout_features[rows]
+                ),
+                patch_features=(
+                    None if split.patch_features is None else split.patch_features[rows]
+                ),
                 device=device,
             )
             outputs = model(**inputs)
@@ -531,7 +481,10 @@ def _focus_side_probabilities_from_outputs(outputs: dict[str, torch.Tensor]) -> 
     semantic_moe_logit = outputs.get("semantic_moe_logit")
     if semantic_moe_logit is None:
         semantic_moe_logit = base_logit.new_zeros(base_logit.shape)
-    shared_logit = base_logit + context_logit - semantic_moe_logit
+    feature_logit = outputs.get("feature_logit")
+    if feature_logit is None:
+        feature_logit = base_logit.new_zeros(base_logit.shape)
+    shared_logit = base_logit + context_logit - semantic_moe_logit + feature_logit
     blue_delta = slot_delta[:, :5]
     red_delta = slot_delta[:, 5:]
     blue_focus_logit = shared_logit[:, None] + blue_delta - red_delta.mean(
@@ -830,9 +783,9 @@ def render_audit(
             "",
             "The checked-in report uses the focus-slot audit path. Checkpoints with semantic "
             "MoE slot deltas are scored with per-slot focus-side probabilities instead of one "
-            "repeated match-level probability. The best audit-focused checkpoint was produced "
-            "by continuing a grouped MoE checkpoint with the reference-target semantic context "
-            "calibration objective.",
+            "repeated match-level probability. Regenerate predictions from the selected "
+            "checkpoint with `--refresh-predictions`; omit it to reuse the prediction cache "
+            "for report-only updates.",
             "",
             "```bash",
             "uv run python -m app.ml.context_examples_audit \\",
@@ -852,24 +805,6 @@ def render_audit(
             f"  --audit-split {audit_split} \\",
             f"  --output {DEFAULT_OUTPUT_PATH} \\",
             "  --refresh-predictions",
-            "",
-            "uv run python -m app.ml.train \\",
-            f"  --cache-dir {model_cache_dir} \\",
-            "  --encoder-sidecar-path app/ml/data/experiments/semantic_identity_sidecar_full.npz \\",
-            "  --warm-start-model-path app/ml/data/experiments/semantic_focus_reference_w300_cont6/model.pt \\",
-            "  --model-path app/ml/data/experiments/semantic_focus_reference_w3000_cont6/model.pt \\",
-            "  --metrics-path app/ml/data/experiments/semantic_focus_reference_w3000_cont6/metrics.json \\",
-            "  --use-learned-semantic-moe \\",
-            "  --use-semantic-group-features \\",
-            "  --semantic-context-calibration-loss-weight 3000 \\",
-            "  --semantic-context-calibration-min-count 4 \\",
-            "  --semantic-context-calibration-tail-weight 3 \\",
-            "  --checkpoint-metric val_context_gap_mse \\",
-            "  --checkpoint-min-delta -1000000 \\",
-            "  --learning-rate 0.00001 \\",
-            "  --patience 10 \\",
-            "  --max-epochs 6 \\",
-            "  --device cuda",
             "```",
             "",
         ]
@@ -897,13 +832,262 @@ def gap_summary(rows: Sequence[AuditBin]) -> dict[str, float | int]:
     )
     return {
         "n_populated_bins": int(sum(row.n > 0 for row in rows)),
+        "n_focus_rows": int(total_n),
         "mean_abs_gap": _mean_or_nan(np.abs(gaps)),
         "max_abs_gap": _max_or_nan(np.abs(gaps)),
         "gap_mse": _mean_or_nan(gaps**2),
+        "support_weighted_mean_abs_gap": (
+            float(np.sum(counts * np.abs(gaps)) / total_n)
+            if total_n > 0
+            else float("nan")
+        ),
+        "support_weighted_gap_mse": (
+            float(np.sum(counts * (gaps**2)) / total_n)
+            if total_n > 0
+            else float("nan")
+        ),
         "accuracy": accuracy,
         "calibrated_accuracy": calibrated_accuracy,
         "calibration_lift": calibrated_accuracy - accuracy,
     }
+
+
+def audit_json_payload(
+    *,
+    rows_by_split: dict[str, Sequence[AuditRow]],
+    split_summaries: Sequence[AuditSplitSummary],
+    model_path: Path,
+    model_cache_dir: Path,
+    context_cache_dir: Path,
+    encoder_sidecar_path: Path | None,
+    prediction_cache: Path | None,
+    audit_split: str,
+    updated: str | None = None,
+) -> dict[str, object]:
+    """Build a machine-readable companion payload for ablation reporting."""
+
+    updated = updated or date.today().isoformat()
+    payload = {
+        "schema_version": 1,
+        "updated": updated,
+        "audit_split": audit_split,
+        "model_path": str(model_path),
+        "model_cache_dir": str(model_cache_dir),
+        "context_cache_dir": str(context_cache_dir),
+        "encoder_sidecar_path": (
+            None if encoder_sidecar_path is None else str(encoder_sidecar_path)
+        ),
+        "prediction_cache": None if prediction_cache is None else str(prediction_cache),
+        "flagged_audit_titles": sorted(FLAGGED_AUDIT_TITLES),
+        "splits": {},
+        "split_summaries": [_split_summary_payload(summary) for summary in split_summaries],
+    }
+    split_payloads: dict[str, object] = {}
+    for split, rows in rows_by_split.items():
+        row_payloads = [_row_payload(row) for row in rows]
+        split_payloads[split] = {
+            "summary": _gap_summary_payload(
+                gap_summary([bin_row for row in rows for bin_row in row.bins])
+            ),
+            "flagged_summary": _gap_summary_payload(
+                gap_summary(
+                    [
+                        bin_row
+                        for row in rows
+                        if row.is_flagged
+                        for bin_row in row.bins
+                    ]
+                )
+            ),
+            "rows": row_payloads,
+        }
+    payload["splits"] = split_payloads
+    return _json_safe(payload)
+
+
+def write_audit_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _row_payload(row: AuditRow) -> dict[str, object]:
+    summary = gap_summary(row.bins)
+    first, last = _declared_endpoint_bins(row.bins)
+    declared_empirical_effect = (
+        last.empirical_wr - first.empirical_wr
+        if first is not None
+        and last is not None
+        and first.n > 0
+        and last.n > 0
+        else float("nan")
+    )
+    declared_hgnn_effect = (
+        last.hgnn_wr - first.hgnn_wr
+        if first is not None
+        and last is not None
+        and first.n > 0
+        and last.n > 0
+        else float("nan")
+    )
+    diagnostics = _row_diagnostics(
+        row.bins,
+        endpoint_effect=row.endpoint_effect,
+        hgnn_endpoint_effect=row.hgnn_endpoint_effect,
+    )
+    return {
+        "section": row.spec.section,
+        "title": row.spec.title,
+        "read": row.spec.read,
+        "axis": row.spec.axis,
+        "champions": list(row.spec.champions),
+        "positions": list(row.spec.positions),
+        "builds": list(row.spec.builds),
+        "focus_condition": row.spec.focus_condition,
+        "is_flagged": row.is_flagged,
+        "summary": _gap_summary_payload(summary),
+        "endpoint_effect": row.endpoint_effect,
+        "hgnn_endpoint_effect": row.hgnn_endpoint_effect,
+        "effect_shrinkage_ratio": row.effect_shrinkage_ratio,
+        "declared_endpoint_effect": declared_empirical_effect,
+        "declared_hgnn_endpoint_effect": declared_hgnn_effect,
+        "declared_effect_shrinkage_ratio": _effect_shrinkage_ratio(
+            declared_hgnn_effect,
+            declared_empirical_effect,
+        ),
+        "diagnostics": diagnostics,
+        **diagnostics,
+        "bins": [_bin_payload(bin_row) for bin_row in row.bins],
+    }
+
+
+def _row_diagnostics(
+    rows: Sequence[AuditBin],
+    *,
+    endpoint_effect: float,
+    hgnn_endpoint_effect: float,
+) -> dict[str, object]:
+    """Decompose a context row into level, slope, and tail calibration signals."""
+    populated = [row for row in rows if row.n > 0 and math.isfinite(row.gap)]
+    if not populated:
+        return {
+            "level_gap": float("nan"),
+            "slope_gap": float("nan"),
+            "tail_gap": float("nan"),
+            "tail_bin_label": None,
+            "tail_bin_n": 0,
+            "tail_empirical_wr": float("nan"),
+            "tail_hgnn_wr": float("nan"),
+            "tail_gap_ci95_low": float("nan"),
+            "tail_gap_ci95_high": float("nan"),
+            "direction_correct": None,
+        }
+
+    counts = np.asarray([row.n for row in populated], dtype=np.float64)
+    gaps = np.asarray([row.gap for row in populated], dtype=np.float64)
+    total_n = float(counts.sum())
+    level_gap = (
+        float(np.sum(counts * gaps) / total_n) if total_n > 0 else float("nan")
+    )
+    slope_gap = (
+        float(hgnn_endpoint_effect - endpoint_effect)
+        if math.isfinite(hgnn_endpoint_effect) and math.isfinite(endpoint_effect)
+        else float("nan")
+    )
+    direction_correct: bool | None
+    if not math.isfinite(hgnn_endpoint_effect) or not math.isfinite(endpoint_effect):
+        direction_correct = None
+    elif abs(endpoint_effect) < 1.0e-12:
+        direction_correct = None
+    else:
+        direction_correct = (hgnn_endpoint_effect == 0.0) or (
+            math.copysign(1.0, hgnn_endpoint_effect)
+            == math.copysign(1.0, endpoint_effect)
+        )
+
+    tail = populated[-1]
+    return {
+        "level_gap": level_gap,
+        "slope_gap": slope_gap,
+        "tail_gap": tail.gap,
+        "tail_bin_label": tail.label,
+        "tail_bin_n": int(tail.n),
+        "tail_empirical_wr": tail.empirical_wr,
+        "tail_hgnn_wr": tail.hgnn_wr,
+        "tail_gap_ci95_low": tail.gap_ci95_low,
+        "tail_gap_ci95_high": tail.gap_ci95_high,
+        "direction_correct": direction_correct,
+    }
+
+
+def _bin_payload(row: AuditBin) -> dict[str, object]:
+    return {
+        "label": row.label,
+        "n": int(row.n),
+        "empirical_wr": row.empirical_wr,
+        "hgnn_wr": row.hgnn_wr,
+        "gap": row.gap,
+        "gap_ci95_low": row.gap_ci95_low,
+        "gap_ci95_high": row.gap_ci95_high,
+        "bootstrap_samples": int(row.bootstrap_samples),
+        "accuracy": row.accuracy,
+        "calibrated_accuracy": row.calibrated_accuracy,
+        "calibration_lift": row.calibrated_accuracy - row.accuracy,
+    }
+
+
+def _split_summary_payload(summary: AuditSplitSummary) -> dict[str, object]:
+    return {
+        "split": summary.split,
+        "n_games": int(summary.n_games),
+        "n_focus_rows": int(summary.n_focus_rows),
+        "n_tests": int(summary.n_tests),
+        "n_populated_bins": int(summary.n_populated_bins),
+        "mean_abs_gap": summary.mean_abs_gap,
+        "max_abs_gap": summary.max_abs_gap,
+        "gap_mse": summary.gap_mse,
+        "accuracy": summary.accuracy,
+        "calibrated_accuracy": summary.calibrated_accuracy,
+        "calibration_lift": summary.calibration_lift,
+    }
+
+
+def _gap_summary_payload(summary: dict[str, float | int]) -> dict[str, object]:
+    return {key: value for key, value in summary.items()}
+
+
+def _bootstrap_gap_ci(
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    *,
+    samples: int,
+    rng: np.random.Generator,
+) -> tuple[float, float]:
+    n = int(labels.shape[0])
+    if samples <= 0 or n <= 0:
+        return float("nan"), float("nan")
+    if n == 1:
+        gap = float(predictions.mean() - labels.mean())
+        return gap, gap
+    gaps = np.empty(samples, dtype=np.float64)
+    for idx in range(samples):
+        sample = rng.integers(0, n, size=n)
+        gaps[idx] = float(predictions[sample].mean() - labels[sample].mean())
+    return (
+        float(np.percentile(gaps, 2.5)),
+        float(np.percentile(gaps, 97.5)),
+    )
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
 
 
 def _effect_shrinkage_ratio(hgnn_effect: float, empirical_effect: float) -> float:
@@ -1003,6 +1187,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--encoder-sidecar-path", type=Path, default=None)
     parser.add_argument("--prediction-cache", type=Path, default=DEFAULT_PREDICTION_CACHE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
+    parser.add_argument(
+        "--json-output",
+        type=Path,
+        help="Optional machine-readable audit payload for ablation reports.",
+    )
+    parser.add_argument(
+        "--bootstrap-samples",
+        type=int,
+        default=0,
+        help="Per-bin bootstrap resamples for JSON gap CIs. Default writes null CI fields.",
+    )
+    parser.add_argument("--bootstrap-seed", type=int, default=20260604)
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--device", default="auto")
     parser.add_argument(
@@ -1035,7 +1231,12 @@ def main() -> None:
         blue_probability=probabilities,
         audit_split=str(args.audit_split),
     )
-    rows = evaluate_specs(data, specs)
+    rows = evaluate_specs_with_bootstrap(
+        data,
+        specs,
+        bootstrap_samples=int(args.bootstrap_samples),
+        bootstrap_seed=int(args.bootstrap_seed),
+    )
     split_summaries = tuple(
         summarize_audit_split(
             context_cache_dir=args.context_cache_dir,
@@ -1057,6 +1258,33 @@ def main() -> None:
         split_summaries=split_summaries,
     )
     write_audit(args.output, markdown)
+    if args.json_output is not None:
+        rows_by_split: dict[str, Sequence[AuditRow]] = {str(args.audit_split): rows}
+        for split_name in ("train", "val", "test"):
+            if split_name == args.audit_split:
+                continue
+            split_data = AuditData(
+                context_cache_dir=args.context_cache_dir,
+                blue_probability=probabilities,
+                audit_split=split_name,
+            )
+            rows_by_split[split_name] = evaluate_specs_with_bootstrap(
+                split_data,
+                specs,
+                bootstrap_samples=int(args.bootstrap_samples),
+                bootstrap_seed=int(args.bootstrap_seed),
+            )
+        payload = audit_json_payload(
+            rows_by_split=rows_by_split,
+            split_summaries=split_summaries,
+            model_path=args.model_path,
+            model_cache_dir=args.model_cache_dir,
+            context_cache_dir=args.context_cache_dir,
+            encoder_sidecar_path=args.encoder_sidecar_path,
+            prediction_cache=args.prediction_cache,
+            audit_split=str(args.audit_split),
+        )
+        write_audit_json(args.json_output, payload)
 
 
 if __name__ == "__main__":

@@ -45,7 +45,6 @@ FORBIDDEN_STATIC_INPUT_SUBSTRINGS = (
     "winrate",
     "blue_win",
     "matchups",
-    "matchup_",
     "synergy",
     "prior",
     "_cnt",
@@ -58,13 +57,9 @@ FORBIDDEN_STATIC_INPUT_COLUMNS = frozenset(
         "cnt",
         "support",
         "p1_cnt",
-        "m1v1_cnt",
-        "s2vx_cnt",
         "win_rate",
         "blue_win",
         "matchups",
-        "matchup_1v1",
-        "synergy_2vx",
     }
 )
 

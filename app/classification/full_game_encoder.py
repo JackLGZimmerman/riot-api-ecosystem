@@ -38,10 +38,12 @@ from app.classification.encoder_common import (
 )
 
 _NON_PROFILE_METRIC_COLUMNS = frozenset({"matchups"})
+OUTCOME_METRIC_COLUMNS = frozenset({"win"})
 DEFAULT_METRICS_HIDDEN_DIMS = (320, 160)
 DEFAULT_METRIC_NOISE_STD = 0.003
 DEFAULT_LATENT_DECORRELATION_WEIGHT = 5.0e-4
 DEFAULT_LATENT_DROPOUT = 0.10
+IDENTITY_MODES = frozenset({"normal", "disabled"})
 
 
 @dataclass(frozen=True)
@@ -58,9 +60,12 @@ class FullGameSemanticConfig:
     metrics_hidden_dims: tuple[int, ...] = DEFAULT_METRICS_HIDDEN_DIMS
     fusion_hidden_dims: tuple[int, ...] = (128,)
     decoder_hidden_dims: tuple[int, ...] = (512, 384)
+    semantic_target_dim: int = 0
+    semantic_decoder_hidden_dims: tuple[int, ...] = (128,)
     dropout: float = 0.0
     latent_dropout: float = DEFAULT_LATENT_DROPOUT
     latent_norm: LatentNorm = "batch"
+    identity_mode: str = "normal"
 
     def __post_init__(self) -> None:
         _require_positive(
@@ -79,11 +84,21 @@ class FullGameSemanticConfig:
         )
         _normalise_positive_dims(
             self,
-            ("metrics_hidden_dims", "fusion_hidden_dims", "decoder_hidden_dims"),
+            (
+                "metrics_hidden_dims",
+                "fusion_hidden_dims",
+                "decoder_hidden_dims",
+                "semantic_decoder_hidden_dims",
+            ),
         )
+        if int(self.semantic_target_dim) < 0:
+            raise ValueError("semantic_target_dim must be non-negative")
         _require_unit_interval(self, "dropout")
         _require_unit_interval(self, "latent_dropout")
         _require_latent_norm(self.latent_norm)
+        if self.identity_mode not in IDENTITY_MODES:
+            known = ", ".join(sorted(IDENTITY_MODES))
+            raise ValueError(f"identity_mode must be one of: {known}")
 
 
 class FullGameProfileDataset(Dataset[dict[str, torch.Tensor]]):
@@ -97,25 +112,45 @@ class FullGameProfileDataset(Dataset[dict[str, torch.Tensor]]):
         champion_col: str = "champion_id",
         teamposition_col: str = "teamposition_id",
         build_col: str = "build_id",
+        sample_weight: Sequence[float] | np.ndarray | None = None,
+        semantic_targets: Sequence[Sequence[float]] | np.ndarray | None = None,
+        allow_outcome_metrics: bool = False,
     ) -> None:
-        metric_columns = _metric_columns(metric_columns)
+        metric_columns = _metric_columns(
+            metric_columns,
+            allow_outcome_metrics=allow_outcome_metrics,
+        )
         _require_columns(frame, (champion_col, teamposition_col, build_col))
         self.champion_id = torch.as_tensor(_id_array(frame, champion_col), dtype=torch.long)
         self.teamposition_id = torch.as_tensor(_id_array(frame, teamposition_col), dtype=torch.long)
         self.build_id = torch.as_tensor(_id_array(frame, build_col), dtype=torch.long)
         self.metrics = torch.as_tensor(_metrics_array(frame, metric_columns), dtype=torch.float32)
+        self.sample_weight = torch.as_tensor(
+            _sample_weight_array(sample_weight, len(frame)),
+            dtype=torch.float32,
+        )
+        targets = _semantic_target_array(semantic_targets, len(frame))
+        self.semantic_targets = (
+            None
+            if targets is None
+            else torch.as_tensor(targets, dtype=torch.float32)
+        )
         self.metric_columns = tuple(metric_columns)
 
     def __len__(self) -> int:
         return int(self.metrics.shape[0])
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        return {
+        row = {
             "champion_id": self.champion_id[index],
             "teamposition_id": self.teamposition_id[index],
             "build_id": self.build_id[index],
             "metrics": self.metrics[index],
+            "sample_weight": self.sample_weight[index],
         }
+        if self.semantic_targets is not None:
+            row["semantic_targets"] = self.semantic_targets[index]
+        return row
 
 
 class FullGameEncoder(nn.Module):
@@ -176,11 +211,19 @@ class FullGameEncoder(nn.Module):
         )
         _validate_ids("build_id", build_id, batch_size, self.config.n_builds)
 
+        champion_embedding = self.champion_embedding(champion_id)
+        teamposition_embedding = self.teamposition_embedding(teamposition_id)
+        build_embedding = self.build_embedding(build_id)
+        if self.config.identity_mode == "disabled":
+            champion_embedding = torch.zeros_like(champion_embedding)
+            teamposition_embedding = torch.zeros_like(teamposition_embedding)
+            build_embedding = torch.zeros_like(build_embedding)
+
         fused = torch.cat(
             [
-                self.champion_embedding(champion_id),
-                self.teamposition_embedding(teamposition_id),
-                self.build_embedding(build_id),
+                champion_embedding,
+                teamposition_embedding,
+                build_embedding,
                 self.metrics_encoder(metrics),
             ],
             dim=-1,
@@ -201,6 +244,16 @@ class FullGameAutoencoder(nn.Module):
             config.metrics_dim,
             dropout=config.dropout,
         )
+        self.semantic_decoder = (
+            None
+            if config.semantic_target_dim == 0
+            else _mlp(
+                config.latent_dim,
+                config.semantic_decoder_hidden_dims,
+                config.semantic_target_dim,
+                dropout=config.dropout,
+            )
+        )
 
     def forward(
         self,
@@ -211,6 +264,11 @@ class FullGameAutoencoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         latent = self.encoder(champion_id, teamposition_id, build_id, metrics)
         return self.decoder(self.latent_dropout(latent)), latent
+
+    def predict_semantic_targets(self, latent: torch.Tensor) -> torch.Tensor:
+        if self.semantic_decoder is None:
+            raise RuntimeError("semantic target decoder is not configured")
+        return self.semantic_decoder(latent.float())
 
 
 def train_autoencoder(
@@ -223,6 +281,7 @@ def train_autoencoder(
     noise_std: float = DEFAULT_METRIC_NOISE_STD,
     mask_prob: float = 0.0,
     latent_decorrelation_weight: float = DEFAULT_LATENT_DECORRELATION_WEIGHT,
+    semantic_loss_weight: float = 0.0,
     weight_decay: float = 0.0,
     amp: bool = True,
 ) -> list[dict[str, float]]:
@@ -236,13 +295,18 @@ def train_autoencoder(
         raise ValueError("mask_prob must be between 0 and 1")
     if latent_decorrelation_weight < 0.0:
         raise ValueError("latent_decorrelation_weight must be non-negative")
+    if semantic_loss_weight < 0.0:
+        raise ValueError("semantic_loss_weight must be non-negative")
+    if semantic_loss_weight > 0.0 and model.semantic_decoder is None:
+        raise ValueError(
+            "semantic_loss_weight requires config.semantic_target_dim to be positive"
+        )
 
     device = _resolve_device(device)
     amp_enabled = _resolve_amp(amp, device)
     _configure_cuda_fast_math(device)
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    loss_fn = nn.MSELoss()
     scaler = torch.amp.GradScaler("cuda") if amp_enabled else None
     non_blocking = device.type == "cuda"
     history: list[dict[str, float]] = []
@@ -252,6 +316,7 @@ def train_autoencoder(
         total_loss = 0.0
         total_reconstruction_loss = 0.0
         total_decorrelation_loss = 0.0
+        total_semantic_loss = 0.0
         total_rows = 0
         for batch in dataloader:
             batch = _batch_to_device(batch, device, non_blocking=non_blocking)
@@ -272,10 +337,31 @@ def train_autoencoder(
                     batch["teamposition_id"],
                     batch["build_id"],
                     metric_input,
-                )
-            reconstruction_loss = loss_fn(reconstruction.float(), clean_metrics)
+            )
+            reconstruction_loss = _weighted_reconstruction_mse(
+                reconstruction.float(),
+                clean_metrics,
+                batch["sample_weight"],
+            )
             decorrelation_loss = _latent_decorrelation_loss(latent)
-            loss = reconstruction_loss + latent_decorrelation_weight * decorrelation_loss
+            if semantic_loss_weight > 0.0:
+                if "semantic_targets" not in batch:
+                    raise ValueError(
+                        "semantic_loss_weight requires semantic_targets in the dataloader"
+                    )
+                semantic_prediction = model.predict_semantic_targets(latent)
+                semantic_loss = _weighted_reconstruction_mse(
+                    semantic_prediction.float(),
+                    batch["semantic_targets"],
+                    batch["sample_weight"],
+                )
+            else:
+                semantic_loss = reconstruction_loss.new_tensor(0.0)
+            loss = (
+                reconstruction_loss
+                + latent_decorrelation_weight * decorrelation_loss
+                + semantic_loss_weight * semantic_loss
+            )
             if scaler is None:
                 loss.backward()
                 optimizer.step()
@@ -292,6 +378,7 @@ def train_autoencoder(
             total_decorrelation_loss += (
                 float(decorrelation_loss.detach().cpu()) * batch_size
             )
+            total_semantic_loss += float(semantic_loss.detach().cpu()) * batch_size
             total_rows += batch_size
 
         if total_rows == 0:
@@ -302,6 +389,7 @@ def train_autoencoder(
                 "loss": total_loss / total_rows,
                 "reconstruction_loss": total_reconstruction_loss / total_rows,
                 "latent_decorrelation_loss": total_decorrelation_loss / total_rows,
+                "semantic_loss": total_semantic_loss / total_rows,
             }
         )
 
@@ -329,22 +417,42 @@ def train_from_dataframe_or_csv(
     pin_memory: bool | None = None,
     amp: bool = True,
     max_batch_size: int | None = None,
+    sample_weight: Sequence[float] | np.ndarray | None = None,
+    semantic_targets: Sequence[Sequence[float]] | np.ndarray | None = None,
+    semantic_loss_weight: float = 0.0,
+    allow_outcome_metrics: bool = False,
 ) -> tuple[FullGameAutoencoder, list[dict[str, float]]]:
     frame = _read_frame(data)
     device = _resolve_device(device)
     batch_size_request = _resolve_batch_size_request(batch_size)
-    metric_columns = _metric_columns(metric_columns)
+    metric_columns = _metric_columns(
+        metric_columns,
+        allow_outcome_metrics=allow_outcome_metrics,
+    )
     if latent_decorrelation_weight < 0.0:
         raise ValueError("latent_decorrelation_weight must be non-negative")
+    targets = _semantic_target_array(semantic_targets, len(frame))
+    if semantic_loss_weight < 0.0:
+        raise ValueError("semantic_loss_weight must be non-negative")
+    if targets is not None:
+        if config is not None and config.semantic_target_dim not in (0, targets.shape[1]):
+            raise ValueError(
+                "config.semantic_target_dim must match semantic_targets width"
+            )
     if config is None:
         config = FullGameSemanticConfig(
             n_champions=_infer_vocab_size(frame, champion_col),
             n_teampositions=_infer_vocab_size(frame, teamposition_col),
             n_builds=_infer_vocab_size(frame, build_col),
             metrics_dim=len(metric_columns),
+            semantic_target_dim=0 if targets is None else int(targets.shape[1]),
         )
     elif config.metrics_dim != len(metric_columns):
         raise ValueError("config.metrics_dim must match the number of metric columns")
+    elif targets is not None and config.semantic_target_dim == 0:
+        raise ValueError(
+            "semantic_targets require config.semantic_target_dim to be positive"
+        )
     _validate_frame_id_range(frame, champion_col, config.n_champions)
     _validate_frame_id_range(frame, teamposition_col, config.n_teampositions)
     _validate_frame_id_range(frame, build_col, config.n_builds)
@@ -355,6 +463,9 @@ def train_from_dataframe_or_csv(
         champion_col=champion_col,
         teamposition_col=teamposition_col,
         build_col=build_col,
+        sample_weight=sample_weight,
+        semantic_targets=targets,
+        allow_outcome_metrics=allow_outcome_metrics,
     )
     model = FullGameAutoencoder(config)
     resolved_batch_size = _resolve_train_batch_size(
@@ -383,6 +494,7 @@ def train_from_dataframe_or_csv(
         noise_std=noise_std,
         mask_prob=mask_prob,
         latent_decorrelation_weight=latent_decorrelation_weight,
+        semantic_loss_weight=semantic_loss_weight,
         weight_decay=weight_decay,
         amp=amp,
     )
@@ -391,19 +503,27 @@ def train_from_dataframe_or_csv(
     return model, history
 
 
-def full_game_metric_columns(*, include_context: bool = True) -> tuple[str, ...]:
+def full_game_metric_columns(
+    *,
+    include_context: bool = True,
+    include_outcome_metrics: bool = False,
+) -> tuple[str, ...]:
     """Default full-game metric set for full-game autoencoder training.
 
-    The default is the complete per-identity catalogue: raw profile metrics,
-    derived ratios/differences, and team-participation/role-matchup context
-    features. The context features are not derivable from plain per-identity
-    rows, so the input frame must already carry the (smoothed) context columns
-    built with ``EmbeddingConfig(include_context_features=True)``.
+    The default is the complete non-outcome per-identity catalogue: raw profile
+    metrics, derived ratios/differences, and team-participation/role-matchup
+    context features. The context features are not derivable from plain
+    per-identity rows, so the input frame must already carry the (smoothed)
+    context columns built with ``EmbeddingConfig(include_context_features=True)``.
 
     Pass ``include_context=False`` for the legacy profile-only 155-column
     surface.
     """
-    base = raw_and_derived_metric_names()
+    base = tuple(
+        name
+        for name in raw_and_derived_metric_names()
+        if include_outcome_metrics or name not in OUTCOME_METRIC_COLUMNS
+    )
     if include_context:
         return (*base, *CONTEXT_FEATURE_NAMES)
     return base
@@ -432,6 +552,8 @@ def evaluate_autoencoder(
     total_absolute_error = 0.0
     total_values = 0
     total_rows = 0
+    total_semantic_squared_error = 0.0
+    total_semantic_values = 0
     latents: list[np.ndarray] = []
     clean_metric_rows: list[np.ndarray] = []
 
@@ -449,6 +571,14 @@ def evaluate_autoencoder(
             total_absolute_error += float(torch.sum(error.abs()).detach().cpu())
             total_values += int(error.numel())
             total_rows += int(batch["metrics"].shape[0])
+            if "semantic_targets" in batch and model.semantic_decoder is not None:
+                semantic_error = (
+                    model.predict_semantic_targets(latent) - batch["semantic_targets"]
+                )
+                total_semantic_squared_error += float(
+                    torch.sum(semantic_error.square()).detach().cpu()
+                )
+                total_semantic_values += int(semantic_error.numel())
             latents.append(latent.detach().cpu().numpy())
             if neighbor_k is not None:
                 clean_metric_rows.append(batch["metrics"].detach().cpu().numpy())
@@ -470,12 +600,15 @@ def evaluate_autoencoder(
                 max_rows=max_neighbor_rows,
             )
         )
-    return {
+    metrics = {
         "mse": total_squared_error / total_values,
         "mae": total_absolute_error / total_values,
         "rows": float(total_rows),
         **latent_summary,
     }
+    if total_semantic_values > 0:
+        metrics["semantic_mse"] = total_semantic_squared_error / total_semantic_values
+    return metrics
 
 
 def extract_full_game_latents(
@@ -675,9 +808,13 @@ def _nearest_neighbor_indices(distances: np.ndarray, k: int) -> np.ndarray:
     return np.argpartition(distances, kth=k - 1, axis=1)[:, :k]
 
 
-def _metric_columns(metric_columns: Sequence[str] | None) -> tuple[str, ...]:
+def _metric_columns(
+    metric_columns: Sequence[str] | None,
+    *,
+    allow_outcome_metrics: bool = False,
+) -> tuple[str, ...]:
     if metric_columns is None:
-        return full_game_metric_columns()
+        return full_game_metric_columns(include_outcome_metrics=allow_outcome_metrics)
     if isinstance(metric_columns, str):
         raise ValueError("metric_columns must be a sequence of column names")
     columns = tuple(metric_columns)
@@ -688,6 +825,12 @@ def _metric_columns(metric_columns: Sequence[str] | None) -> tuple[str, ...]:
         raise ValueError(
             "metric_columns cannot include non-profile metadata columns: "
             f"{non_profile}"
+        )
+    outcome = sorted(set(columns) & OUTCOME_METRIC_COLUMNS)
+    if outcome and not allow_outcome_metrics:
+        raise ValueError(
+            "metric_columns cannot include outcome/prior metrics unless "
+            f"allow_outcome_metrics=True: {outcome}"
         )
     return columns
 
@@ -760,6 +903,40 @@ def _source_metric_array(frame: pd.DataFrame, metric: str) -> np.ndarray:
     return values
 
 
+def _sample_weight_array(
+    sample_weight: Sequence[float] | np.ndarray | None,
+    n_rows: int,
+) -> np.ndarray:
+    if sample_weight is None:
+        return np.ones(n_rows, dtype=np.float32)
+    weights = np.asarray(sample_weight, dtype=np.float32)
+    if weights.ndim != 1 or weights.shape[0] != n_rows:
+        raise ValueError("sample_weight must be a 1-D array matching frame rows")
+    if not np.isfinite(weights).all():
+        raise ValueError("sample_weight must contain finite values")
+    if np.any(weights < 0.0):
+        raise ValueError("sample_weight must be non-negative")
+    if float(weights.sum()) <= 0.0:
+        raise ValueError("sample_weight must contain at least one positive value")
+    return weights
+
+
+def _semantic_target_array(
+    semantic_targets: Sequence[Sequence[float]] | np.ndarray | None,
+    n_rows: int,
+) -> np.ndarray | None:
+    if semantic_targets is None:
+        return None
+    targets = np.asarray(semantic_targets, dtype=np.float32)
+    if targets.ndim != 2 or targets.shape[0] != n_rows or targets.shape[1] <= 0:
+        raise ValueError(
+            "semantic_targets must be a 2-D array with one row per frame row"
+        )
+    if not np.isfinite(targets).all():
+        raise ValueError("semantic_targets must contain finite values")
+    return targets
+
+
 def _infer_vocab_size(frame: pd.DataFrame, column: str) -> int:
     _require_columns(frame, (column,))
     values = _id_array(frame, column)
@@ -817,7 +994,7 @@ def _batch_to_device(
     *,
     non_blocking: bool = False,
 ) -> dict[str, torch.Tensor]:
-    return {
+    out = {
         "champion_id": batch["champion_id"].to(
             device=device,
             dtype=torch.long,
@@ -838,7 +1015,30 @@ def _batch_to_device(
             dtype=torch.float32,
             non_blocking=non_blocking,
         ),
+        "sample_weight": batch["sample_weight"].to(
+            device=device,
+            dtype=torch.float32,
+            non_blocking=non_blocking,
+        ),
     }
+    if "semantic_targets" in batch:
+        out["semantic_targets"] = batch["semantic_targets"].to(
+            device=device,
+            dtype=torch.float32,
+            non_blocking=non_blocking,
+        )
+    return out
+
+
+def _weighted_reconstruction_mse(
+    reconstruction: torch.Tensor,
+    target: torch.Tensor,
+    sample_weight: torch.Tensor,
+) -> torch.Tensor:
+    row_mse = (reconstruction - target).square().mean(dim=-1)
+    weights = sample_weight.to(dtype=row_mse.dtype, device=row_mse.device).reshape(-1)
+    denom = weights.sum().clamp_min(torch.finfo(row_mse.dtype).eps)
+    return torch.sum(row_mse * weights) / denom
 
 
 def _corrupt_metrics(
@@ -966,7 +1166,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="include_context",
         action="store_true",
         help=(
-            "Use the complete 215-column metric set with team-participation +"
+            "Use the complete 214-column non-outcome metric set with team-participation +"
             " role-matchup context features. This is the default when"
             " --metric-columns is omitted."
         ),
@@ -975,7 +1175,15 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--profile-only",
         dest="include_context",
         action="store_false",
-        help="Use only the legacy 155 raw+derived profile metrics.",
+        help="Use only the legacy 154 non-outcome raw+derived profile metrics.",
+    )
+    parser.add_argument(
+        "--allow-outcome-metrics",
+        action="store_true",
+        help=(
+            "Opt in to oracle-style outcome/prior metrics such as historical win "
+            "rate. Production semantic sidecars exclude these by default."
+        ),
     )
     parser.add_argument("--champion-col", default="champion_id")
     parser.add_argument("--teamposition-col", default="teamposition_id")
@@ -1065,9 +1273,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     frame = pd.read_csv(args.csv)
     metric_columns = (
-        _metric_columns(args.metric_columns)
+        _metric_columns(
+            args.metric_columns,
+            allow_outcome_metrics=args.allow_outcome_metrics,
+        )
         if args.metric_columns
-        else full_game_metric_columns(include_context=args.include_context)
+        else full_game_metric_columns(
+            include_context=args.include_context,
+            include_outcome_metrics=args.allow_outcome_metrics,
+        )
     )
     config = FullGameSemanticConfig(
         n_champions=_infer_vocab_size(frame, args.champion_col),
@@ -1106,6 +1320,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         pin_memory=args.pin_memory,
         amp=args.amp,
         max_batch_size=args.max_batch_size,
+        allow_outcome_metrics=args.allow_outcome_metrics,
     )
     print(
         f"batch_size={int(history[-1]['batch_size'])} "
@@ -1120,6 +1335,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         champion_col=args.champion_col,
         teamposition_col=args.teamposition_col,
         build_col=args.build_col,
+        allow_outcome_metrics=args.allow_outcome_metrics,
     )
     eval_dataloader = DataLoader(
         eval_dataset,

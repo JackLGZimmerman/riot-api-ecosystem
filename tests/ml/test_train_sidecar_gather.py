@@ -29,16 +29,12 @@ def _write_v28_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12, rn
 
     arrays = {
         "win_rate": rng.uniform(0.4, 0.6, (n_games, 10)),
-        "matchup_1v1": rng.uniform(0.4, 0.6, (n_games, 25)),
-        "synergy_2vx": rng.uniform(0.4, 0.6, (n_games, 20)),
         "p1_cnt": rng.uniform(1, 80, (n_games, 10)),
-        "m1v1_cnt": rng.uniform(1, 80, (n_games, 25)),
-        "s2vx_cnt": rng.uniform(1, 80, (n_games, 20)),
-        "m1v1_eff_n": rng.uniform(1, 80, (n_games, 25)),
-        "s2vx_eff_n": rng.uniform(1, 80, (n_games, 20)),
         "champion_id": champion_id,
         "build_id": build_id,
         "blue_win": blue_win,
+        "loadout_features": np.zeros((n_games, 10), dtype=np.float32),
+        "patch_features": np.zeros((n_games, 2), dtype=np.float32),
     }
     cache_dir.mkdir(parents=True, exist_ok=True)
     for name, filename in ARRAY_FILES.items():
@@ -136,7 +132,6 @@ def test_train_gathers_sidecar_for_learned_moe_from_artifact_without_per_game_ar
             "gate_hidden": (),
             "node_init_hidden": (),
             "readout_hidden": (),
-            "residual_head_hidden": (),
             "semantic_moe_num_experts": 3,
             "semantic_moe_top_k": 2,
             "semantic_moe_factor_dim": 8,
@@ -197,7 +192,6 @@ def test_train_gathers_sidecar_for_semantic_context_from_artifact_without_per_ga
             "gate_hidden": (),
             "node_init_hidden": (),
             "readout_hidden": (),
-            "residual_head_hidden": (),
             "semantic_context_dim": 8,
             "semantic_context_hidden": (),
         },
@@ -247,7 +241,6 @@ def test_train_gathers_sidecar_and_semantic_group_features_from_v28_cache(
             "gate_hidden": (),
             "node_init_hidden": (),
             "readout_hidden": (),
-            "residual_head_hidden": (),
             "semantic_moe_num_experts": 3,
             "semantic_moe_top_k": 2,
             "semantic_moe_factor_dim": 8,

@@ -34,7 +34,6 @@ EMPIRICAL_STATIC_METADATA_TOKENS = (
     "win_rate",
     "winrate",
     "matchups",
-    "matchup_",
     "synergy",
     "prior",
     "_cnt",

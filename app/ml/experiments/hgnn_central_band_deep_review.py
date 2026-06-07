@@ -1,8 +1,8 @@
 """Second-pass allowed-signal audit for HGNN central-band misses.
 
-The first-pass audit checks broad champion/build, relationship, spell, rune, and
-patch priors. This pass keeps the same non-identity boundary but asks whether
-more detailed rune pages and build-profile shapes explain additional misses.
+The first-pass audit checks broad champion/build, spell, rune, and patch priors.
+This pass keeps the same non-identity boundary but asks whether more detailed
+rune pages and build-profile shapes explain additional misses.
 """
 
 from __future__ import annotations

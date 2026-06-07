@@ -22,9 +22,11 @@ from app.ml.train import (
 )
 
 DEFAULT_CACHE_DIR = Path("app/ml/data/cache")
-DEFAULT_MODEL_PATH = Path("app/ml/data/experiments/semantic_focus_reference_w3000_cont6/model.pt")
-DEFAULT_METRICS_PATH = Path("app/ml/data/experiments/semantic_focus_reference_w3000_cont6/metrics.json")
-DEFAULT_ENCODER_SIDECAR_PATH = Path("app/ml/data/experiments/semantic_identity_sidecar_full.npz")
+DEFAULT_MODEL_PATH = Path("app/ml/data/hgnn_production_model.pt")
+DEFAULT_METRICS_PATH = Path("app/ml/data/metrics_latest.json")
+DEFAULT_ENCODER_SIDECAR_PATH = Path(
+    "app/ml/data/experiments/semantic_identity_sidecar_compact.npz"
+)
 
 
 def _sigmoid(values: np.ndarray) -> np.ndarray:

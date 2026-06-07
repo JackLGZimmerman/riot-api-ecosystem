@@ -69,6 +69,8 @@ def test_temporal_defaults_match_optimized_recipe() -> None:
     assert cfg.dropout == 0.02
     assert cfg.latent_dropout == 0.0
     assert cfg.zero_unobserved_input
+    assert not cfg.mask_as_input
+    assert cfg.architecture == "flat"
 
 
 def test_masked_mse_ignores_unobserved_buckets() -> None:
@@ -175,6 +177,78 @@ def test_temporal_encoder_can_zero_unobserved_input_buckets() -> None:
         zeroed_latent = model.encode(x * mask.unsqueeze(-1), champ, pos, build)
 
     assert torch.allclose(masked_latent, zeroed_latent)
+
+
+def test_temporal_encoder_can_append_mask_as_input_channel() -> None:
+    import torch
+
+    from app.classification.temporal_autoencoder import (
+        TemporalAEConfig,
+        TemporalAutoencoder,
+    )
+
+    torch.manual_seed(0)
+    cfg = TemporalAEConfig(
+        latent_dim=8,
+        hidden=16,
+        metric_embed_dim=4,
+        dropout=0.0,
+        zero_unobserved_input=False,
+        mask_as_input=True,
+    )
+    model = TemporalAutoencoder(T.N_BUCKETS, 4, 5, 3, 2, cfg).eval()
+    x = torch.randn(6, T.N_BUCKETS, 4)
+    observed = torch.ones(6, T.N_BUCKETS)
+    sparse = observed.clone()
+    sparse[:, 3:] = 0.0
+    champ = torch.zeros(6, dtype=torch.long)
+    pos = torch.zeros(6, dtype=torch.long)
+    build = torch.zeros(6, dtype=torch.long)
+
+    with torch.no_grad():
+        observed_latent = model.encode(x, champ, pos, build, observed)
+        sparse_latent = model.encode(x, champ, pos, build, sparse)
+
+    assert model.metric_input_dim == 5
+    assert not torch.allclose(observed_latent, sparse_latent)
+
+
+@pytest.mark.parametrize("architecture", ["flat", "tcn", "gru", "transformer"])
+def test_temporal_encoder_architecture_variants_emit_same_latent_shape(architecture: str) -> None:
+    import torch
+
+    from app.classification.temporal_autoencoder import (
+        TemporalAEConfig,
+        TemporalAutoencoder,
+    )
+
+    cfg = TemporalAEConfig(
+        latent_dim=8,
+        hidden=16,
+        metric_embed_dim=4,
+        dropout=0.0,
+        architecture=architecture,
+    )
+    model = TemporalAutoencoder(T.N_BUCKETS, 4, 5, 3, 2, cfg).eval()
+    x = torch.randn(6, T.N_BUCKETS, 4)
+    mask = torch.ones(6, T.N_BUCKETS)
+    mask[:, 8:] = 0.0
+    champ = torch.zeros(6, dtype=torch.long)
+    pos = torch.zeros(6, dtype=torch.long)
+    build = torch.zeros(6, dtype=torch.long)
+
+    with torch.no_grad():
+        latent = model.encode(x, champ, pos, build, mask)
+
+    assert latent.shape == (6, 8)
+    assert torch.isfinite(latent).all()
+
+
+def test_temporal_config_rejects_unknown_architecture() -> None:
+    from app.classification.temporal_autoencoder import TemporalAEConfig
+
+    with pytest.raises(ValueError, match="architecture"):
+        TemporalAEConfig(architecture="cnn")  # type: ignore[arg-type]
 
 
 def test_single_row_training_batch_does_not_crash_batchnorm() -> None:

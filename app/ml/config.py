@@ -13,33 +13,15 @@ from app.core.utils.smoothing import (
 
 ML_DATA_DIR = PROJECT_ROOT / "app" / "ml" / "data"
 CACHE_DIR = ML_DATA_DIR / "cache"
+DEFAULT_ENCODER_SIDECAR_PATH = (
+    ML_DATA_DIR / "experiments" / "semantic_identity_sidecar_compact.npz"
+)
+DEFAULT_TRAIN_BATCH_CAP = 40960
 
 PLAYER_PIVOT_TABLE = "game_data_filtered.ml_game_player_pivot"
 SOLO_PRIOR_TABLE = "game_data_filtered.synergy_1vx"
 SOLO_PRIOR_DICT = "game_data_filtered.synergy_1vx_dict"
-MATCHUP_1V1_DICT = "game_data_filtered.matchup_1v1_dict"
-SYNERGY_2VX_DICT = "game_data_filtered.synergy_2vx_dict"
 
-
-# Backoff levels for nested empirical-Bayes pooling of the interaction priors.
-# 1v1 keeps the existing build -> no-build -> champion-pair -> composite floor
-# ladder. 2vx uses build -> build-sibling group -> no-build -> neutral floor.
-MATCHUP_1V1_NOBUILD_DICT = "game_data_filtered.matchup_1v1_nobuild_dict"
-MATCHUP_1V1_CHAMP_DICT = "game_data_filtered.matchup_1v1_champ_dict"
-SYNERGY_2VX_BUILD_GROUP_DICT = "game_data_filtered.synergy_2vx_build_group_dict"
-SYNERGY_2VX_NOBUILD_DICT = "game_data_filtered.synergy_2vx_nobuild_dict"
-# Source tables (finest -> coarsest) for the empirical-Bayes per-level strength
-# moments, with the win-rate column each table exposes.
-MATCHUP_1V1_LEVEL_TABLES: tuple[tuple[str, str], ...] = (
-    ("game_data_filtered.matchup_1v1", "left_win_rate"),
-    ("game_data_filtered.matchup_1v1_nobuild", "blue_win_rate"),
-    ("game_data_filtered.matchup_1v1_champ", "blue_win_rate"),
-)
-SYNERGY_2VX_LEVEL_TABLES: tuple[tuple[str, str], ...] = (
-    ("game_data_filtered.synergy_2vx", "win_rate"),
-    ("game_data_filtered.synergy_2vx_build_group", "win_rate"),
-    ("game_data_filtered.synergy_2vx_nobuild", "win_rate"),
-)
 
 @dataclass(frozen=True)
 class DatasetConfig:
@@ -48,12 +30,6 @@ class DatasetConfig:
     player_pivot_table: str = PLAYER_PIVOT_TABLE
     solo_prior_table: str = SOLO_PRIOR_TABLE
     solo_prior_dict: str = SOLO_PRIOR_DICT
-    matchup_1v1_dict: str = MATCHUP_1V1_DICT
-    synergy_2vx_dict: str = SYNERGY_2VX_DICT
-    matchup_1v1_nobuild_dict: str = MATCHUP_1V1_NOBUILD_DICT
-    matchup_1v1_champ_dict: str = MATCHUP_1V1_CHAMP_DICT
-    synergy_2vx_build_group_dict: str = SYNERGY_2VX_BUILD_GROUP_DICT
-    synergy_2vx_nobuild_dict: str = SYNERGY_2VX_NOBUILD_DICT
     val_fraction: float = 0.1
     test_fraction: float = 0.1
     smoothing_prior_mean: float = 0.5
@@ -71,22 +47,10 @@ class DatasetConfig:
     # always-smooth behaviour.
     smoothing_mode: str = "cascade"
     prior_confidence_matchups: float = 50.0
-    # Strength used for confidence = n/(n+s) in object features and pooling.
+    # Strength used for confidence = n/(n+s) in object features.
     confidence_gate_strength: float = 30.0
-    # Shrink under-sampled 1v1/2vx pairs toward a composite of their two sides'
-    # solo priors instead of a flat 0.5 (see app/ml docs). Improves interaction
-    # ranking (AUC) once the model is regularised. This composite is the terminal
-    # floor of the nested-pooling ladder below.
-    interaction_per_side_fallback: bool = True
-    # Nested empirical-Bayes pooling of the 1v1/2vx priors: shrink the
-    # build-conditioned cell toward its no-build pair, then its champion-only
-    # pair, then the per-side composite floor. Per-level Beta strengths are
-    # estimated by method-of-moments from each level's table (see
-    # app.core.utils.smoothing.eb_strength). Disable to fall back to the legacy
-    # single-level composite smoothing of the build-conditioned cell only.
-    interaction_nested_pooling: bool = True
-    # Leave-one-out the train split's own outcome from its solo/1v1/2vx priors
-    # before smoothing, so the joint-minus-expected delta stops leaking the label.
+    # Leave-one-out the train split's own outcome from its solo prior before
+    # smoothing, so the joint-minus-expected delta stops leaking the label.
     # See documentation/README.md.
     interaction_loo: bool = True
     # Draft-time caches must not use final item-derived build labels. When
@@ -97,30 +61,47 @@ class DatasetConfig:
     # Optional frozen three-encoder sidecar artifact. When set during cache
     # build, per-slot static/full-game/temporal latent arrays are materialised
     # into the HGNN cache. Existing caches without these arrays still load.
-    encoder_sidecar_path: Path | None = None
+    encoder_sidecar_path: Path | None = DEFAULT_ENCODER_SIDECAR_PATH
 
 
 @dataclass(frozen=True)
 class TrainConfig:
-    model_path: Path = ML_DATA_DIR / "structured_winrate_model.pt"
+    model_path: Path = ML_DATA_DIR / "hgnn_production_model.pt"
     metrics_path: Path = ML_DATA_DIR / "metrics_latest.json"
+    audit_prediction_cache_path: Path | None = None
     warm_start_model_path: Path | None = None
+    # When warm-starting a larger ablation model from production, optionally
+    # keep loaded checkpoint parameters fixed and train only newly introduced
+    # parameters that were missing from the checkpoint.
+    freeze_warm_start_loaded_parameters: bool = False
     batch_size: int = 32768
+    # Effective training batch safety cap for the team-swapped HGNN loop.
+    # Set to 0 or None to disable for explicit throughput/allocator sweeps.
+    train_batch_cap: int | None = DEFAULT_TRAIN_BATCH_CAP
+    # Optional per-epoch row cap for ablation screens. Production defaults to
+    # full train epochs; sweep runners can set this to compare many candidates
+    # before a final full-data promotion run.
+    train_epoch_max_games: int | None = None
     max_epochs: int = 40
-    patience: int = 3
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-3
+    patience: int = 5
+    learning_rate: float = 3e-4
+    weight_decay: float = 0.0
     device: str = "auto"
+    # Where to cache the raw train/val/test tensors before minibatch indexing.
+    # "model" preserves the historical behavior; "cpu" keeps the large raw
+    # cache off GPU and moves only each indexed minibatch to the model device.
+    raw_tensor_cache_device: str = "model"
     seed: int = 0
     max_grad_norm: float | None = 1.0
     # Supported values are defined in app.ml.train.CHECKPOINT_METRICS.
-    # The default preserves the production threshold-tuned checkpoint path.
-    checkpoint_metric: str = "val_threshold_accuracy"
+    # Production promotion tracks the raw held-out accuracy gate directly.
+    checkpoint_metric: str = "val_accuracy"
     # Minimum checkpoint-score improvement required to reset early stopping.
-    # For the default threshold-accuracy metric, 5e-4 means tiny validation
-    # wiggles no longer keep training alive when we are looking for material
-    # movement.
-    checkpoint_min_delta: float = 5e-4
+    # The raw-accuracy confirmation path keeps exact best-epoch selection.
+    checkpoint_min_delta: float = 0.0
+    # Throughput sweeps only need the per-epoch validation/timing row. When set,
+    # skip the expensive final train/val/test prediction pass.
+    skip_final_evaluation: bool = False
     # Experimental, training-only pairwise ranking objective. When >0, each
     # batch samples positive/negative logit pairs and adds a soft AUC surrogate
     # to BCE. This is opt-in research behaviour and does not affect inference.
@@ -134,7 +115,19 @@ class TrainConfig:
     semantic_context_calibration_tail_weight: float = 2.0
     # Calibration target family. "champion_raw" matches each champion-specific audit
     # bin's raw train win rate (high variance: median bin n~500, noise floor ~10.5
-    # pp^2, overfits when up-weighted). "group_eb" matches deterministic build/role
-    # group bins (median n~47k) with empirical-Bayes-shrunk targets, whose noise
-    # floor is ~20x lower, so the objective fits true win rates instead of noise.
+    # pp^2, overfits when up-weighted). "*_eb" targets use empirical-Bayes-shrunk
+    # train rates. "group_eb" uses deterministic build/role group bins;
+    # "context_eb" uses champion/context audit bins; "group_context_eb" combines
+    # both families for a residual-calibration style objective.
     semantic_context_calibration_target: str = "champion_raw"
+    # "absolute" matches current predictions directly to train EB/raw bin
+    # targets. "residual" instead teaches the semantic MoE to reproduce a
+    # bounded train-only logit correction relative to the warm-start model,
+    # mirroring the post-hoc semantic residual calibrator.
+    semantic_context_calibration_objective: str = "absolute"
+    semantic_context_calibration_group_residual_shrink_strength: float = 100000.0
+    semantic_context_calibration_group_residual_clip: float = 0.02
+    semantic_context_calibration_group_residual_scale: float = 1.0
+    semantic_context_calibration_context_residual_shrink_strength: float = 50000.0
+    semantic_context_calibration_context_residual_clip: float = 0.02
+    semantic_context_calibration_context_residual_scale: float = 1.0
