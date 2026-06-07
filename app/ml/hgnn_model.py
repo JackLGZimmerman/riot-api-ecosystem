@@ -58,8 +58,8 @@ class HGNNConfig:
     semantic_context_dropout: float = 0.0
     semantic_context_support_strength: float = 30.0
     use_learned_semantic_moe: bool = False
-    semantic_moe_num_experts: int = 8
-    semantic_moe_top_k: int = 2
+    semantic_moe_num_experts: int = 128
+    semantic_moe_top_k: int = 32
     semantic_moe_factor_dim: int = 64
     semantic_moe_factor_hidden: tuple[int, ...] = (128,)
     semantic_moe_router_hidden: tuple[int, ...] = (128,)
@@ -1101,7 +1101,6 @@ class LearnedSemanticMoEHead(nn.Module):
         group_token: torch.Tensor | None,
         confidence: torch.Tensor,
         log_support: torch.Tensor,
-        sparse: bool,
     ) -> dict[str, torch.Tensor]:
         if self.view_gate is None:
             raise ValueError("view gate is not enabled for this architecture")
@@ -1118,14 +1117,8 @@ class LearnedSemanticMoEHead(nn.Module):
         view_logits = self.view_gate(torch.cat(gate_parts, dim=-1)) / self.temperature
         if self.training and self.view_router_noise > 0.0:
             view_logits = view_logits + torch.randn_like(view_logits) * self.view_router_noise
-        if sparse:
-            top_values, top_indices = view_logits.topk(self.view_top_k, dim=-1)
-            top_weights = torch.softmax(top_values, dim=-1)
-            weights = view_logits.new_zeros(view_logits.shape)
-            weights.scatter_(-1, top_indices, top_weights)
-        else:
-            weights = torch.softmax(view_logits, dim=-1)
-            top_weights, top_indices = weights.topk(self.view_top_k, dim=-1)
+        weights = torch.softmax(view_logits, dim=-1)
+        top_weights, top_indices = weights.topk(self.view_top_k, dim=-1)
 
         usage = weights.mean(dim=(0, 1))
         selected_fraction = (weights > 0.0).to(dtype=weights.dtype).mean(dim=(0, 1))
@@ -1133,8 +1126,7 @@ class LearnedSemanticMoEHead(nn.Module):
         balance_loss = (usage - target_usage).pow(2).mean()
         safe_weights = weights.clamp_min(1.0e-12)
         entropy = -(safe_weights * safe_weights.log()).sum(dim=-1)
-        max_choices = self.view_top_k if sparse else len(self.view_names)
-        max_entropy = view_logits.new_tensor(float(max_choices)).log()
+        max_entropy = view_logits.new_tensor(float(len(self.view_names))).log()
         entropy_loss = (max_entropy - entropy).clamp_min(0.0).mean()
         return {
             "weights": weights,
@@ -1337,7 +1329,6 @@ class LearnedSemanticMoEHead(nn.Module):
             group_token=group_token,
             confidence=confidence,
             log_support=log_support,
-            sparse=False,
         )
         stacked_factors = torch.stack([view_factors[name] for name in self.view_names], dim=2)
         sidecar_factor = (stacked_factors * view_gate["weights"].unsqueeze(-1)).sum(dim=2)

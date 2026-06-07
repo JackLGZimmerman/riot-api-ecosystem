@@ -71,6 +71,8 @@ PRODUCTION_SEMANTIC_MODEL_OVERRIDES: dict[str, Any] = {
     "use_learned_semantic_moe": True,
     "use_semantic_group_features": True,
     "semantic_moe_architecture": PRODUCTION_SEMANTIC_MOE_ARCHITECTURE,
+    "semantic_moe_num_experts": 128,
+    "semantic_moe_top_k": 32,
 }
 
 

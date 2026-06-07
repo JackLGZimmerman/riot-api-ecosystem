@@ -13,8 +13,9 @@ of `build_hgnn_inputs()` or `HGNNWinModel.forward()`.
 
 The promoted semantic path is `convex_encoder_mix`: it consumes the static,
 full-game, and temporal sidecar latents through the learned MoE plus compact
-semantic group features. The older node-init sidecar MLP flags remain off by
-default so the production shape matches the tested architecture. See
+semantic group features. Production capacity is 128 experts with `top_k=32`.
+The older node-init sidecar MLP flags remain off by default so the production
+shape matches the tested architecture. See
 [Identity Encoder Sidecars](#identity-encoder-sidecars).
 
 ```text
@@ -47,20 +48,24 @@ Promoted checkpoint and metrics:
 `app/ml/data/hgnn_production_model.pt` and
 `app/ml/data/metrics_latest.json`.
 
-Confirmation artifacts:
-`app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/convex_encoder_mix_seed4/metrics.json`
-and the matching context/group audit files in the same run directory.
+Production artifact note: the installed checkpoint was promoted from the only
+available local 128x32 semantic MoE artifact. Its saved config has the temporary
+sparse-dispatch experiment key removed, and the maintained production runtime no
+longer exposes a dense/sparse dispatch flag.
 
-Setup: v29 production cache, compact identity encoder sidecar artifact, live
-basic-1vX warm start, production loadout head, bounded patch-only temporal head,
-learned semantic MoE with `convex_encoder_mix`, compact semantic group features,
-raw `val_accuracy` checkpointing, `batch_size=40960`, `max_epochs=40`,
-`patience=5`, learning rate `3e-4`, no weight decay, seed `4`.
+Setup: v29 production cache, compact identity encoder sidecar artifact,
+production loadout head, bounded patch-only temporal head, learned semantic MoE
+with `convex_encoder_mix`, `semantic_moe_num_experts=128`,
+`semantic_moe_top_k=32`, compact semantic group features, raw `val_accuracy`
+checkpointing, `batch_size=16384`, `max_epochs=40`, `patience=5`, learning rate
+`1e-4`, seed `4`, and frozen loaded parameters from the previous production
+warm start.
 
-| Production model | Raw validation accuracy | Raw test accuracy |
-| --- | ---: | ---: |
-| 1vX + champion/build + Loadout + patch Temporal + all-encoder semantic MoE (`convex_encoder_mix`) | **57.8896%** | **57.2993%** |
-| Previous production baseline: 1vX + champion/build + Loadout + patch-only Temporal | `57.6828%` | `57.0163%` |
+| Production model | Raw validation accuracy | Raw test accuracy | Validation NLL | Test NLL |
+| --- | ---: | ---: | ---: | ---: |
+| 1vX + champion/build + Loadout + patch Temporal + all-encoder semantic MoE (`convex_encoder_mix`, 128x32) | **57.8854%** | **57.3796%** | **0.672978** | **0.675965** |
+| Previous semantic production: same path with 8x2 MoE | `57.8896%` | `57.2993%` | `0.673184` | `0.676212` |
+| Previous production baseline: 1vX + champion/build + Loadout + patch-only Temporal | `57.6828%` | `57.0163%` | `n/a` | `n/a` |
 
 Loadout uses train-only, leave-one-out-adjusted historical priors over
 summoner spell pairs, broad rune setup, full rune page, secondary rune pair, and
@@ -231,6 +236,10 @@ Primary context ranking was the mean of validation/test flagged
 support-weighted mean absolute gap from `HGNN_CONTEXT_EXAMPLES_AUDIT.md`; lower
 is better.
 
+After review, `128x32` was selected as the production capacity. The table below
+is retained as the decision record; the generated ablation runners, reports, and
+run directories were removed from the maintained workspace.
+
 | Variant | Experts | `top_k` | Active fraction | Flagged MAE | Flagged MSE | Validation accuracy | Test accuracy | Validation NLL | Test NLL |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `128x32` | 128 | 32 | 0.250 | **1.7027 pp** | **4.8201 pp^2** | 57.8547% | 57.3433% | **0.6729** | **0.6759** |
@@ -251,58 +260,27 @@ slightly on both validation and test. Against the cheaper `16x8` candidate,
 `128x32` still reduced flagged context MAE by 0.0863 pp (4.8%) and flagged MSE
 by 0.2115 pp^2 (4.2%), but test accuracy was lower by 0.000279.
 
-The larger-capacity signal was promising but not monotonic: `64x*` underperformed
-the best `32x*` and `128x32`, while `128x16` underperformed `128x32`. The
-interrupted `128x64` run was stopped before metrics/audits completed and is not
-a result. Do not promote any expert-grid variant from seed 4 alone. If this line
-of work resumes, confirm `128x32` and the cheaper `32x8` or `32x16` candidate
-on seeds 1, 2, 3, and 4.
+The larger-capacity signal was promising but not monotonic: `64x*`
+underperformed the best `32x*` and `128x32`, while `128x16` underperformed
+`128x32`. The interrupted `128x64` run was stopped before metrics/audits
+completed and is not a result.
 
-The implementation finding from the retired sweep is important: `_route_experts`
-currently evaluates every expert and then applies the top-k routing mask. Thus
-larger `num_experts` directly increases compute even when `top_k` is modest.
-Any future large-expert sweep should first implement true sparse dispatch.
+### Pruned Sparse Follow-Up
 
-### Sparse Dispatch Plan
+A temporary sparse-capacity follow-up completed the available 128x32 checkpoint
+now installed as production and started `256x64`, which was interrupted after
+epoch 5 because it was slower than 128x32 and did not beat the sparse-compatible
+128x32 control on validation accuracy. The completed 128x32 follow-up reported
+validation/test accuracy `57.8854%` / `57.3796%`, validation/test NLL
+`0.672978` / `0.675965`, validation/test context mean absolute gap `1.78 pp` /
+`1.72 pp`, and validation/test context Gap MSE `5.97 pp^2` / `5.40 pp^2`.
+The six flagged audit examples averaged flagged support-weighted MAE
+`2.1713 pp` and flagged support-weighted MSE `6.3010 pp^2` across
+validation/test.
 
-Goal: preserve the context-quality gains suggested by larger expert capacity
-without paying dense `num_experts` compute. The production behavior should remain
-unchanged until sparse dispatch matches dense dispatch on a small controlled
-configuration.
-
-1. Add a dispatch mode behind a config flag, for example
-   `semantic_moe_dispatch="dense" | "sparse"`, defaulting to `"dense"`.
-2. Refactor `_route_experts()` so router logits, `top_indices`, and
-   `top_weights` are computed once, then expert execution is delegated to either
-   a dense or sparse helper.
-3. Implement sparse execution by flattening `(batch, slot, top_k)` selections,
-   grouping selected rows by expert id, running only the selected expert on its
-   selected `semantic_factor` rows, multiplying by the corresponding routing
-   weight, and scatter-adding the weighted scalar deltas back to `(batch, slot)`.
-4. Preserve existing diagnostics without dense `route_probs`: derive expert
-   usage from weighted `scatter_add`, selected fraction from selected counts,
-   entropy from `top_weights`, and balance/entropy losses from those sparse
-   statistics.
-5. Add equivalence tests on tiny deterministic models: dense and sparse dispatch
-   must produce the same slot deltas, expert usage, selected fractions, entropy,
-   balance loss, gradients for selected experts, and zero gradients for
-   unselected experts.
-6. Add edge-case tests for `top_k=1`, `top_k=num_experts`, repeated expert
-   selections impossible by `topk`, empty expert selections, CPU/CUDA parity
-   where available, and train/eval dropout behavior.
-7. Benchmark dispatch only before training: compare dense `128x32` with sparse
-   `128x32`, then sparse `256x32`, `256x64`, `512x32`, and `512x64` on a fixed
-   cached batch. Track wall time, peak GPU memory, selected expert calls, and
-   numerical parity against dense where dense is feasible.
-8. Run a seed-4 sparse validation ladder only after equivalence and throughput
-   pass: first `128x32` sparse parity, then `256x32` / `256x64`, and only then
-   `512x32` / `512x64` if runtime is acceptable.
-9. Compare candidates with the same promotion guards used above: validation/test
-   accuracy and NLL as guardrails, flagged context support-weighted MAE/MSE as
-   the primary objective, and group EB/systematic gap as safety checks.
-10. Keep sparse dispatch behind the flag until a multi-seed confirmation proves
-    a sparse large-expert candidate beats the current production checkpoint and
-    the cheaper `32x8` / `32x16` alternatives.
+That sparse-dispatch implementation, its CLI flag, runner/report helpers,
+tests, and generated experiment outputs have been removed. Production retains
+the standard dense MoE execution path with 128 experts and `top_k=32`.
 
 ### Semantic Context Plan
 

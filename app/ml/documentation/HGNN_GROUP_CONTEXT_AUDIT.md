@@ -1,6 +1,6 @@
 # HGNN Group Context Audit
 
-Updated: 2026-06-04.
+Updated: 2026-06-07.
 
 Companion to `HGNN_CONTEXT_EXAMPLES_AUDIT.md`. That audit measures the model gap
 against each split's **raw, champion-specific** empirical win rate, whose per-bin
@@ -27,17 +27,14 @@ error (Kumar et al. 2019; Roelofs et al. 2022), James-Stein / empirical Bayes
 
 ## Production Model
 
-The promoted production checkpoint is `app/ml/data/hgnn_production_model.pt`,
-copied from:
-
-```text
-app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/convex_encoder_mix_seed4/model.pt
-```
+The promoted production checkpoint is `app/ml/data/hgnn_production_model.pt`.
 
 This is an architecture change, not just an inclusion test for extra encoder inputs.
 The model uses:
 
 - `semantic_moe_architecture = convex_encoder_mix`
+- `semantic_moe_num_experts = 128`
+- `semantic_moe_top_k = 32`
 - `use_learned_semantic_moe = true`
 - `use_semantic_group_features = true`
 - compact encoder sidecar: `semantic_identity_sidecar_compact.npz`
@@ -55,23 +52,24 @@ directly into node initialization.
 Prediction cache:
 
 ```text
-app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/convex_encoder_mix_seed4/audit_focus_side_probability.npy
+app/ml/data/audit_focus_side_probability.npy
 ```
 
 JSON output:
 
 ```text
-app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/convex_encoder_mix_seed4/group_context_audit_production.json
+app/ml/data/group_context_audit_production.json
 ```
 
 `systematic_gap_mse` is in pp^2 and lower is better. On held-out splits, the raw
-target floor is ~0.18 pp^2 and the EB target floor is ~0.11 pp^2.
+target floor is ~0.18 pp^2 and the EB target floor is ~0.11 pp^2. Values below
+are from `app/ml/data/metrics_latest.json` for the promoted 128x32 checkpoint.
 
 | Split | bins | median n | min n | raw MSE | raw floor | EB MSE | EB floor | systematic | clipped | mean abs EB gap | max abs EB gap |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Train | 67 | 383,583 | 9,383 | 0.09 | 0.02 | 0.08 | 0.02 | 0.06 | 0.07 | 0.23 | 0.70 |
-| Validation | 67 | 47,403 | 1,154 | 0.40 | 0.18 | 0.19 | 0.11 | 0.07 | 0.12 | 0.33 | 1.25 |
-| Test | 67 | 45,828 | 1,193 | 0.37 | 0.18 | 0.34 | 0.11 | 0.23 | 0.26 | 0.44 | 2.16 |
+| Train | 67 | 383,583 | 9,383 | 0.02 | 0.02 | 0.02 | 0.02 | 0.00 | 0.01 | 0.12 | 0.39 |
+| Validation | 67 | 47,403 | 1,154 | 0.29 | 0.18 | 0.18 | 0.11 | 0.07 | 0.12 | 0.30 | 1.67 |
+| Test | 67 | 45,828 | 1,193 | 0.33 | 0.18 | 0.40 | 0.11 | 0.29 | 0.33 | 0.41 | 3.20 |
 
 Held-out production metrics from `app/ml/data/metrics_latest.json`:
 
@@ -140,9 +138,9 @@ uv run python -m app.ml.context_examples_audit \
   --model-cache-dir app/ml/data/cache \
   --model-path app/ml/data/hgnn_production_model.pt \
   --encoder-sidecar-path app/ml/data/experiments/semantic_identity_sidecar_compact.npz \
-  --prediction-cache app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/convex_encoder_mix_seed4/audit_focus_side_probability.npy \
+  --prediction-cache app/ml/data/audit_focus_side_probability.npy \
   --audit-split val \
-  --output app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/convex_encoder_mix_seed4/context_examples_audit.md \
+  --output app/ml/documentation/HGNN_CONTEXT_EXAMPLES_AUDIT.md \
   --refresh-predictions
 ```
 
@@ -151,9 +149,9 @@ Run the group EB audit:
 ```bash
 uv run python -m app.ml.group_context_audit \
   --context-cache-dir app/ml/data/cache \
-  --prediction-cache app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/convex_encoder_mix_seed4/audit_focus_side_probability.npy \
+  --prediction-cache app/ml/data/audit_focus_side_probability.npy \
   --per-row \
-  --json-output app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/convex_encoder_mix_seed4/group_context_audit_production.json
+  --json-output app/ml/data/group_context_audit_production.json
 ```
 
 Module: `app/ml/group_context_audit.py`.

@@ -35,10 +35,7 @@ from app.ml.context_examples_audit import AuditData, AuditRow, evaluate_specs
 from app.ml.dataset import SPLIT_ORDER
 
 DEFAULT_CONTEXT_CACHE_DIR = Path("app/ml/data/cache")
-DEFAULT_PREDICTION_CACHE = Path(
-    "app/ml/data/experiments/semantic_architecture_compact_w10_freeze_seed4/"
-    "convex_encoder_mix_seed4/audit_focus_side_probability.npy"
-)
+DEFAULT_PREDICTION_CACHE = Path("app/ml/data/audit_focus_side_probability.npy")
 
 
 @dataclass(frozen=True)
