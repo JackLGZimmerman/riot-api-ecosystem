@@ -174,9 +174,13 @@ GROUP_ARMOR_TANK = ("ar_tank",)
 GROUP_MR_TANK = ("mr_tank",)
 GROUP_AP_CASTER = ("ability_power",)
 GROUP_ENCHANTER = ("utility_enchanter", "utility_protection")
+GROUP_UTILITY_PROTECTION = ("utility_protection",)
 GROUP_CRIT = ("crit",)
 GROUP_ON_HIT = ("on_hit",)
 GROUP_MARKSMAN = ("crit", "on_hit", "attack_damage")
+GROUP_ATTACK_DAMAGE = ("attack_damage",)
+GROUP_AD_OFF_TANK = ("ad_off_tank",)
+GROUP_AD_FIGHTER = ("attack_damage", "ad_off_tank", "on_hit")
 GROUP_LETHALITY = ("lethality",)
 
 _GROUP_SECTION = "Group Trajectory Audit"
@@ -188,6 +192,18 @@ def group_audit_specs() -> tuple[AuditSpec, ...]:
     magic = continuous_bins(*CONTEXT_BIN_EDGES["magic"])
     skirmish_bins = (BinSpec("0", eq(0)), BinSpec("1", eq(1)), BinSpec(">= 2", ge(2)))
     return (
+        # Broad semantic counterparts to the promoted context examples audit. These
+        # keep the `group_eb` target trainable at large n while covering the same
+        # composition stories as the champion-specific report.
+        AuditSpec(g, "Crit carries TOP vs enemy siege", "Melee/crit top carries into poke and siege.", "enemy_siege", SIEGE_BINS, builds=GROUP_CRIT, positions=("TOP",)),
+        AuditSpec(g, "Lethality junglers vs enemy damage", "Burst junglers into high enemy damage.", "enemy_damage", DAMAGE_BINS, builds=GROUP_LETHALITY, positions=("JUNGLE",)),
+        AuditSpec(g, "Crit carries MIDDLE vs enemy siege", "Mid-lane crit carries into poke and siege.", "enemy_siege", SIEGE_BINS, builds=GROUP_CRIT, positions=("MIDDLE",)),
+        AuditSpec(g, "AP casters MIDDLE vs enemy scaling", "AP mids into scaling enemy compositions.", "enemy_scaling", SCALING_BINS, builds=GROUP_AP_CASTER, positions=("MIDDLE",)),
+        AuditSpec(g, "MR tanks UTILITY with ally damage", "Engage supports with damage behind them.", "ally_damage", DAMAGE_BINS, builds=GROUP_MR_TANK, positions=("UTILITY",)),
+        AuditSpec(g, "MR tanks MIDDLE vs enemy magic", "Mid-lane MR tanks into magic-heavy enemies.", "enemy_magic", magic, builds=GROUP_MR_TANK, positions=("MIDDLE",)),
+        AuditSpec(g, "Armor tanks TOP vs enemy physical", "Top-lane armor tanks into physical-heavy enemies.", "enemy_physical", phys, builds=GROUP_ARMOR_TANK, positions=("TOP",)),
+        AuditSpec(g, "AP casters MIDDLE vs enemy range count", "Short-range AP mids into enemy range pressure.", "enemy_ranged_count", range_count_bins(), builds=GROUP_AP_CASTER, positions=("MIDDLE",)),
+        AuditSpec(g, "On-hit marksmen BOTTOM vs enemy range count", "On-hit bot carries into range-heavy enemies.", "enemy_ranged_count", range_count_bins(), builds=GROUP_ON_HIT, positions=("BOTTOM",)),
         AuditSpec(g, "Frontline tanks vs enemy physical", "Durable frontline gains value into AD-heavy enemies.", "enemy_physical", phys, builds=GROUP_TANK_BUILDS),
         AuditSpec(g, "Armor tanks vs enemy physical", "Armor itemization into physical damage.", "enemy_physical", phys, builds=GROUP_ARMOR_TANK),
         AuditSpec(g, "MR tanks vs enemy magic", "Magic-resist itemization into magic damage.", "enemy_magic", magic, builds=GROUP_MR_TANK),
@@ -195,15 +211,77 @@ def group_audit_specs() -> tuple[AuditSpec, ...]:
         AuditSpec(g, "AP casters vs enemy magic", "AP value vs magic-heavy enemy teams.", "enemy_magic", magic, builds=GROUP_AP_CASTER),
         AuditSpec(g, "Marksmen BOTTOM vs enemy frontline count", "Sustained DPS carries shred frontline.", "enemy_frontline_count", count_bins(), builds=GROUP_MARKSMAN, positions=("BOTTOM",)),
         AuditSpec(g, "On-hit carries vs enemy frontline count", "On-hit shred into durable enemies.", "enemy_frontline_count", count_bins(), builds=GROUP_ON_HIT),
+        AuditSpec(g, "On-hit marksmen BOTTOM vs enemy frontline count", "On-hit bot carries into durable enemies.", "enemy_frontline_count", count_bins(), builds=GROUP_ON_HIT, positions=("BOTTOM",)),
+        AuditSpec(g, "UTILITY slots vs enemy frontline count", "Support-role slots into enemy frontline stacking.", "enemy_frontline_count", count_bins(), positions=("UTILITY",)),
         AuditSpec(g, "Enchanters UTILITY vs enemy burst count", "Protective supports punished by concentrated burst.", "enemy_burst_count", count_bins(), builds=GROUP_ENCHANTER, positions=("UTILITY",)),
         AuditSpec(g, "Frontline tanks vs enemy burst count", "Durable frontline punished by stacked burst.", "enemy_burst_count", count_bins(), builds=GROUP_TANK_BUILDS),
+        AuditSpec(g, "Armor tanks UTILITY vs enemy burst count", "Armor engage supports into concentrated burst.", "enemy_burst_count", count_bins(), builds=GROUP_ARMOR_TANK, positions=("UTILITY",)),
+        AuditSpec(g, "MR tanks UTILITY vs enemy burst count", "MR engage supports into concentrated burst.", "enemy_burst_count", count_bins(), builds=GROUP_MR_TANK, positions=("UTILITY",)),
         AuditSpec(g, "Lethality assassins vs enemy burst count", "Fragile assassins into burst stacks.", "enemy_burst_count", count_bins(), builds=GROUP_LETHALITY),
+        AuditSpec(g, "Lethality assassins MIDDLE vs enemy burst count", "Mid-lane assassins into burst stacking.", "enemy_burst_count", count_bins(), builds=GROUP_LETHALITY, positions=("MIDDLE",)),
+        AuditSpec(g, "Utility protection UTILITY vs enemy burst count", "Protective enchanter builds into burst-heavy enemies.", "enemy_burst_count", count_bins(), builds=GROUP_UTILITY_PROTECTION, positions=("UTILITY",)),
         AuditSpec(g, "Marksmen BOTTOM vs enemy range count", "Melee/short carries into range pressure.", "enemy_ranged_count", range_count_bins(), builds=GROUP_MARKSMAN, positions=("BOTTOM",)),
         AuditSpec(g, "Frontline tanks vs heavy damage-taken count", "Tanks vs multiple high-soak enemies.", "enemy_heavy_taken_count", count_bins(), builds=GROUP_TANK_BUILDS),
+        AuditSpec(g, "Armor tanks TOP vs heavy damage-taken count", "Top-lane armor tanks vs multiple high-soak enemies.", "enemy_heavy_taken_count", count_bins(), builds=GROUP_ARMOR_TANK, positions=("TOP",)),
         AuditSpec(g, "Frontline tanks vs enemy high-HP count", "Tanks vs high-HP enemy teams.", "enemy_high_hp_count", count_bins(), builds=GROUP_TANK_BUILDS),
         AuditSpec(g, "AP casters vs enemy high-HP count", "AP value vs high-HP enemy teams.", "enemy_high_hp_count", count_bins(), builds=GROUP_AP_CASTER),
+        AuditSpec(g, "AD fighters JUNGLE vs enemy high-HP count", "Physical skirmish junglers into high-HP enemy teams.", "enemy_high_hp_count", count_bins(), builds=GROUP_AD_FIGHTER, positions=("JUNGLE",)),
+        AuditSpec(g, "AD fighters TOP vs enemy range count", "Top-lane physical fighters into enemy range pressure.", "enemy_ranged_count", range_count_bins(), builds=GROUP_AD_FIGHTER, positions=("TOP",)),
+        AuditSpec(g, "AD fighters TOP vs same-role range", "Top-lane physical fighters into ranged lane opponents.", "same_role_range", (BinSpec(f"<= {RANGED_ATTACK_RANGE_THRESHOLD:.0f}", le(RANGED_ATTACK_RANGE_THRESHOLD)), BinSpec(f"> {RANGED_ATTACK_RANGE_THRESHOLD:.0f}", gt(RANGED_ATTACK_RANGE_THRESHOLD))), builds=GROUP_AD_FIGHTER, positions=("TOP",)),
+        AuditSpec(g, "On-hit junglers vs enemy hard CC", "On-hit jungle carries into enemy hard CC.", "enemy_hard_cc_count", count_bins(), builds=GROUP_ON_HIT, positions=("JUNGLE",)),
         AuditSpec(g, "Enchanters UTILITY with skirmish allies", "Enchanter synergy with skirmisher allies.", "ally_skirmish_count", skirmish_bins, builds=GROUP_ENCHANTER, positions=("UTILITY",)),
+        AuditSpec(g, "Selected enchanters UTILITY with skirmish allies", "Champion-selected enchanters with skirmisher allies.", "ally_skirmish_count", skirmish_bins, positions=("UTILITY",), focus_condition="selected_enchanter"),
+        AuditSpec(g, "Low own-damage teams vs enemy heal/shield", "Low-damage teams into enemy sustain and shielding.", "enemy_heal_shield", HEAL_BINS, focus_condition="low_own_damage"),
+        AuditSpec(g, "Attack-damage TOP vs enemy damage", "Top-lane attack-damage fighters into enemy damage pressure.", "enemy_damage", DAMAGE_BINS, builds=GROUP_ATTACK_DAMAGE, positions=("TOP",)),
+        AuditSpec(g, "AD off-tanks JUNGLE vs enemy magic", "Bruiser junglers into magic-heavy enemies.", "enemy_magic", magic, builds=GROUP_AD_OFF_TANK, positions=("JUNGLE",)),
+        AuditSpec(g, "MR tanks UTILITY vs enemy magic", "MR support tanks into magic-heavy enemies.", "enemy_magic", magic, builds=GROUP_MR_TANK, positions=("UTILITY",)),
+        AuditSpec(g, f"Focus HP <= {FOCUS_HP_LOW_THRESHOLD:.0f} vs enemy burst count", "Low-HP slots into enemy burst stacking.", "enemy_burst_count", count_bins(), focus_condition="focus_hp_low"),
+        AuditSpec(g, f"Focus HP >= {HIGH_HP_THRESHOLD:.0f} vs enemy burst count", "High-HP slots into enemy burst stacking.", "enemy_burst_count", count_bins(), focus_condition="focus_hp_high"),
+        AuditSpec(g, "AP casters MIDDLE vs heavy damage-taken count", "AP mids vs multiple high-soak enemies.", "enemy_heavy_taken_count", count_bins(), builds=GROUP_AP_CASTER, positions=("MIDDLE",)),
+        AuditSpec(g, "On-hit marksmen BOTTOM vs heavy damage-taken count", "On-hit bot carries vs multiple high-soak enemies.", "enemy_heavy_taken_count", count_bins(), builds=GROUP_ON_HIT, positions=("BOTTOM",)),
+        AuditSpec(g, "Crit carries MIDDLE with ally CC", "Mid-lane crit carries with allied CC setup.", "ally_cc", CC_BINS, builds=GROUP_CRIT, positions=("MIDDLE",)),
+        AuditSpec(g, "Crit marksmen BOTTOM with ally CC", "Crit bot carries with allied CC setup.", "ally_cc", CC_BINS, builds=GROUP_CRIT, positions=("BOTTOM",)),
+        AuditSpec(g, "Utility protection UTILITY with ally damage", "Protective utility supports with carry damage behind them.", "ally_damage", DAMAGE_BINS, builds=GROUP_UTILITY_PROTECTION, positions=("UTILITY",)),
+        AuditSpec(g, "Attack-damage marksmen BOTTOM vs enemy hard CC", "Attack-damage bot carries into enemy hard CC.", "enemy_hard_cc_count", count_bins(), builds=GROUP_ATTACK_DAMAGE, positions=("BOTTOM",)),
+        AuditSpec(g, "Attack-damage TOP vs enemy frontline count", "Top-lane attack-damage fighters into enemy frontline stacking.", "enemy_frontline_count", count_bins(), builds=GROUP_ATTACK_DAMAGE, positions=("TOP",)),
+        AuditSpec(g, "Attack-damage junglers vs enemy scaling", "Physical damage junglers into scaling enemy compositions.", "enemy_scaling", SCALING_BINS, builds=GROUP_ATTACK_DAMAGE, positions=("JUNGLE",)),
         AuditSpec(g, "Crit marksmen BOTTOM vs enemy burst count", "Crit carries into burst-heavy enemies.", "enemy_burst_count", count_bins(), builds=GROUP_CRIT, positions=("BOTTOM",)),
+    )
+
+
+_TRAIN_CORE_GROUP_REPORT_ONLY_TITLES = frozenset(
+    {
+        "MR tanks MIDDLE vs enemy magic",
+        "Armor tanks TOP vs enemy physical",
+        "On-hit marksmen BOTTOM vs enemy frontline count",
+        "MR tanks UTILITY vs enemy burst count",
+        "Lethality assassins MIDDLE vs enemy burst count",
+        "Armor tanks TOP vs heavy damage-taken count",
+        "On-hit junglers vs enemy hard CC",
+        "Selected enchanters UTILITY with skirmish allies",
+        "AD off-tanks JUNGLE vs enemy magic",
+        "MR tanks UTILITY vs enemy magic",
+        "AP casters MIDDLE vs heavy damage-taken count",
+        "On-hit marksmen BOTTOM vs heavy damage-taken count",
+    }
+)
+
+
+def training_group_audit_specs(surface: str = "train_core") -> tuple[AuditSpec, ...]:
+    """Return the group specs used by train-time calibration.
+
+    The full group audit remains the reporting surface. ``train_core`` removes
+    narrow or duplicated rows that were useful for diagnosis but too noisy as
+    direct loss targets.
+    """
+
+    specs = group_audit_specs()
+    if surface == "full":
+        return specs
+    if surface != "train_core":
+        raise ValueError("training group audit surface must be 'full' or 'train_core'")
+    return tuple(
+        spec for spec in specs if spec.title not in _TRAIN_CORE_GROUP_REPORT_ONLY_TITLES
     )
 
 
@@ -228,9 +306,11 @@ def eb_shrink_targets(
     total_spread = float(np.sum(weight * (means - mu) ** 2))
     tau2 = max(0.0, total_spread - float(np.sum(weight * s2)))
     denom = tau2 + s2
-    shrink = np.where(denom > 0, tau2 / denom, 0.0)
+    shrink = np.zeros_like(means)
+    np.divide(tau2, denom, out=shrink, where=denom > 0)
     eb = shrink * means + (1.0 - shrink) * mu
-    eb_var = np.where(denom > 0, tau2 * s2 / denom, 0.0)
+    eb_var = np.zeros_like(means)
+    np.divide(tau2 * s2, denom, out=eb_var, where=denom > 0)
     return eb, eb_var
 
 
@@ -250,4 +330,5 @@ __all__ = [
     "le",
     "lt",
     "range_count_bins",
+    "training_group_audit_specs",
 ]

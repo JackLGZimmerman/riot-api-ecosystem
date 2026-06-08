@@ -113,6 +113,11 @@ class TrainConfig:
     semantic_context_calibration_loss_weight: float = 0.0
     semantic_context_calibration_min_count: int = 8
     semantic_context_calibration_tail_weight: float = 2.0
+    # Reporting keeps the full expanded group audit. Train-time calibration can
+    # optionally use a smaller core surface to avoid chasing duplicated/noisy
+    # group tails.
+    semantic_context_calibration_group_surface: str = "full"
+    semantic_context_calibration_bin_weighting: str = "uniform"
     # Calibration target family. "champion_raw" matches each champion-specific audit
     # bin's raw train win rate (high variance: median bin n~500, noise floor ~10.5
     # pp^2, overfits when up-weighted). "*_eb" targets use empirical-Bayes-shrunk
@@ -131,3 +136,16 @@ class TrainConfig:
     semantic_context_calibration_context_residual_shrink_strength: float = 50000.0
     semantic_context_calibration_context_residual_clip: float = 0.02
     semantic_context_calibration_context_residual_scale: float = 1.0
+    # Residual-only alternative to squared error. The uncertainty-aware Huber
+    # variant ignores residual gaps inside the train EB target's logit-scale
+    # uncertainty band, then applies a Huber penalty to the excess.
+    semantic_context_calibration_residual_loss: str = "mse"
+    semantic_context_calibration_uncertainty_band_scale: float = 1.0
+    semantic_context_calibration_uncertainty_huber_delta: float = 0.01
+    # Optional group-spec holdout for calibration-target audits. "even_odd"
+    # trains on one parity of group specs and reports trained vs held-out bins.
+    semantic_context_calibration_holdout_mode: str = "none"
+    semantic_context_calibration_holdout_fold: int = 0
+    # Number of initial epochs that log BCE/context-loss gradient alignment on
+    # semantic MoE and semantic group-relationship parameters.
+    semantic_context_calibration_gradient_diagnostics_epochs: int = 5

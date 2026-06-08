@@ -10,7 +10,11 @@ import torch
 from app.ml.config import TrainConfig
 from app.ml.context_examples_audit import AuditData
 from app.ml.group_context_audit import build_group_rows, summarize
-from app.ml.context_audit_specs import eb_shrink_targets, group_audit_specs
+from app.ml.context_audit_specs import (
+    eb_shrink_targets,
+    group_audit_specs,
+    training_group_audit_specs,
+)
 from app.ml.context_audit_specs import audit_specs
 from app.ml.dataset import SplitData
 from app.ml.hgnn_model import HGNNConfig
@@ -25,6 +29,7 @@ from app.ml.train import (
     _fit_temperature,
     _prior_1vx_support_bucket_ids,
     _select_threshold,
+    _semantic_calibration_gradient_diagnostics,
     _semantic_group_eb_gap_metrics,
     _SemanticContextCalibrationLoss,
     _sigmoid_np,
@@ -232,6 +237,30 @@ def test_output_diagnostics_include_logit_std_and_semantic_moe_stats() -> None:
     assert moe["regularization_loss"] == pytest.approx(0.06)
 
 
+def test_semantic_gradient_diagnostics_report_norms_and_cosines() -> None:
+    semantic_param = torch.nn.Parameter(torch.tensor([1.0, -2.0]))
+    group_param = torch.nn.Parameter(torch.tensor([0.5, -1.5]))
+    bce_loss = (semantic_param.square().sum() + group_param.square().sum())
+    context_loss = (
+        (2.0 * semantic_param).sum()
+        + (torch.tensor([1.0, -1.0]) * group_param).sum()
+    )
+
+    diagnostics = _semantic_calibration_gradient_diagnostics(
+        bce_loss=bce_loss,
+        context_loss=context_loss,
+        semantic_moe_params=(semantic_param,),
+        group_relationship_params=(group_param,),
+    )
+
+    assert diagnostics["semantic_moe_bce_grad_norm"] == pytest.approx(np.sqrt(20.0))
+    assert diagnostics["semantic_moe_context_grad_norm"] == pytest.approx(np.sqrt(8.0))
+    assert diagnostics["semantic_moe_grad_cosine"] == pytest.approx(-1.0 / np.sqrt(10.0))
+    assert diagnostics["group_relationship_bce_grad_norm"] == pytest.approx(np.sqrt(10.0))
+    assert diagnostics["group_relationship_context_grad_norm"] == pytest.approx(np.sqrt(2.0))
+    assert diagnostics["group_relationship_grad_cosine"] == pytest.approx(4.0 / np.sqrt(20.0))
+
+
 def test_training_target_validation_catches_degenerate_cache_split() -> None:
     splits = {
         "train": _split(np.array([0, 1], dtype=np.float64)),
@@ -285,6 +314,74 @@ def test_calibration_objective_validation_rejects_invalid_residual_controls() ->
         _validate_train_config(
             TrainConfig(semantic_context_calibration_context_residual_scale=-0.1)
         )
+    with pytest.raises(ValueError, match="semantic_context_calibration_residual_loss"):
+        _validate_train_config(
+            TrainConfig(semantic_context_calibration_residual_loss="hinge")
+        )
+    with pytest.raises(ValueError, match="requires semantic_context_calibration_objective"):
+        _validate_train_config(
+            TrainConfig(semantic_context_calibration_residual_loss="uncertainty_huber")
+        )
+    with pytest.raises(ValueError, match="uncertainty_band_scale"):
+        _validate_train_config(
+            TrainConfig(
+                semantic_context_calibration_objective="residual",
+                semantic_context_calibration_residual_loss="uncertainty_huber",
+                semantic_context_calibration_uncertainty_band_scale=-0.1,
+            )
+        )
+    with pytest.raises(ValueError, match="uncertainty_huber_delta"):
+        _validate_train_config(
+            TrainConfig(
+                semantic_context_calibration_objective="residual",
+                semantic_context_calibration_residual_loss="uncertainty_huber",
+                semantic_context_calibration_uncertainty_huber_delta=0.0,
+            )
+        )
+    with pytest.raises(ValueError, match="semantic_context_calibration_holdout_mode"):
+        _validate_train_config(
+            TrainConfig(semantic_context_calibration_holdout_mode="hash")
+        )
+    with pytest.raises(ValueError, match="semantic_context_calibration_holdout_fold"):
+        _validate_train_config(
+            TrainConfig(
+                semantic_context_calibration_holdout_mode="even_odd",
+                semantic_context_calibration_holdout_fold=2,
+            )
+        )
+    with pytest.raises(ValueError, match="gradient_diagnostics_epochs"):
+        _validate_train_config(
+            TrainConfig(
+                semantic_context_calibration_gradient_diagnostics_epochs=-1
+            )
+        )
+
+    _validate_train_config(
+        TrainConfig(
+            semantic_context_calibration_objective="residual",
+            semantic_context_calibration_residual_loss="uncertainty_huber",
+            semantic_context_calibration_holdout_mode="even_odd",
+            semantic_context_calibration_holdout_fold=1,
+        )
+    )
+
+
+def test_calibration_group_surface_and_weighting_validation() -> None:
+    with pytest.raises(ValueError, match="semantic_context_calibration_group_surface"):
+        _validate_train_config(
+            TrainConfig(semantic_context_calibration_group_surface="diagnostic")
+        )
+    with pytest.raises(ValueError, match="semantic_context_calibration_bin_weighting"):
+        _validate_train_config(
+            TrainConfig(semantic_context_calibration_bin_weighting="inverse_noise")
+        )
+
+    _validate_train_config(
+        TrainConfig(
+            semantic_context_calibration_group_surface="train_core",
+            semantic_context_calibration_bin_weighting="support_family",
+        )
+    )
 
 
 def test_combined_calibration_target_uses_group_and_context_specs() -> None:
@@ -299,6 +396,169 @@ def test_combined_calibration_target_uses_group_and_context_specs() -> None:
 
     assert loss.eb_shrink is True
     assert len(loss.specs) == len(group_audit_specs()) + len(audit_specs())
+
+
+def test_train_core_group_surface_only_changes_training_loss_specs() -> None:
+    loss = _SemanticContextCalibrationLoss(
+        build_vocab=PRODUCTION_BUILD_VOCAB,
+        train_cfg=TrainConfig(
+            semantic_context_calibration_loss_weight=1.0,
+            semantic_context_calibration_target="group_context_eb",
+            semantic_context_calibration_group_surface="train_core",
+        ),
+        device="cpu",
+    )
+
+    group_titles = {
+        spec.title
+        for spec, component in zip(loss.specs, loss.spec_components)
+        if component == "group"
+    }
+    assert len(loss.specs) == len(training_group_audit_specs()) + len(audit_specs())
+    assert "Selected enchanters UTILITY with skirmish allies" not in group_titles
+    assert "On-hit junglers vs enemy hard CC" not in group_titles
+    assert "On-hit junglers vs enemy hard CC" in {
+        spec.title for spec in group_audit_specs()
+    }
+
+
+def test_support_family_weighting_records_support_and_duplicate_accounting() -> None:
+    n_games = 6
+    features = torch.zeros(n_games, 10, SEMANTIC_GROUP_FEATURE_DIM)
+    for name in ("ranged", "frontline", "heavy_taken"):
+        features[:, :, SEMANTIC_GROUP_FEATURE_INDEX[name]] = 1.0
+    on_hit_id = PRODUCTION_BUILD_VOCAB.index("on_hit")
+    raw = RawTensorSplit(
+        win_rate=torch.zeros(n_games, 10),
+        p1_cnt=torch.zeros(n_games, 10),
+        blue_win=torch.tensor([0, 1, 1, 0, 1, 0], dtype=torch.float32),
+        champion_id=torch.ones(n_games, 10, dtype=torch.long),
+        build_id=torch.full((n_games, 10), on_hit_id, dtype=torch.long),
+        semantic_group_features=features,
+    )
+
+    uniform = _SemanticContextCalibrationLoss(
+        build_vocab=PRODUCTION_BUILD_VOCAB,
+        train_cfg=TrainConfig(
+            semantic_context_calibration_loss_weight=1.0,
+            semantic_context_calibration_target="group_eb",
+            semantic_context_calibration_min_count=1,
+            semantic_context_calibration_tail_weight=2.0,
+        ),
+        device="cpu",
+    )
+    uniform.fit_reference(raw)
+    uniform_meta = uniform.metadata()
+    key = "group::On-hit marksmen BOTTOM vs enemy range count::>= 4"
+
+    assert uniform_meta["bin_weighting"] == "uniform"
+    assert uniform_meta["reference_counts"][key] == n_games * 2
+    assert uniform_meta["reference_bin_weights"][key] == pytest.approx(2.0)
+    assert key in uniform_meta["reference_eb_variances"]
+
+    support_family = _SemanticContextCalibrationLoss(
+        build_vocab=PRODUCTION_BUILD_VOCAB,
+        train_cfg=TrainConfig(
+            semantic_context_calibration_loss_weight=1.0,
+            semantic_context_calibration_target="group_eb",
+            semantic_context_calibration_min_count=1,
+            semantic_context_calibration_tail_weight=2.0,
+            semantic_context_calibration_bin_weighting="support_family",
+        ),
+        device="cpu",
+    )
+    support_family.fit_reference(raw)
+    support_meta = support_family.metadata()
+
+    assert support_meta["bin_weighting"] == "support_family"
+    assert (
+        support_meta["focus_family_multiplicity"][
+            "group::On-hit marksmen BOTTOM vs enemy range count"
+        ]
+        == 3
+    )
+    assert support_meta["reference_bin_weights"][key] < 1.0
+    assert (
+        support_meta["reference_bin_weights"][key]
+        < uniform_meta["reference_bin_weights"][key]
+    )
+
+
+def test_calibration_holdout_records_trained_and_heldout_group_specs() -> None:
+    n_games = 4
+    features = torch.zeros(n_games, 10, SEMANTIC_GROUP_FEATURE_DIM)
+    features[:, :, SEMANTIC_GROUP_FEATURE_INDEX["ranged"]] = 1.0
+    features[:, :, SEMANTIC_GROUP_FEATURE_INDEX["physical"]] = 0.60
+    attack_damage_id = PRODUCTION_BUILD_VOCAB.index("attack_damage")
+    raw = RawTensorSplit(
+        win_rate=torch.zeros(n_games, 10),
+        p1_cnt=torch.zeros(n_games, 10),
+        blue_win=torch.tensor([0, 1, 1, 0], dtype=torch.float32),
+        champion_id=torch.ones(n_games, 10, dtype=torch.long),
+        build_id=torch.full((n_games, 10), attack_damage_id, dtype=torch.long),
+        semantic_group_features=features,
+    )
+    loss = _SemanticContextCalibrationLoss(
+        build_vocab=PRODUCTION_BUILD_VOCAB,
+        train_cfg=TrainConfig(
+            semantic_context_calibration_loss_weight=1.0,
+            semantic_context_calibration_target="group_eb",
+            semantic_context_calibration_min_count=1,
+            semantic_context_calibration_holdout_mode="even_odd",
+            semantic_context_calibration_holdout_fold=1,
+        ),
+        device="cpu",
+    )
+    loss.fit_reference(raw)
+    metadata = loss.metadata()
+
+    assert metadata["holdout_mode"] == "even_odd"
+    assert metadata["trained_group_spec_count"] > 0
+    assert metadata["heldout_group_spec_count"] > 0
+    assert (
+        metadata["trained_group_spec_count"] + metadata["heldout_group_spec_count"]
+        == metadata["group_spec_count"]
+    )
+
+    split = SplitData(
+        win_rate=np.zeros((n_games, 10), dtype=np.float32),
+        p1_cnt=np.zeros((n_games, 10), dtype=np.float32),
+        blue_win=np.array([0, 1, 1, 0], dtype=np.float64),
+        champion_id=np.ones((n_games, 10), dtype=np.int64),
+        build_id=np.full((n_games, 10), attack_damage_id, dtype=np.int64),
+        context_raw=np.zeros((n_games, 10, 14), dtype=np.float32),
+    )
+    metrics = loss.holdout_gap_metrics(
+        np.full((n_games, 10), 0.5, dtype=np.float64),
+        split,
+        build_vocab=PRODUCTION_BUILD_VOCAB,
+    )
+
+    assert metrics is not None
+    assert set(metrics) == {"trained", "heldout"}
+    assert metrics["trained"]["n_bins"] >= 0
+    assert metrics["heldout"]["n_bins"] >= 0
+
+
+def test_uncertainty_huber_residual_penalty_ignores_inside_band_gap() -> None:
+    loss = _SemanticContextCalibrationLoss(
+        build_vocab=("ar_tank",),
+        train_cfg=TrainConfig(
+            semantic_context_calibration_loss_weight=1.0,
+            semantic_context_calibration_target="group_eb",
+            semantic_context_calibration_objective="residual",
+            semantic_context_calibration_residual_loss="uncertainty_huber",
+            semantic_context_calibration_uncertainty_huber_delta=0.5,
+        ),
+        device="cpu",
+    )
+    key = (0, 0)
+    loss.reference_residual_uncertainty_bands[key] = torch.tensor(0.25)
+
+    assert loss._residual_gap_penalty(torch.tensor(0.20), key).item() == 0.0
+    assert loss._residual_gap_penalty(torch.tensor(0.75), key).item() == pytest.approx(
+        0.25
+    )
 
 
 def test_residual_calibration_reference_requires_warm_start_predictions() -> None:
