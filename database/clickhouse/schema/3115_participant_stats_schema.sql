@@ -1,9 +1,9 @@
 CREATE TABLE IF NOT EXISTS game_data.participant_stats
 (
     run_id UUID,
-    matchid String,
+    matchid String CODEC (ZSTD(3)),
     participantid UInt8,
-    puuid FixedString (78),
+    puuid FixedString (78) CODEC (ZSTD(3)),
     teamid UInt8,
     summonerid String,
     summonerlevel UInt16,

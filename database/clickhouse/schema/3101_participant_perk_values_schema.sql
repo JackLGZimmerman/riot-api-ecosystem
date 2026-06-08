@@ -1,9 +1,9 @@
 CREATE TABLE IF NOT EXISTS game_data.participant_perk_values
 (
     run_id UUID,
-    matchid String,
+    matchid String CODEC (ZSTD(3)),
     teamid UInt8,
-    puuid FixedString (78),
+    puuid FixedString (78) CODEC (ZSTD(3)),
 
     primary_var1_1 Int32,
     primary_var2_1 Int32,

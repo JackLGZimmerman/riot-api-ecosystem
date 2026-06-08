@@ -9,13 +9,13 @@ CREATE TABLE IF NOT EXISTS game_data.tl_ck_victim_damage_received
     spellname LowCardinality (String),
     spellslot Nullable (Int32),
     truedamage UInt32,
-    type String,
-    matchid String,
+    type LowCardinality (String),
+    matchid String CODEC (ZSTD(3)),
     frame_timestamp UInt32,
     timestamp UInt64,
     champion_kill_event_id String,
     direction LowCardinality (String),
-    idx UInt8
+    idx UInt32
 )
 ENGINE = MergeTree
 ORDER BY (matchid, frame_timestamp, timestamp, champion_kill_event_id, idx);

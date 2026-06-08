@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS game_data.players
 (
     run_id UUID,
-    puuid FixedString (78),
+    puuid FixedString (78) CODEC (ZSTD(3)),
     queue_type LowCardinality (String),
     tier LowCardinality (String),
     division LowCardinality (String),

@@ -1,10 +1,10 @@
 CREATE TABLE IF NOT EXISTS game_data.tl_pause_end
 (
     run_id UUID,
-    matchid String,
+    matchid String CODEC (ZSTD(3)),
     frame_timestamp UInt32,
     timestamp UInt64,
     realtimestamp UInt64
 )
 ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, realtimestamp);
+ORDER BY (matchid, frame_timestamp, timestamp);

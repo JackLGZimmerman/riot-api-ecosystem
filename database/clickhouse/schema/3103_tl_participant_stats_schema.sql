@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS game_data.tl_participant_stats
 (
     run_id UUID,
-    matchid String,
+    matchid String CODEC (ZSTD(3)),
     frame_timestamp UInt32,
     participantid UInt8,
 

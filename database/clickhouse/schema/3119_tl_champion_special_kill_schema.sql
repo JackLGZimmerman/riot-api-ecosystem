@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS game_data.tl_champion_special_kill
 (
     run_id UUID,
-    matchid String,
+    matchid String CODEC (ZSTD(3)),
     frame_timestamp UInt32,
     timestamp UInt64,
     type LowCardinality (String),
@@ -12,4 +12,4 @@ CREATE TABLE IF NOT EXISTS game_data.tl_champion_special_kill
     multikilllength Nullable (UInt8)
 )
 ENGINE = MergeTree
-ORDER BY (matchid, frame_timestamp, timestamp, killtype, killerid);
+ORDER BY (matchid, frame_timestamp, timestamp, killerid);

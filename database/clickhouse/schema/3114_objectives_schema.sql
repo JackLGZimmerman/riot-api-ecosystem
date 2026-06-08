@@ -1,8 +1,8 @@
 CREATE TABLE IF NOT EXISTS game_data.objectives (
     run_id UUID,
-    matchid String,
+    matchid String CODEC (ZSTD(3)),
     teamid UInt8,
-    objectivetype ENUM8 (
+    objectivetype Enum8 (
         'atakhan' = 1,
         'baron' = 2,
         'champion' = 3,
