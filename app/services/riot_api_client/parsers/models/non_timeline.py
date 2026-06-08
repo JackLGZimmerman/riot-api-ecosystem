@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeInt,
+    PositiveInt,
+    create_model,
+)
 
 ChallengeValue = (
     NonNegativeInt | float | list[NonNegativeInt] | list[float] | str | bool | None
@@ -14,143 +21,79 @@ class Metadata(BaseModel):
     participants: list[str]
 
 
-class Challenges(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-    # Keep explicit fields aligned with the typed participant_challenges table.
-    # Unmodelled keys must fail loudly so we can decide whether to add or ignore them.
-    x12AssistStreakCount: ChallengeValue = Field(default=None, alias="12AssistStreakCount")
-    HealFromMapSources: ChallengeValue = None
-    InfernalScalePickup: ChallengeValue = None
-    abilityUses: ChallengeValue = None
-    acesBefore15Minutes: ChallengeValue = None
-    alliedJungleMonsterKills: ChallengeValue = None
-    baronBuffGoldAdvantageOverThreshold: ChallengeValue = None
-    baronTakedowns: ChallengeValue = None
-    blastConeOppositeOpponentCount: ChallengeValue = None
-    bountyGold: ChallengeValue = None
-    buffsStolen: ChallengeValue = None
-    completeSupportQuestInTime: ChallengeValue = None
-    controlWardTimeCoverageInRiverOrEnemyHalf: ChallengeValue = None
-    controlWardsPlaced: ChallengeValue = None
-    damagePerMinute: ChallengeValue = None
-    damageTakenOnTeamPercentage: ChallengeValue = None
-    dancedWithRiftHerald: ChallengeValue = None
-    deathsByEnemyChamps: ChallengeValue = None
-    dodgeSkillShotsSmallWindow: ChallengeValue = None
-    doubleAces: ChallengeValue = None
-    dragonTakedowns: ChallengeValue = None
-    earliestBaron: ChallengeValue = None
-    earliestDragonTakedown: ChallengeValue = None
-    earliestElderDragon: ChallengeValue = None
-    earlyLaningPhaseGoldExpAdvantage: ChallengeValue = None
-    effectiveHealAndShielding: ChallengeValue = None
-    elderDragonKillsWithOpposingSoul: ChallengeValue = None
-    elderDragonMultikills: ChallengeValue = None
-    enemyChampionImmobilizations: ChallengeValue = None
-    enemyJungleMonsterKills: ChallengeValue = None
-    epicMonsterKillsNearEnemyJungler: ChallengeValue = None
-    epicMonsterKillsWithin30SecondsOfSpawn: ChallengeValue = None
-    epicMonsterSteals: ChallengeValue = None
-    epicMonsterStolenWithoutSmite: ChallengeValue = None
-    firstTurretKilled: ChallengeValue = None
-    firstTurretKilledTime: ChallengeValue = None
-    fasterSupportQuestCompletion: ChallengeValue = None
-    fastestLegendary: ChallengeValue = None
-    fistBumpParticipation: ChallengeValue = None
-    flawlessAces: ChallengeValue = None
-    fullTeamTakedown: ChallengeValue = None
-    gameLength: ChallengeValue = None
-    getTakedownsInAllLanesEarlyJungleAsLaner: ChallengeValue = None
-    goldPerMinute: ChallengeValue = None
-    hadOpenNexus: ChallengeValue = None
-    hadAfkTeammate: ChallengeValue = None
-    highestChampionDamage: ChallengeValue = None
-    highestCrowdControlScore: ChallengeValue = None
-    highestWardKills: ChallengeValue = None
-    immobilizeAndKillWithAlly: ChallengeValue = None
-    initialBuffCount: ChallengeValue = None
-    initialCrabCount: ChallengeValue = None
-    jungleCsBefore10Minutes: ChallengeValue = None
-    junglerKillsEarlyJungle: ChallengeValue = None
-    junglerTakedownsNearDamagedEpicMonster: ChallengeValue = None
-    kTurretsDestroyedBeforePlatesFall: ChallengeValue = None
-    kda: ChallengeValue = None
-    killAfterHiddenWithAlly: ChallengeValue = None
-    killParticipation: ChallengeValue = None
-    killedChampTookFullTeamDamageSurvived: ChallengeValue = None
-    killingSprees: ChallengeValue = None
-    killsNearEnemyTurret: ChallengeValue = None
-    killsOnLanersEarlyJungleAsJungler: ChallengeValue = None
-    killsOnOtherLanesEarlyJungleAsLaner: ChallengeValue = None
-    killsOnRecentlyHealedByAramPack: ChallengeValue = None
-    killsUnderOwnTurret: ChallengeValue = None
-    killsWithHelpFromEpicMonster: ChallengeValue = None
-    knockEnemyIntoTeamAndKill: ChallengeValue = None
-    landSkillShotsEarlyGame: ChallengeValue = None
-    laneMinionsFirst10Minutes: ChallengeValue = None
-    laningPhaseGoldExpAdvantage: ChallengeValue = None
-    legendaryCount: ChallengeValue = None
-    legendaryItemUsed: ChallengeValue = None
-    lostAnInhibitor: ChallengeValue = None
-    maxCsAdvantageOnLaneOpponent: ChallengeValue = None
-    maxKillDeficit: ChallengeValue = None
-    maxLevelLeadLaneOpponent: ChallengeValue = None
-    mejaisFullStackInTime: ChallengeValue = None
-    moreEnemyJungleThanOpponent: ChallengeValue = None
-    multiKillOneSpell: ChallengeValue = None
-    multiTurretRiftHeraldCount: ChallengeValue = None
-    multikills: ChallengeValue = None
-    multikillsAfterAggressiveFlash: ChallengeValue = None
-    outerTurretExecutesBefore10Minutes: ChallengeValue = None
-    outnumberedKills: ChallengeValue = None
-    outnumberedNexusKill: ChallengeValue = None
-    perfectDragonSoulsTaken: ChallengeValue = None
-    perfectGame: ChallengeValue = None
-    pickKillWithAlly: ChallengeValue = None
-    playedChampSelectPosition: ChallengeValue = None
-    poroExplosions: ChallengeValue = None
-    quickCleanse: ChallengeValue = None
-    quickFirstTurret: ChallengeValue = None
-    quickSoloKills: ChallengeValue = None
-    riftHeraldTakedowns: ChallengeValue = None
-    saveAllyFromDeath: ChallengeValue = None
-    scuttleCrabKills: ChallengeValue = None
-    shortestTimeToAceFromFirstTakedown: ChallengeValue = None
-    skillshotsDodged: ChallengeValue = None
-    skillshotsHit: ChallengeValue = None
-    snowballsHit: ChallengeValue = None
-    soloBaronKills: ChallengeValue = None
-    soloKills: ChallengeValue = None
-    soloTurretsLategame: ChallengeValue = None
-    stealthWardsPlaced: ChallengeValue = None
-    survivedSingleDigitHpCount: ChallengeValue = None
-    survivedThreeImmobilizesInFight: ChallengeValue = None
-    takedownOnFirstTurret: ChallengeValue = None
-    takedowns: ChallengeValue = None
-    takedownsAfterGainingLevelAdvantage: ChallengeValue = None
-    takedownsBeforeJungleMinionSpawn: ChallengeValue = None
-    takedownsFirstXMinutes: ChallengeValue = None
-    takedownsInAlcove: ChallengeValue = None
-    takedownsInEnemyFountain: ChallengeValue = None
-    teleportTakedowns: ChallengeValue = None
-    teamBaronKills: ChallengeValue = None
-    teamDamagePercentage: ChallengeValue = None
-    teamElderDragonKills: ChallengeValue = None
-    teamRiftHeraldKills: ChallengeValue = None
-    thirdInhibitorDestroyedTime: ChallengeValue = None
-    tookLargeDamageSurvived: ChallengeValue = None
-    turretPlatesTaken: ChallengeValue = None
-    turretTakedowns: ChallengeValue = None
-    turretsTakenWithRiftHerald: ChallengeValue = None
-    twentyMinionsIn3SecondsCount: ChallengeValue = None
-    twoWardsOneSweeperCount: ChallengeValue = None
-    unseenRecalls: ChallengeValue = None
-    visionScoreAdvantageLaneOpponent: ChallengeValue = None
-    visionScorePerMinute: ChallengeValue = None
-    voidMonsterKill: ChallengeValue = None
-    wardTakedowns: ChallengeValue = None
-    wardTakedownsBefore20M: ChallengeValue = None
-    wardsGuarded: ChallengeValue = None
+# Canonical ordered challenge field names — the single source of truth shared
+# with the participant_challenges output TypedDict in parsers/non_timeline.py.
+# Unmodelled keys must fail loudly (extra="forbid") so we can decide whether to
+# add or ignore them.
+CHALLENGE_FIELDS: tuple[str, ...] = (
+    "x12AssistStreakCount", "HealFromMapSources", "InfernalScalePickup", "abilityUses",
+    "acesBefore15Minutes", "alliedJungleMonsterKills",
+    "baronBuffGoldAdvantageOverThreshold", "baronTakedowns",
+    "blastConeOppositeOpponentCount", "bountyGold", "buffsStolen",
+    "completeSupportQuestInTime", "controlWardTimeCoverageInRiverOrEnemyHalf",
+    "controlWardsPlaced", "damagePerMinute", "damageTakenOnTeamPercentage",
+    "dancedWithRiftHerald", "deathsByEnemyChamps", "dodgeSkillShotsSmallWindow",
+    "doubleAces", "dragonTakedowns", "earliestBaron", "earliestDragonTakedown",
+    "earliestElderDragon", "earlyLaningPhaseGoldExpAdvantage",
+    "effectiveHealAndShielding", "elderDragonKillsWithOpposingSoul",
+    "elderDragonMultikills", "enemyChampionImmobilizations", "enemyJungleMonsterKills",
+    "epicMonsterKillsNearEnemyJungler", "epicMonsterKillsWithin30SecondsOfSpawn",
+    "epicMonsterSteals", "epicMonsterStolenWithoutSmite", "firstTurretKilled",
+    "firstTurretKilledTime", "fasterSupportQuestCompletion", "fastestLegendary",
+    "fistBumpParticipation", "flawlessAces", "fullTeamTakedown", "gameLength",
+    "getTakedownsInAllLanesEarlyJungleAsLaner", "goldPerMinute", "hadOpenNexus",
+    "hadAfkTeammate", "highestChampionDamage", "highestCrowdControlScore",
+    "highestWardKills", "immobilizeAndKillWithAlly", "initialBuffCount",
+    "initialCrabCount", "jungleCsBefore10Minutes", "junglerKillsEarlyJungle",
+    "junglerTakedownsNearDamagedEpicMonster", "kTurretsDestroyedBeforePlatesFall",
+    "kda", "killAfterHiddenWithAlly", "killParticipation",
+    "killedChampTookFullTeamDamageSurvived", "killingSprees", "killsNearEnemyTurret",
+    "killsOnLanersEarlyJungleAsJungler", "killsOnOtherLanesEarlyJungleAsLaner",
+    "killsOnRecentlyHealedByAramPack", "killsUnderOwnTurret",
+    "killsWithHelpFromEpicMonster", "knockEnemyIntoTeamAndKill",
+    "landSkillShotsEarlyGame", "laneMinionsFirst10Minutes",
+    "laningPhaseGoldExpAdvantage", "legendaryCount", "legendaryItemUsed",
+    "lostAnInhibitor", "maxCsAdvantageOnLaneOpponent", "maxKillDeficit",
+    "maxLevelLeadLaneOpponent", "mejaisFullStackInTime", "moreEnemyJungleThanOpponent",
+    "multiKillOneSpell", "multiTurretRiftHeraldCount", "multikills",
+    "multikillsAfterAggressiveFlash", "outerTurretExecutesBefore10Minutes",
+    "outnumberedKills", "outnumberedNexusKill", "perfectDragonSoulsTaken",
+    "perfectGame", "pickKillWithAlly", "playedChampSelectPosition", "poroExplosions",
+    "quickCleanse", "quickFirstTurret", "quickSoloKills", "riftHeraldTakedowns",
+    "saveAllyFromDeath", "scuttleCrabKills", "shortestTimeToAceFromFirstTakedown",
+    "skillshotsDodged", "skillshotsHit", "snowballsHit", "soloBaronKills", "soloKills",
+    "soloTurretsLategame", "stealthWardsPlaced", "survivedSingleDigitHpCount",
+    "survivedThreeImmobilizesInFight", "takedownOnFirstTurret", "takedowns",
+    "takedownsAfterGainingLevelAdvantage", "takedownsBeforeJungleMinionSpawn",
+    "takedownsFirstXMinutes", "takedownsInAlcove", "takedownsInEnemyFountain",
+    "teleportTakedowns", "teamBaronKills", "teamDamagePercentage",
+    "teamElderDragonKills", "teamRiftHeraldKills", "thirdInhibitorDestroyedTime",
+    "tookLargeDamageSurvived", "turretPlatesTaken", "turretTakedowns",
+    "turretsTakenWithRiftHerald", "twentyMinionsIn3SecondsCount",
+    "twoWardsOneSweeperCount", "unseenRecalls", "visionScoreAdvantageLaneOpponent",
+    "visionScorePerMinute", "voidMonsterKill", "wardTakedowns",
+    "wardTakedownsBefore20M", "wardsGuarded",
+)
+
+# Field name -> wire alias for challenge keys that aren't valid identifiers.
+CHALLENGE_ALIASES: dict[str, str] = {"x12AssistStreakCount": "12AssistStreakCount"}
+
+# Challenge fields tabulated as list[int] rather than float | None.
+CHALLENGE_LIST_FIELDS: frozenset[str] = frozenset({"legendaryItemUsed"})
+
+
+def _challenge_field_definition(name: str) -> tuple[object, object]:
+    alias = CHALLENGE_ALIASES.get(name)
+    if alias is not None:
+        return (ChallengeValue, Field(default=None, alias=alias))
+    return (ChallengeValue, None)
+
+
+Challenges = create_model(
+    "Challenges",
+    __config__=ConfigDict(extra="forbid", populate_by_name=True),
+    **{name: _challenge_field_definition(name) for name in CHALLENGE_FIELDS},
+)
 
 
 class Missions(BaseModel):

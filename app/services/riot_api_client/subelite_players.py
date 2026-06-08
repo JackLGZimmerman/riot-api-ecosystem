@@ -19,20 +19,18 @@ from app.models import (
 from app.models.riot.league import LeagueEntryDTO
 from app.services.riot_api_client.base import FetchOutcome, RiotAPI
 from app.services.riot_api_client.utils import (
-    JSONLike,
-    UrlRegion,
+    MAX_IN_FLIGHT,
     UrlTuple,
     bounded_sub_elite_tiers,
-    compact_preview,
-    fetch_region_payload,
     iter_in_flight,
+    make_region_fetcher,
     spreading,
+    validate_or_log,
 )
 
 logger = logging.getLogger(__name__)
 
 LEAGUE_PAGE_UPPER_BOUND: int = 1024
-MAX_IN_FLIGHT: int = 64
 PAGE_NOT_FOUND_STATUS: int = 404
 
 type PageKey = tuple[Region, Queues, Tiers, Divisions]
@@ -163,33 +161,23 @@ async def stream_sub_elite_players(
     del jobs
     del page_bounds
 
-    async def fetch_one(job: UrlRegion) -> tuple[Region, JSONLike]:
-        url, region = job
-        return await fetch_region_payload(
-            url=url,
-            region=region,
-            riot_api=riot_api,
-            logger=logger,
-        )
-
     async for region, records in iter_in_flight(
         spread_jobs,
-        fetch_one,
+        make_region_fetcher(riot_api, logger),
         max_in_flight=MAX_IN_FLIGHT,
     ):
         if not isinstance(records, list) or not records:
             continue
 
         for raw in records:
-            try:
-                dto = LeagueEntryDTO(**raw)
-                entry = MinifiedLeagueEntryDTO.from_entry(dto, region=region)
-            except Exception as exc:
-                logger.info(
-                    "LeagueUnexpectedFailed region=%s error=%s preview=%r",
-                    region.value,
-                    type(exc).__name__,
-                    compact_preview(raw),
-                )
+            entry = validate_or_log(
+                raw,
+                region=region,
+                convert=lambda r: MinifiedLeagueEntryDTO.from_entry(
+                    LeagueEntryDTO(**r), region=region
+                ),
+                logger=logger,
+            )
+            if entry is None:
                 continue
             yield entry

@@ -30,6 +30,7 @@ from app.ml.train import (
     _prior_1vx_support_bucket_ids,
     _select_threshold,
     _semantic_calibration_gradient_diagnostics,
+    _semantic_context_gap_metrics,
     _semantic_group_eb_gap_metrics,
     _SemanticContextCalibrationLoss,
     _sigmoid_np,
@@ -181,7 +182,9 @@ def test_train_config_rejects_unknown_raw_tensor_cache_device() -> None:
         )
 
 
-def test_semantic_context_or_moe_head_fails_early_without_sidecar_cache_arrays() -> None:
+def test_semantic_context_or_moe_head_fails_early_without_sidecar_cache_arrays() -> (
+    None
+):
     split = replace(
         _split(np.array([0, 1], dtype=np.float64)),
         identity_temporal_sidecar=None,
@@ -191,7 +194,9 @@ def test_semantic_context_or_moe_head_fails_early_without_sidecar_cache_arrays()
         HGNNConfig(use_identity_semantic_context_head=True),
         HGNNConfig(use_learned_semantic_moe=True),
     ):
-        with pytest.raises(ValueError, match="semantic context/MoE head requires cache arrays"):
+        with pytest.raises(
+            ValueError, match="semantic context/MoE head requires cache arrays"
+        ):
             _drop_unused_model_arrays(split, config)
 
 
@@ -233,18 +238,19 @@ def test_output_diagnostics_include_logit_std_and_semantic_moe_stats() -> None:
     assert np.allclose(moe["expert_selected_fraction"], [0.5, 1.0, 0.5])
     assert moe["expert_usage_min"] == pytest.approx(0.2)
     assert moe["expert_usage_max"] == pytest.approx(0.5)
-    assert moe["router_entropy_fraction_of_topk_max"] == pytest.approx(0.6 / np.log(2.0))
+    assert moe["router_entropy_fraction_of_topk_max"] == pytest.approx(
+        0.6 / np.log(2.0)
+    )
     assert moe["regularization_loss"] == pytest.approx(0.06)
 
 
 def test_semantic_gradient_diagnostics_report_norms_and_cosines() -> None:
     semantic_param = torch.nn.Parameter(torch.tensor([1.0, -2.0]))
     group_param = torch.nn.Parameter(torch.tensor([0.5, -1.5]))
-    bce_loss = (semantic_param.square().sum() + group_param.square().sum())
-    context_loss = (
-        (2.0 * semantic_param).sum()
-        + (torch.tensor([1.0, -1.0]) * group_param).sum()
-    )
+    bce_loss = semantic_param.square().sum() + group_param.square().sum()
+    context_loss = (2.0 * semantic_param).sum() + (
+        torch.tensor([1.0, -1.0]) * group_param
+    ).sum()
 
     diagnostics = _semantic_calibration_gradient_diagnostics(
         bce_loss=bce_loss,
@@ -255,10 +261,18 @@ def test_semantic_gradient_diagnostics_report_norms_and_cosines() -> None:
 
     assert diagnostics["semantic_moe_bce_grad_norm"] == pytest.approx(np.sqrt(20.0))
     assert diagnostics["semantic_moe_context_grad_norm"] == pytest.approx(np.sqrt(8.0))
-    assert diagnostics["semantic_moe_grad_cosine"] == pytest.approx(-1.0 / np.sqrt(10.0))
-    assert diagnostics["group_relationship_bce_grad_norm"] == pytest.approx(np.sqrt(10.0))
-    assert diagnostics["group_relationship_context_grad_norm"] == pytest.approx(np.sqrt(2.0))
-    assert diagnostics["group_relationship_grad_cosine"] == pytest.approx(4.0 / np.sqrt(20.0))
+    assert diagnostics["semantic_moe_grad_cosine"] == pytest.approx(
+        -1.0 / np.sqrt(10.0)
+    )
+    assert diagnostics["group_relationship_bce_grad_norm"] == pytest.approx(
+        np.sqrt(10.0)
+    )
+    assert diagnostics["group_relationship_context_grad_norm"] == pytest.approx(
+        np.sqrt(2.0)
+    )
+    assert diagnostics["group_relationship_grad_cosine"] == pytest.approx(
+        4.0 / np.sqrt(20.0)
+    )
 
 
 def test_training_target_validation_catches_degenerate_cache_split() -> None:
@@ -291,14 +305,10 @@ def test_freeze_loaded_parameters_requires_warm_start() -> None:
 
 def test_calibration_target_validation_rejects_unknown_family() -> None:
     with pytest.raises(ValueError, match="semantic_context_calibration_target"):
-        _validate_train_config(
-            TrainConfig(semantic_context_calibration_target="bogus")
-        )
+        _validate_train_config(TrainConfig(semantic_context_calibration_target="bogus"))
     # valid families pass through validation.
     for target in ("champion_raw", "context_eb", "group_eb", "group_context_eb"):
-        _validate_train_config(
-            TrainConfig(semantic_context_calibration_target=target)
-        )
+        _validate_train_config(TrainConfig(semantic_context_calibration_target=target))
 
 
 def test_calibration_objective_validation_rejects_invalid_residual_controls() -> None:
@@ -318,7 +328,9 @@ def test_calibration_objective_validation_rejects_invalid_residual_controls() ->
         _validate_train_config(
             TrainConfig(semantic_context_calibration_residual_loss="hinge")
         )
-    with pytest.raises(ValueError, match="requires semantic_context_calibration_objective"):
+    with pytest.raises(
+        ValueError, match="requires semantic_context_calibration_objective"
+    ):
         _validate_train_config(
             TrainConfig(semantic_context_calibration_residual_loss="uncertainty_huber")
         )
@@ -349,11 +361,11 @@ def test_calibration_objective_validation_rejects_invalid_residual_controls() ->
                 semantic_context_calibration_holdout_fold=2,
             )
         )
+    with pytest.raises(ValueError, match="semantic_context_metric_min_count"):
+        _validate_train_config(TrainConfig(semantic_context_metric_min_count=0))
     with pytest.raises(ValueError, match="gradient_diagnostics_epochs"):
         _validate_train_config(
-            TrainConfig(
-                semantic_context_calibration_gradient_diagnostics_epochs=-1
-            )
+            TrainConfig(semantic_context_calibration_gradient_diagnostics_epochs=-1)
         )
 
     _validate_train_config(
@@ -655,8 +667,16 @@ def test_eb_shrink_targets_collapses_to_mean_without_between_bin_signal() -> Non
 
 def test_group_audit_specs_only_use_known_build_labels() -> None:
     build_vocab = {
-        "ability_power", "ad_off_tank", "ap_off_tank", "ar_tank", "attack_damage",
-        "crit", "lethality", "mr_tank", "on_hit", "utility_enchanter",
+        "ability_power",
+        "ad_off_tank",
+        "ap_off_tank",
+        "ar_tank",
+        "attack_damage",
+        "crit",
+        "lethality",
+        "mr_tank",
+        "on_hit",
+        "utility_enchanter",
         "utility_protection",
     }
     specs = group_audit_specs()
@@ -703,6 +723,8 @@ def test_group_eb_checkpoint_metric_prefers_lower_systematic_gap() -> None:
 def test_group_checkpoint_metrics_include_clipped_and_scalar_guard() -> None:
     assert "val_group_systematic_gap_mse_clipped" in CHECKPOINT_METRICS
     assert "val_group_floor_normalized_eb_gap" in CHECKPOINT_METRICS
+    assert "val_context_high_support_max_abs_gap" in CHECKPOINT_METRICS
+    assert "val_group_context_high_support_tail" in CHECKPOINT_METRICS
     assert "val_group_clipped_nll_ece" in CHECKPOINT_METRICS
     assert "val_group_first_clipped_nll_ece" in CHECKPOINT_METRICS
 
@@ -715,6 +737,7 @@ def test_group_checkpoint_metrics_include_clipped_and_scalar_guard() -> None:
         "group_eb_floor": 0.12,
         "group_systematic_gap_mse": 0.24,
         "group_systematic_gap_mse_clipped": 0.18,
+        "context_high_support_max_abs_gap": 2.0,
     }
 
     assert _checkpoint_score(
@@ -728,6 +751,16 @@ def test_group_checkpoint_metrics_include_clipped_and_scalar_guard() -> None:
         val_threshold_accuracy=0.58,
     ) == pytest.approx(-3.0)
     assert _checkpoint_score(
+        "val_context_high_support_max_abs_gap",
+        val_metrics=metrics,
+        val_threshold_accuracy=0.58,
+    ) == pytest.approx(-2.0)
+    assert _checkpoint_score(
+        "val_group_context_high_support_tail",
+        val_metrics=metrics,
+        val_threshold_accuracy=0.58,
+    ) == pytest.approx(-(0.36 + 4.0))
+    assert _checkpoint_score(
         "val_group_clipped_nll_ece",
         val_metrics=metrics,
         val_threshold_accuracy=0.58,
@@ -739,11 +772,65 @@ def test_group_checkpoint_metrics_include_clipped_and_scalar_guard() -> None:
     ) == pytest.approx(-(18.0 + 0.67 + 0.03))
 
 
+def test_semantic_context_metrics_expose_high_support_tail() -> None:
+    labels = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float64)
+    n = int(labels.size)
+    champion_id = np.zeros((n, 10), dtype=np.int64)
+    champion_id[:, 2] = 103
+    build_id = np.full(
+        (n, 10),
+        PRODUCTION_BUILD_VOCAB.index("attack_damage"),
+        dtype=np.int64,
+    )
+    build_id[:, 2] = PRODUCTION_BUILD_VOCAB.index("ability_power")
+    build_id[:4, 5:] = PRODUCTION_BUILD_VOCAB.index("ar_tank")
+    context_raw = np.zeros((n, 10, 14), dtype=np.float32)
+    side_predictions = np.full((n, 10), 0.50, dtype=np.float64)
+    side_predictions[:, 2] = np.array([0.90, 0.80, 0.85, 0.82, 0.70, 0.72])
+    split = SplitData(
+        win_rate=np.zeros((n, 10), dtype=np.float32),
+        p1_cnt=np.zeros((n, 10), dtype=np.float32),
+        blue_win=labels,
+        champion_id=champion_id,
+        build_id=build_id,
+        context_raw=context_raw,
+    )
+
+    metrics = _semantic_context_gap_metrics(
+        side_predictions,
+        split,
+        build_vocab=PRODUCTION_BUILD_VOCAB,
+        min_count=1,
+    )
+    gated_metrics = _semantic_context_gap_metrics(
+        side_predictions,
+        split,
+        build_vocab=PRODUCTION_BUILD_VOCAB,
+        min_count=(n * 10) + 1,
+    )
+
+    assert metrics["context_populated_bins"] > 0
+    assert (
+        metrics["context_high_support_populated_bins"]
+        == metrics["context_populated_bins"]
+    )
+    assert metrics["context_high_support_max_abs_gap"] == pytest.approx(
+        metrics["context_max_abs_gap"]
+    )
+    assert np.isfinite(metrics["context_support_weighted_gap_mse"])
+    assert gated_metrics["context_support_min_count"] == (n * 10) + 1
+    assert gated_metrics["context_high_support_populated_bins"] == 0
+    assert np.isnan(gated_metrics["context_high_support_max_abs_gap"])
+
+
 def test_semantic_group_eb_metrics_are_zero_for_perfect_side_probabilities() -> None:
     labels = np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float64)
     n = int(labels.size)
     side_labels = np.concatenate(
-        [np.repeat(labels[:, None], 5, axis=1), np.repeat((1.0 - labels)[:, None], 5, axis=1)],
+        [
+            np.repeat(labels[:, None], 5, axis=1),
+            np.repeat((1.0 - labels)[:, None], 5, axis=1),
+        ],
         axis=1,
     )
     split = SplitData(
@@ -751,7 +838,9 @@ def test_semantic_group_eb_metrics_are_zero_for_perfect_side_probabilities() -> 
         p1_cnt=np.zeros((n, 10), dtype=np.float32),
         blue_win=labels,
         champion_id=np.zeros((n, 10), dtype=np.int64),
-        build_id=np.full((n, 10), PRODUCTION_BUILD_VOCAB.index("ar_tank"), dtype=np.int64),
+        build_id=np.full(
+            (n, 10), PRODUCTION_BUILD_VOCAB.index("ar_tank"), dtype=np.int64
+        ),
         context_raw=np.zeros((n, 10, 14), dtype=np.float32),
         semantic_group_features=np.zeros(
             (n, 10, SEMANTIC_GROUP_FEATURE_DIM),
@@ -853,7 +942,9 @@ def test_auc_ranking_loss_rewards_positive_logits_above_negative_logits() -> Non
     assert good_loss < bad_loss
     assert _auc_ranking_loss(well_ranked, labels, weight=0.0, max_pairs=16) == 0.0
     assert (
-        _auc_ranking_loss(well_ranked, torch.ones_like(labels), weight=0.5, max_pairs=16)
+        _auc_ranking_loss(
+            well_ranked, torch.ones_like(labels), weight=0.5, max_pairs=16
+        )
         == 0.0
     )
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Any, TypedDict, cast
 
@@ -13,6 +13,8 @@ from app.services.riot_api_client.parsers.base_parsers import (
     ParticipantParser,
 )
 from app.services.riot_api_client.parsers.models.non_timeline import (
+    CHALLENGE_FIELDS,
+    CHALLENGE_LIST_FIELDS,
     Info,
     Metadata,
     NonTimeline,
@@ -477,149 +479,25 @@ class ParticipantStatsParser:
         return rows
 
 
-class TabulatedParticipantChallenges(MatchIdRow):
-    teamId: PositiveInt
-    puuid: str
-
-    x12AssistStreakCount: float | None
-    HealFromMapSources: float | None
-    InfernalScalePickup: float | None
-    abilityUses: float | None
-    acesBefore15Minutes: float | None
-    alliedJungleMonsterKills: float | None
-    baronBuffGoldAdvantageOverThreshold: float | None
-    baronTakedowns: float | None
-    blastConeOppositeOpponentCount: float | None
-    bountyGold: float | None
-    buffsStolen: float | None
-    completeSupportQuestInTime: float | None
-    controlWardTimeCoverageInRiverOrEnemyHalf: float | None
-    controlWardsPlaced: float | None
-    damagePerMinute: float | None
-    damageTakenOnTeamPercentage: float | None
-    dancedWithRiftHerald: float | None
-    deathsByEnemyChamps: float | None
-    dodgeSkillShotsSmallWindow: float | None
-    doubleAces: float | None
-    dragonTakedowns: float | None
-    earliestBaron: float | None
-    earliestDragonTakedown: float | None
-    earliestElderDragon: float | None
-    earlyLaningPhaseGoldExpAdvantage: float | None
-    effectiveHealAndShielding: float | None
-    elderDragonKillsWithOpposingSoul: float | None
-    elderDragonMultikills: float | None
-    enemyChampionImmobilizations: float | None
-    enemyJungleMonsterKills: float | None
-    epicMonsterKillsNearEnemyJungler: float | None
-    epicMonsterKillsWithin30SecondsOfSpawn: float | None
-    epicMonsterSteals: float | None
-    epicMonsterStolenWithoutSmite: float | None
-    firstTurretKilled: float | None
-    firstTurretKilledTime: float | None
-    fasterSupportQuestCompletion: float | None
-    fastestLegendary: float | None
-    fistBumpParticipation: float | None
-    flawlessAces: float | None
-    fullTeamTakedown: float | None
-    gameLength: float | None
-    getTakedownsInAllLanesEarlyJungleAsLaner: float | None
-    goldPerMinute: float | None
-    hadOpenNexus: float | None
-    hadAfkTeammate: float | None
-    highestChampionDamage: float | None
-    highestCrowdControlScore: float | None
-    highestWardKills: float | None
-    immobilizeAndKillWithAlly: float | None
-    initialBuffCount: float | None
-    initialCrabCount: float | None
-    jungleCsBefore10Minutes: float | None
-    junglerKillsEarlyJungle: float | None
-    junglerTakedownsNearDamagedEpicMonster: float | None
-    kTurretsDestroyedBeforePlatesFall: float | None
-    kda: float | None
-    killAfterHiddenWithAlly: float | None
-    killParticipation: float | None
-    killedChampTookFullTeamDamageSurvived: float | None
-    killingSprees: float | None
-    killsNearEnemyTurret: float | None
-    killsOnLanersEarlyJungleAsJungler: float | None
-    killsOnOtherLanesEarlyJungleAsLaner: float | None
-    killsOnRecentlyHealedByAramPack: float | None
-    killsUnderOwnTurret: float | None
-    killsWithHelpFromEpicMonster: float | None
-    knockEnemyIntoTeamAndKill: float | None
-    landSkillShotsEarlyGame: float | None
-    laneMinionsFirst10Minutes: float | None
-    laningPhaseGoldExpAdvantage: float | None
-    legendaryCount: float | None
-    legendaryItemUsed: list[int]
-    lostAnInhibitor: float | None
-    maxCsAdvantageOnLaneOpponent: float | None
-    maxKillDeficit: float | None
-    maxLevelLeadLaneOpponent: float | None
-    mejaisFullStackInTime: float | None
-    moreEnemyJungleThanOpponent: float | None
-    multiKillOneSpell: float | None
-    multiTurretRiftHeraldCount: float | None
-    multikills: float | None
-    multikillsAfterAggressiveFlash: float | None
-    outerTurretExecutesBefore10Minutes: float | None
-    outnumberedKills: float | None
-    outnumberedNexusKill: float | None
-    perfectDragonSoulsTaken: float | None
-    perfectGame: float | None
-    pickKillWithAlly: float | None
-    playedChampSelectPosition: float | None
-    poroExplosions: float | None
-    quickCleanse: float | None
-    quickFirstTurret: float | None
-    quickSoloKills: float | None
-    riftHeraldTakedowns: float | None
-    saveAllyFromDeath: float | None
-    scuttleCrabKills: float | None
-    shortestTimeToAceFromFirstTakedown: float | None
-    skillshotsDodged: float | None
-    skillshotsHit: float | None
-    snowballsHit: float | None
-    soloBaronKills: float | None
-    soloKills: float | None
-    soloTurretsLategame: float | None
-    stealthWardsPlaced: float | None
-    survivedSingleDigitHpCount: float | None
-    survivedThreeImmobilizesInFight: float | None
-    takedownOnFirstTurret: float | None
-    takedowns: float | None
-    takedownsAfterGainingLevelAdvantage: float | None
-    takedownsBeforeJungleMinionSpawn: float | None
-    takedownsFirstXMinutes: float | None
-    takedownsInAlcove: float | None
-    takedownsInEnemyFountain: float | None
-    teleportTakedowns: float | None
-    teamBaronKills: float | None
-    teamDamagePercentage: float | None
-    teamElderDragonKills: float | None
-    teamRiftHeraldKills: float | None
-    thirdInhibitorDestroyedTime: float | None
-    tookLargeDamageSurvived: float | None
-    turretPlatesTaken: float | None
-    turretTakedowns: float | None
-    turretsTakenWithRiftHerald: float | None
-    twentyMinionsIn3SecondsCount: float | None
-    twoWardsOneSweeperCount: float | None
-    unseenRecalls: float | None
-    visionScoreAdvantageLaneOpponent: float | None
-    visionScorePerMinute: float | None
-    voidMonsterKill: float | None
-    wardTakedowns: float | None
-    wardTakedownsBefore20M: float | None
-    wardsGuarded: float | None
+# Generated from the canonical CHALLENGE_FIELDS so the wire-column order and the
+# Challenges pydantic model can never drift. matchId/teamId/puuid lead the row;
+# legendaryItemUsed is the only list[int] field, the rest are float | None.
+TabulatedParticipantChallenges = TypedDict(
+    "TabulatedParticipantChallenges",
+    {
+        "matchId": str | NonNegativeInt,
+        "teamId": PositiveInt,
+        "puuid": str,
+        **{
+            name: (list[int] if name in CHALLENGE_LIST_FIELDS else float | None)
+            for name in CHALLENGE_FIELDS
+        },
+    },
+)
 
 
 _CHALLENGE_NUMERIC_FIELDS: tuple[str, ...] = tuple(
-    k
-    for k in TabulatedParticipantChallenges.__annotations__
-    if k not in {"matchId", "teamId", "puuid", "legendaryItemUsed"}
+    name for name in CHALLENGE_FIELDS if name not in CHALLENGE_LIST_FIELDS
 )
 
 
@@ -803,6 +681,10 @@ class NonTimelineTables:
     participant_perk_values: list[TabulatedParticipantPerkValues]
     participant_perk_ids: list[TabulatedParticipantPerkIds]
 
+    @classmethod
+    def empty(cls) -> NonTimelineTables:
+        return cls(**{f.name: [] for f in fields(cls)})
+
 
 @dataclass(frozen=True)
 class MatchDataNonTimelineParsingOrchestrator:
@@ -886,17 +768,7 @@ class MatchDataNonTimelineParsingOrchestrator:
                 "NonTimelineSkip match_id=%s reason=unsupported_game_mode mode=STRAWBERRY",
                 match_id,
             )
-            return NonTimelineTables(
-                metadata=[],
-                game_info=[],
-                bans=[],
-                feats=[],
-                objectives=[],
-                participant_stats=[],
-                participant_challenges=[],
-                participant_perk_values=[],
-                participant_perk_ids=[],
-            )
+            return NonTimelineTables.empty()
 
         drift_date = self._drift_date(raw)
         non_timeline(raw, match_id=match_id, drift_date=drift_date)
@@ -907,17 +779,7 @@ class MatchDataNonTimelineParsingOrchestrator:
                 match_id,
                 drift_date,
             )
-            return NonTimelineTables(
-                metadata=[],
-                game_info=[],
-                bans=[],
-                feats=[],
-                objectives=[],
-                participant_stats=[],
-                participant_challenges=[],
-                participant_perk_values=[],
-                participant_perk_ids=[],
-            )
+            return NonTimelineTables.empty()
 
         try:
             nt = NonTimeline.model_validate(raw)

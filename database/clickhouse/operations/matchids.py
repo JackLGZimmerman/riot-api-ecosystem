@@ -4,9 +4,16 @@ from collections.abc import AsyncIterator, Iterable
 from uuid import UUID
 
 from database.clickhouse.client import get_client
-from database.clickhouse.operations.utils import _as_text
+from database.clickhouse.operations.utils import (
+    _as_text,
+    delete_timestamp_for_run,
+    delete_timestamps_except_run,
+    insert_rows_in_batches,
+    record_timestamp,
+)
 
 PUUID_DATA_TIMESTAMP_NAME = "matchids_puuids_ts"
+MATCHIDS_INSERT_BATCH_SIZE = 20_000
 logger = logging.getLogger(__name__)
 
 
@@ -30,7 +37,7 @@ async def insert_matchids_stream_in_batches(
     match_rows_stream: AsyncIterator[list[tuple[str, str]]],
     run_id: UUID,
     *,
-    batch_size: int = 20_000,
+    batch_size: int = MATCHIDS_INSERT_BATCH_SIZE,
 ) -> None:
     batch: list[tuple[UUID, str, str]] = []
 
@@ -83,35 +90,12 @@ def load_matchid_puuids() -> list[tuple[str, str]]:
 
 
 def delete_failed_puuid_timestamp(run_id: UUID) -> None:
-    command = """
-        ALTER TABLE game_data.data_timestamps
-        DELETE
-        WHERE name = %(name)s
-          AND run_id = %(run_id)s
-    """
-    get_client().command(
-        command,
-        parameters={
-            "name": PUUID_DATA_TIMESTAMP_NAME,
-            "run_id": run_id,
-        },
-    )
+    delete_timestamp_for_run(PUUID_DATA_TIMESTAMP_NAME, run_id)
     logger.debug("Deleted failed puuid timestamp run_id=%s", run_id)
 
 
 def delete_old_puuid_timestamps(run_id: UUID) -> None:
-    get_client().command(
-        """
-        ALTER TABLE game_data.data_timestamps
-        DELETE
-        WHERE name = %(name)s
-          AND run_id != %(run_id)s
-        """,
-        parameters={
-            "name": PUUID_DATA_TIMESTAMP_NAME,
-            "run_id": run_id,
-        },
-    )
+    delete_timestamps_except_run(PUUID_DATA_TIMESTAMP_NAME, run_id)
     logger.debug("Deleted old puuid timestamps excluding run_id=%s", run_id)
 
 
@@ -139,12 +123,7 @@ def delete_matchids(run_id: UUID) -> None:
 
 def upsert_puuid_timestamp(ts: int, run_id: UUID) -> None:
     # RECOVERY-SYSTEM: advances cycle anchor only after all batches in cycle succeed.
-    client = get_client()
-    client.insert(
-        table="game_data.data_timestamps",
-        data=[(run_id, PUUID_DATA_TIMESTAMP_NAME, ts)],
-        column_names=["run_id", "name", "stored_at"],
-    )
+    record_timestamp(PUUID_DATA_TIMESTAMP_NAME, run_id, ts)
     logger.debug("Upserted puuid timestamp run_id=%s ts=%s", run_id, ts)
 
 
@@ -152,37 +131,13 @@ def insert_puuids_in_batches(
     player_keys: Iterable[tuple[str, str]],
     run_id: UUID,
     *,
-    batch_size: int = 20_000,
+    batch_size: int = MATCHIDS_INSERT_BATCH_SIZE,
 ) -> None:
-    client = get_client()
-
-    batch: list[tuple] = []
-    for puuid, queue_type in player_keys:
-        batch.append((run_id, puuid, queue_type))
-
-        if len(batch) >= batch_size:
-            logger.debug(
-                "Insert matchid_puuids batch rows=%d run_id=%s",
-                len(batch),
-                run_id,
-            )
-            client.insert(
-                table="game_data.matchid_puuids",
-                data=batch,
-                column_names=["run_id", "puuid", "queue_type"],
-            )
-            batch.clear()
-
-    if batch:
-        logger.debug(
-            "Insert matchid_puuids batch rows=%d run_id=%s",
-            len(batch),
-            run_id,
-        )
-        client.insert(
-            table="game_data.matchid_puuids",
-            data=batch,
-            column_names=["run_id", "puuid", "queue_type"],
-        )
+    insert_rows_in_batches(
+        "game_data.matchid_puuids",
+        ("run_id", "puuid", "queue_type"),
+        ((run_id, puuid, queue_type) for puuid, queue_type in player_keys),
+        batch_size,
+    )
 
 

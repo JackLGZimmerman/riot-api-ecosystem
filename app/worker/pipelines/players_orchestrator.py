@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -8,7 +7,7 @@ from uuid import UUID, uuid4
 
 from app.models import MinifiedLeagueEntryDTO
 from app.models.riot.league import BASIC_BOUNDS, ELITE_BOUNDS
-from app.services.riot_api_client.base import RiotAPI, get_riot_api
+from app.services.riot_api_client.base import RiotAPI
 from app.services.riot_api_client.elite_players import stream_elite_players
 from app.services.riot_api_client.subelite_players import stream_sub_elite_players
 from app.worker.pipelines.orchestrator import (
@@ -136,18 +135,3 @@ class PlayerSaver(Saver):
             func=delete_old_players_snapshot_ts,
             args=(run_id,),
         )
-
-
-if __name__ == "__main__":
-    async def _main() -> None:
-        async with get_riot_api() as riot_api:
-            orchestrator = PlayersOrchestrator(
-                pipeline="players",
-                loader=PlayerLoader(),
-                collector=PlayerCollector(riot_api),
-                saver=PlayerSaver(),
-            )
-
-            await orchestrator.run()
-
-    asyncio.run(_main())

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     clickhouse_database: str
     clickhouse_user: str
     clickhouse_password: SecretStr
+    clickhouse_send_receive_timeout: PositiveInt = 1800
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

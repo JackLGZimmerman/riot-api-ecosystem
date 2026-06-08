@@ -146,6 +146,10 @@ class TrainConfig:
     # trains on one parity of group specs and reports trained vs held-out bins.
     semantic_context_calibration_holdout_mode: str = "none"
     semantic_context_calibration_holdout_fold: int = 0
+    # Validation/reporting lens for context-gap checkpoint metrics. This keeps
+    # low-support champion slices visible in the raw audit while letting model
+    # selection target bins with enough support to make a 2-3pp max meaningful.
+    semantic_context_metric_min_count: int = 2048
     # Number of initial epochs that log BCE/context-loss gradient alignment on
     # semantic MoE and semantic group-relationship parameters.
     semantic_context_calibration_gradient_diagnostics_epochs: int = 5

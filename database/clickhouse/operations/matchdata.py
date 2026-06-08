@@ -3,6 +3,7 @@ import time
 from collections.abc import Iterable
 
 from database.clickhouse.client import get_client
+from database.clickhouse.operations.utils import dedupe_matchids
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ def delete_by_matchids(
     table: str,
     match_ids: Iterable[str],
 ) -> None:
-    ids = list(dict.fromkeys(str(match_id) for match_id in match_ids if match_id))
+    ids = dedupe_matchids(match_ids)
     if not ids:
         return
 

@@ -73,6 +73,5 @@ services:
 
 
 volumes:
-  player_data_collection_venv:
   clickhouse_data:
   prefect_pgdata:

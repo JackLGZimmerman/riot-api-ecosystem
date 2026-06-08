@@ -6,11 +6,17 @@ from collections.abc import AsyncIterator
 from uuid import UUID
 from app.models.riot.league import MinifiedLeagueEntryDTO
 from database.clickhouse.client import get_client
+from database.clickhouse.operations.utils import (
+    delete_timestamp_for_run,
+    delete_timestamps_except_run,
+    record_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
 PLAYERS_TABLE = "game_data.players"
 PLAYERS_SNAPSHOT_TIMESTAMP_NAME = "players_snapshot_ts"
+PLAYERS_INSERT_BATCH_SIZE = 10_000
 
 PLAYERS_COLS = [
     "run_id",
@@ -47,7 +53,7 @@ async def insert_players_stream_in_batches(
     ts: int,
     *,
     run_id: UUID,
-    batch_size: int = 10_000,
+    batch_size: int = PLAYERS_INSERT_BATCH_SIZE,
     flush_interval_s: float = 5.0,
 ) -> None:
     loop = asyncio.get_running_loop()
@@ -92,41 +98,15 @@ def delete_partial_players_run(run_id: UUID) -> None:
 
 
 def upsert_players_snapshot_ts(ts: int, run_id: UUID) -> None:
-    get_client().insert(
-        table="game_data.data_timestamps",
-        data=[(PLAYERS_SNAPSHOT_TIMESTAMP_NAME, run_id, ts)],
-        column_names=["name", "run_id", "stored_at"],
-    )
+    record_timestamp(PLAYERS_SNAPSHOT_TIMESTAMP_NAME, run_id, ts)
 
 
 def delete_failed_players_snapshot_ts(run_id: UUID) -> None:
-    get_client().command(
-        """
-        ALTER TABLE game_data.data_timestamps
-        DELETE
-        WHERE name = %(name)s
-          AND run_id = %(run_id)s
-        """,
-        parameters={
-            "name": PLAYERS_SNAPSHOT_TIMESTAMP_NAME,
-            "run_id": run_id,
-        },
-    )
+    delete_timestamp_for_run(PLAYERS_SNAPSHOT_TIMESTAMP_NAME, run_id)
 
 
 def delete_old_players_snapshot_ts(run_id: UUID) -> None:
-    get_client().command(
-        """
-        ALTER TABLE game_data.data_timestamps
-        DELETE
-        WHERE name = %(name)s
-          AND run_id != %(run_id)s
-        """,
-        parameters={
-            "name": PLAYERS_SNAPSHOT_TIMESTAMP_NAME,
-            "run_id": run_id,
-        },
-    )
+    delete_timestamps_except_run(PLAYERS_SNAPSHOT_TIMESTAMP_NAME, run_id)
 
 
 def load_players() -> list[PlayerKeyRow]:

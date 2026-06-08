@@ -10,9 +10,12 @@ from app.core.config.constants import (
 )
 from app.core.config.constants.geography import REGION_TO_CONTINENT, Continent, Region
 from app.services.riot_api_client.base import RiotAPI
-from app.services.riot_api_client.utils import iter_in_flight, spreading
+from app.services.riot_api_client.utils import (
+    MAX_IN_FLIGHT,
+    iter_in_flight,
+    spreading,
+)
 
-MAX_IN_FLIGHT = 64
 logger = logging.getLogger(__name__)
 type MatchEndpointType = Literal["by_match_id", "timeline_by_match_id"]
 

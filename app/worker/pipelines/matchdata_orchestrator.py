@@ -59,7 +59,7 @@ from app.worker.pipelines.orchestrator import (
     Orchestrator,
     Saver,
 )
-from app.worker.pipelines.recovery_utils import run_sync_with_retry
+from app.worker.pipelines.recovery_utils import RETRY_MAX_ATTEMPTS, run_sync_with_retry
 from app.worker.pipelines.stop_flag import raise_if_stop_requested
 from database.clickhouse.operations.matchdata import (
     delete_by_matchids,
@@ -102,6 +102,12 @@ def _flush_interval_from_rate_limit() -> float:
 
 
 def columns_from_typed_dict(td: type) -> tuple[str, ...]:
+    # Deliberately hand-rolled rather than typing.get_type_hints(): this defines
+    # ClickHouse insert column order, and we only need the ordered annotation
+    # *keys*. get_type_hints() additionally evaluates the annotation strings
+    # (forward-ref resolution), which is unnecessary here and would make column
+    # ordering fragile to non-importable annotations. (Verified byte-identical to
+    # get_type_hints across all row types today; keep this version for robustness.)
     annotations: dict[str, Any] = {}
     for cls in reversed(td.__mro__):
         annotations.update(getattr(cls, "__annotations__", {}))
@@ -545,7 +551,7 @@ class MatchDataSaver(Saver):
                 row["matchId"] = match_id
 
     @retry(
-        stop=stop_after_attempt(8),
+        stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,

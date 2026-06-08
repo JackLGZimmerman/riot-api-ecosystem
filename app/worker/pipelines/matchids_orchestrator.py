@@ -15,7 +15,7 @@ from app.core.config.constants import (
     Queues,
     Region,
 )
-from app.services.riot_api_client.base import RiotAPI, get_riot_api
+from app.services.riot_api_client.base import RiotAPI
 from app.services.riot_api_client.match_ids import (
     stream_match_ids,
 )
@@ -306,16 +306,3 @@ class MatchIDSaver:
                     "Skipping delete_old_puuid_timestamps for run_id=%s because timestamp upsert did not complete.",
                     ctx.run_id,
                 )
-
-
-if __name__ == "__main__":
-    riot_api: RiotAPI = get_riot_api()
-    loader = MatchIDLoader()
-    collector = MatchIDCollector(riot_api)
-    saver = MatchIDSaver()
-
-    orchestrator = MatchIDOrchestrator(
-        pipeline="matchids", loader=loader, collector=collector, saver=saver
-    )
-
-    asyncio.run(orchestrator.run())

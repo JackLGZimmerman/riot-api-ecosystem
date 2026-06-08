@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Final, Literal, NewType, TypedDict
+from typing import Final, NewType, TypedDict
 
 # Narrow the template type so you don't accidentally stick random strings in.
 URLTemplate = NewType("URLTemplate", str)
@@ -11,8 +11,6 @@ __HOST_CONTINENT = "https://{continent}.api.riotgames.com"
 __V4_LEAGUE = "/lol/league/v4"
 __V4_SUMMONER = "/lol/summoner/v4"
 __V5_MATCH = "/lol/match/v5"
-
-RiotEndpoints = Literal["league", "summoner", "match"]
 
 
 class LeagueGroup(TypedDict):

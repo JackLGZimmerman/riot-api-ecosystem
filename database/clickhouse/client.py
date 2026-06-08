@@ -20,7 +20,7 @@ def get_client():
             port=settings.clickhouse_port,
             username=settings.clickhouse_user,
             password=settings.clickhouse_password.get_secret_value(),
-            send_receive_timeout=1800,
+            send_receive_timeout=settings.clickhouse_send_receive_timeout,
             # We do not rely on ClickHouse HTTP sessions (temp tables, etc).
             # Disabling auto-session avoids "concurrent queries within the same session"
             # when work is fanned out across multiple threads.

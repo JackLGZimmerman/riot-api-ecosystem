@@ -4,11 +4,14 @@ import asyncio
 from collections.abc import AsyncIterator, Iterable
 
 from app.services.riot_api_client.base import FetchOutcome, RiotAPI
-from app.services.riot_api_client.utils import PlayerCrawlState, spreading
+from app.services.riot_api_client.utils import (
+    MAX_IN_FLIGHT,
+    PlayerCrawlState,
+    spreading,
+)
 
 MAX_PAGE_START = 900
 MAX_PAGE_COUNT = 100
-MAX_IN_FLIGHT = 64
 
 PlayerKey = tuple[str, str]
 MatchIDStreamItem = tuple[PlayerKey, list[str], str | None]

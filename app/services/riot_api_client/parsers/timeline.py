@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import (
     Any,
     ClassVar,
     Literal,
     TypedDict,
-    TypeVar,
     cast,
 )
 
@@ -50,6 +49,21 @@ def champion_kill_event_id(
     victimId: int,
 ) -> str:
     return f"{matchId}:{timestamp}:{killerId}:{victimId}"
+
+
+def _flatten_position(row: dict[str, Any]) -> None:
+    """Expand an event ``position`` (dict or Position model) into
+    ``position_x`` / ``position_y`` and drop the original key."""
+    pos = row.get("position")
+    if pos is None:
+        return
+    if isinstance(pos, dict):
+        row["position_x"] = pos["x"]
+        row["position_y"] = pos["y"]
+    else:
+        row["position_x"] = pos.x
+        row["position_y"] = pos.y
+    row.pop("position", None)
 
 
 class MatchIdentityRow(TypedDict):
@@ -293,12 +307,31 @@ class TurretPlateDestroyedRow(TimelineEventRowBase):
     teamId: int
 
 
-RowT = TypeVar("RowT")
-
-
 class EventTypeParser[RowT]:
     EVENT_TYPE: ClassVar[str]
     INCLUDE_TYPE: ClassVar[bool] = False
+    # Keys defaulted via setdefault when the raw event omits them.
+    DEFAULTS: ClassVar[dict[str, Any]] = {}
+    # Keys normalised to [] when missing or falsy.
+    EMPTY_LIST_FIELDS: ClassVar[tuple[str, ...]] = ()
+
+    def _build_row(
+        self, e: dict[str, Any], frame_timestamp: int, matchId: str | int
+    ) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            **e,
+            "frame_timestamp": frame_timestamp,
+            "matchId": matchId,
+        }
+        if not self.INCLUDE_TYPE:
+            row.pop("type", None)
+        for key, default in self.DEFAULTS.items():
+            row.setdefault(key, default)
+        for key in self.EMPTY_LIST_FIELDS:
+            if not row.get(key):
+                row[key] = []
+        _flatten_position(row)
+        return row
 
     def parse(self, frames: list[Frame], matchId: str | int) -> list[RowT]:
         rows: list[RowT] = []
@@ -310,26 +343,7 @@ class EventTypeParser[RowT]:
                 if e["type"] != self.EVENT_TYPE:
                     continue
 
-                row: dict[str, Any] = {
-                    **e,
-                    "frame_timestamp": frame_timestamp,
-                    "matchId": matchId,
-                }
-                if not self.INCLUDE_TYPE:
-                    row.pop("type", None)
-
-                pos = e.get("position")
-                if pos is not None:
-                    if isinstance(pos, dict):
-                        row["position_x"] = pos["x"]
-                        row["position_y"] = pos["y"]
-                    else:
-                        row["position_x"] = pos.x
-                        row["position_y"] = pos.y
-
-                    row.pop("position", None)
-
-                rows.append(cast(RowT, row))
+                rows.append(cast(RowT, self._build_row(e, frame_timestamp, matchId)))
 
         return rows
 
@@ -367,16 +381,7 @@ class ChampionKillParser(EventTypeParser[ChampionKillRow]):
                 assisting_ids = e2.get("assistingParticipantIds")
                 row["assistingParticipantIds"] = assisting_ids if assisting_ids else []
 
-                pos = e2.get("position")
-                if pos is not None:
-                    if isinstance(pos, dict):
-                        row["position_x"] = pos["x"]
-                        row["position_y"] = pos["y"]
-                    else:
-                        row["position_x"] = pos.x
-                        row["position_y"] = pos.y
-
-                    row.pop("position", None)
+                _flatten_position(row)
 
                 rows.append(cast(ChampionKillRow, row))
 
@@ -445,37 +450,8 @@ class VictimDamageReceivedParser(ChampionKillDamageInstanceParser):
 
 class ChampionSpecialKillParser(EventTypeParser[ChampionSpecialKillRow]):
     EVENT_TYPE = "CHAMPION_SPECIAL_KILL"
-
-    def parse(self, frames: list[Frame], matchId: str | int) -> list[ChampionSpecialKillRow]:
-        rows: list[ChampionSpecialKillRow] = []
-
-        for frame in frames:
-            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
-
-            for e in frame.events:
-                if e["type"] != self.EVENT_TYPE:
-                    continue
-
-                row: dict[str, Any] = {
-                    **e,
-                    "multiKillLength": e.get("multiKillLength"),
-                    "frame_timestamp": frame_timestamp,
-                    "matchId": matchId,
-                }
-
-                pos = e.get("position")
-                if pos is not None:
-                    if isinstance(pos, dict):
-                        row["position_x"] = pos["x"]
-                        row["position_y"] = pos["y"]
-                    else:
-                        row["position_x"] = pos.x
-                        row["position_y"] = pos.y
-                    row.pop("position", None)
-
-                rows.append(cast(ChampionSpecialKillRow, row))
-
-        return rows
+    INCLUDE_TYPE = True
+    DEFAULTS = {"multiKillLength": None}
 
 
 class DragonSoulGivenParser(EventTypeParser[DragonSoulGivenRow]):
@@ -485,40 +461,9 @@ class DragonSoulGivenParser(EventTypeParser[DragonSoulGivenRow]):
 
 class EliteMonsterKillParser(EventTypeParser[EliteMonsterKillRow]):
     EVENT_TYPE = "ELITE_MONSTER_KILL"
-
-    def parse(self, frames: list[Frame], matchId: str | int) -> list[EliteMonsterKillRow]:
-        rows: list[EliteMonsterKillRow] = []
-
-        for frame in frames:
-            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
-
-            for e in frame.events:
-                if e["type"] != self.EVENT_TYPE:
-                    continue
-
-                row: dict[str, Any] = {
-                    **e,
-                    "assistingParticipantIds": e.get("assistingParticipantIds", []),
-                    "monsterSubType": e.get("monsterSubType"),
-                    "frame_timestamp": frame_timestamp,
-                    "matchId": matchId,
-                }
-                if not row["assistingParticipantIds"]:
-                    row["assistingParticipantIds"] = []
-
-                pos = e.get("position")
-                if pos is not None:
-                    if isinstance(pos, dict):
-                        row["position_x"] = pos["x"]
-                        row["position_y"] = pos["y"]
-                    else:
-                        row["position_x"] = pos.x
-                        row["position_y"] = pos.y
-                    row.pop("position", None)
-
-                rows.append(cast(EliteMonsterKillRow, row))
-
-        return rows
+    INCLUDE_TYPE = True
+    DEFAULTS = {"monsterSubType": None}
+    EMPTY_LIST_FIELDS = ("assistingParticipantIds",)
 
 
 class WardPlacedParser(EventTypeParser[WardPlacedRow]):
@@ -559,27 +504,7 @@ class PauseEndParser(EventTypeParser[PauseEndRow]):
 
 class GameEndParser(EventTypeParser[GameEndRow]):
     EVENT_TYPE = "GAME_END"
-
-    def parse(self, frames: list[Frame], matchId: str | int) -> list[GameEndRow]:
-        rows: list[GameEndRow] = []
-
-        for frame in frames:
-            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
-
-            for e in frame.events:
-                if e["type"] != self.EVENT_TYPE:
-                    continue
-
-                row: dict[str, Any] = {
-                    **e,
-                    "gameId": e.get("gameId"),
-                    "frame_timestamp": frame_timestamp,
-                    "matchId": matchId,
-                }
-                row.pop("type", None)
-                rows.append(cast(GameEndRow, row))
-
-        return rows
+    DEFAULTS = {"gameId": None}
 
 
 class ObjectiveBountyPrestartParser(EventTypeParser[ObjectiveBountyPrestartRow]):
@@ -605,40 +530,9 @@ class TurretPlateDestroyedParser(EventTypeParser[TurretPlateDestroyedRow]):
 
 class BuildingKillParser(EventTypeParser[BuildingKillRow]):
     EVENT_TYPE = "BUILDING_KILL"
-
-    def parse(self, frames: list[Frame], matchId: str | int) -> list[BuildingKillRow]:
-        rows: list[BuildingKillRow] = []
-
-        for frame in frames:
-            frame_timestamp = nearest_frame_timestamp(frame.timestamp)
-
-            for e in frame.events:
-                if e["type"] != self.EVENT_TYPE:
-                    continue
-
-                row: dict[str, Any] = {
-                    **e,
-                    "towerType": e.get("towerType"),
-                    "assistingParticipantIds": e.get("assistingParticipantIds", []),
-                    "frame_timestamp": frame_timestamp,
-                    "matchId": matchId,
-                }
-                if not row["assistingParticipantIds"]:
-                    row["assistingParticipantIds"] = []
-
-                pos = e.get("position")
-                if pos is not None:
-                    if isinstance(pos, dict):
-                        row["position_x"] = pos["x"]
-                        row["position_y"] = pos["y"]
-                    else:
-                        row["position_x"] = pos.x
-                        row["position_y"] = pos.y
-                    row.pop("position", None)
-
-                rows.append(cast(BuildingKillRow, row))
-
-        return rows
+    INCLUDE_TYPE = True
+    DEFAULTS = {"towerType": None}
+    EMPTY_LIST_FIELDS = ("assistingParticipantIds",)
 
 
 @dataclass
@@ -670,6 +564,10 @@ class TimelineTables:
 
     championKillVictimDamageDealt: list[ChampionKillDamageInstanceRow]
     championKillVictimDamageReceived: list[ChampionKillDamageInstanceRow]
+
+    @classmethod
+    def empty(cls) -> TimelineTables:
+        return cls(**{f.name: [] for f in fields(cls)})
 
 
 @dataclass(frozen=True)
@@ -793,31 +691,7 @@ class MatchDataTimelineParsingOrchestrator:
                 "TimelineSkip match_id=%s reason=unsupported_game_mode (participant_count<5)",
                 match_id,
             )
-            return TimelineTables(
-                participantStats=[],
-                buildingKill=[],
-                championKill=[],
-                championSpecialKill=[],
-                dragonSoulGiven=[],
-                eliteMonsterKill=[],
-                wardPlaced=[],
-                wardKill=[],
-                itemPurchased=[],
-                itemSold=[],
-                itemDestroyed=[],
-                itemUndo=[],
-                levelUp=[],
-                skillLevelUp=[],
-                pauseEnd=[],
-                gameEnd=[],
-                objectiveBountyPrestart=[],
-                objectiveBountyFinish=[],
-                featUpdate=[],
-                championTransform=[],
-                turretPlateDestroyed=[],
-                championKillVictimDamageDealt=[],
-                championKillVictimDamageReceived=[],
-            )
+            return TimelineTables.empty()
 
         drift_date = self._drift_date()
         timeline_drift(raw, match_id=match_id, drift_date=drift_date)
@@ -833,31 +707,7 @@ class MatchDataTimelineParsingOrchestrator:
                 drift_date,
                 end_of_game_result,
             )
-            return TimelineTables(
-                participantStats=[],
-                buildingKill=[],
-                championKill=[],
-                championSpecialKill=[],
-                dragonSoulGiven=[],
-                eliteMonsterKill=[],
-                wardPlaced=[],
-                wardKill=[],
-                itemPurchased=[],
-                itemSold=[],
-                itemDestroyed=[],
-                itemUndo=[],
-                levelUp=[],
-                skillLevelUp=[],
-                pauseEnd=[],
-                gameEnd=[],
-                objectiveBountyPrestart=[],
-                objectiveBountyFinish=[],
-                featUpdate=[],
-                championTransform=[],
-                turretPlateDestroyed=[],
-                championKillVictimDamageDealt=[],
-                championKillVictimDamageReceived=[],
-            )
+            return TimelineTables.empty()
 
         try:
             tl = Timeline.model_validate(raw)

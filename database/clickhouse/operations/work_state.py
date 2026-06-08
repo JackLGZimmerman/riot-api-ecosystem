@@ -8,7 +8,7 @@ from uuid import UUID
 from app.core.config.constants import CONTINENT_TO_REGIONS, Continent
 from database.clickhouse.client import get_client
 from database.clickhouse.operations.matchids import PUUID_DATA_TIMESTAMP_NAME
-from database.clickhouse.operations.utils import _as_text
+from database.clickhouse.operations.utils import dedupe_matchids, record_timestamp
 
 MATCHDATA_STATE_TABLE = "game_data.matchdata_matchids"
 MATCHDATA_SEEDED_RUN_NAME = "matchdata_seeded_matchids_run"
@@ -49,12 +49,8 @@ def _load_latest_run_id(*, client, name: str) -> UUID | None:
     return None if not rows or rows[0][0] is None else rows[0][0]
 
 
-def _mark_seeded(client, run_id: UUID) -> None:
-    client.insert(
-        table="game_data.data_timestamps",
-        data=[(run_id, MATCHDATA_SEEDED_RUN_NAME, int(time.time()))],
-        column_names=("run_id", "name", "stored_at"),
-    )
+def _mark_seeded(run_id: UUID) -> None:
+    record_timestamp(MATCHDATA_SEEDED_RUN_NAME, run_id, int(time.time()))
 
 
 def _seed_candidates_select() -> str:
@@ -102,7 +98,7 @@ def seed_from_latest_matchids() -> int:
     ).result_rows
     pending = int(rows[0][0]) if rows else 0
     if pending == 0:
-        _mark_seeded(client, latest_run_id)
+        _mark_seeded(latest_run_id)
         return 0
 
     client.command(
@@ -112,7 +108,7 @@ def seed_from_latest_matchids() -> int:
         """,
         parameters={"run_id": latest_run_id},
     )
-    _mark_seeded(client, latest_run_id)
+    _mark_seeded(latest_run_id)
     logger.debug(
         "Seeded matchdata queue rows=%d latest_run_id=%s", pending, latest_run_id
     )
@@ -160,7 +156,7 @@ def claim_pending_matchids(*, batch_size: int) -> list[str]:
         )
         .result_rows
     )
-    claimed = _dedupe(_as_text(row[0]) for row in rows)
+    claimed = dedupe_matchids(row[0] for row in rows)
 
     counts: dict[str, int] = {c: 0 for c in CONTINENTS}
     unknown = 0
@@ -182,7 +178,7 @@ def claim_pending_matchids(*, batch_size: int) -> list[str]:
 
 
 def mark_matchids_finished(match_ids: Iterable[str]) -> None:
-    ids = _dedupe(match_ids)
+    ids = dedupe_matchids(match_ids)
     if not ids:
         return
     get_client().command(
@@ -195,14 +191,3 @@ def mark_matchids_finished(match_ids: Iterable[str]) -> None:
         parameters={"match_ids": ids},
     )
     logger.debug("Removed matchdata queue rows=%d", len(ids))
-
-
-def _dedupe(values: Iterable[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = _as_text(value)
-        if text and text not in seen:
-            seen.add(text)
-            out.append(text)
-    return out

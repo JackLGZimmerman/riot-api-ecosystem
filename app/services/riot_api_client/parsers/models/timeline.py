@@ -11,6 +11,8 @@ from pydantic import (
     RootModel,
 )
 
+from app.services.riot_api_client.parsers.models.non_timeline import Metadata
+
 
 class Position(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -353,13 +355,6 @@ class Info(BaseModel):
     frames: list[Frame]
     gameId: NonNegativeInt = Field(validation_alias=AliasChoices("matchId", "gameId"))
     participants: list[Participant]
-
-
-class Metadata(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    dataVersion: str
-    matchId: str
-    participants: list[str]
 
 
 class Timeline(BaseModel):

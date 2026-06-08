@@ -38,6 +38,9 @@ class PlayerCrawlState(NamedTuple):
 
 MAX_LOG_PREVIEW = 300
 
+# Shared concurrency ceiling for fan-out fetch loops (iter_in_flight / worker pools).
+MAX_IN_FLIGHT = 64
+
 
 def compact_preview(payload: Any, *, max_len: int = MAX_LOG_PREVIEW) -> str:
     preview = repr(payload).replace("\n", " ")
@@ -67,6 +70,46 @@ async def fetch_region_payload(
             type(exc).__name__,
         )
         return region, None
+
+
+def make_region_fetcher(
+    riot_api: RiotAPI,
+    logger: logging.Logger,
+) -> Callable[[UrlRegion], Awaitable[tuple[Region, JSONLike]]]:
+    """Build the (url, region) -> (region, payload) fetch closure shared by the
+    elite / sub-elite league streamers."""
+
+    async def fetch_one(job: UrlRegion) -> tuple[Region, JSONLike]:
+        url, region = job
+        return await fetch_region_payload(
+            url=url,
+            region=region,
+            riot_api=riot_api,
+            logger=logger,
+        )
+
+    return fetch_one
+
+
+def validate_or_log[T](
+    raw: Any,
+    *,
+    region: Region,
+    convert: Callable[[Any], T],
+    logger: logging.Logger,
+) -> T | None:
+    """Run ``convert(raw)``; on any failure log the shared LeagueUnexpectedFailed
+    line and return None so the caller can skip the record."""
+    try:
+        return convert(raw)
+    except Exception as exc:
+        logger.info(
+            "LeagueUnexpectedFailed region=%s error=%s preview=%r",
+            region.value,
+            type(exc).__name__,
+            compact_preview(raw),
+        )
+        return None
 
 
 async def iter_in_flight[T, R](

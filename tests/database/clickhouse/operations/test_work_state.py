@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from database.clickhouse.operations import utils as ops_utils
 from database.clickhouse.operations import work_state
+
+
+def _patch_client(monkeypatch, client) -> None:
+    # work_state issues queries/commands via its own get_client binding; the
+    # shared record_timestamp helper inserts via operations.utils.get_client.
+    monkeypatch.setattr(work_state, "get_client", lambda: client)
+    monkeypatch.setattr(ops_utils, "get_client", lambda: client)
 
 
 class FakeResult:
@@ -37,7 +45,7 @@ def test_seed_from_latest_matchids_uses_insert_select(monkeypatch):
             [(2,)],
         ]
     )
-    monkeypatch.setattr(work_state, "get_client", lambda: client)
+    _patch_client(monkeypatch, client)
     monkeypatch.setattr(work_state.time, "time", lambda: 123)
 
     assert work_state.seed_from_latest_matchids() == 2
@@ -58,8 +66,8 @@ def test_seed_from_latest_matchids_uses_insert_select(monkeypatch):
     assert client.inserts == [
         (
             "game_data.data_timestamps",
-            [(run_id, work_state.MATCHDATA_SEEDED_RUN_NAME, 123)],
-            ("run_id", "name", "stored_at"),
+            [(work_state.MATCHDATA_SEEDED_RUN_NAME, run_id, 123)],
+            ("name", "run_id", "stored_at"),
         )
     ]
 
@@ -72,7 +80,7 @@ def test_seed_from_latest_matchids_skips_already_seeded_run(monkeypatch):
             [(run_id,)],
         ]
     )
-    monkeypatch.setattr(work_state, "get_client", lambda: client)
+    _patch_client(monkeypatch, client)
 
     assert work_state.seed_from_latest_matchids() == 0
     assert client.commands == []
@@ -88,7 +96,7 @@ def test_seed_from_latest_matchids_marks_empty_seed(monkeypatch):
             [(0,)],
         ]
     )
-    monkeypatch.setattr(work_state, "get_client", lambda: client)
+    _patch_client(monkeypatch, client)
     monkeypatch.setattr(work_state.time, "time", lambda: 456)
 
     assert work_state.seed_from_latest_matchids() == 0
@@ -96,7 +104,7 @@ def test_seed_from_latest_matchids_marks_empty_seed(monkeypatch):
     assert client.inserts == [
         (
             "game_data.data_timestamps",
-            [(run_id, work_state.MATCHDATA_SEEDED_RUN_NAME, 456)],
-            ("run_id", "name", "stored_at"),
+            [(work_state.MATCHDATA_SEEDED_RUN_NAME, run_id, 456)],
+            ("name", "run_id", "stored_at"),
         )
     ]

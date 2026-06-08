@@ -31,8 +31,10 @@ deployments:
         user: "1000:1000"
         env:
           CLICKHOUSE_HOST: clickhouse
+        # RIOT_PROJECT_DIR must be exported to the absolute repo root before
+        # `prefect deploy` (the docker work pool mounts host paths into the job).
         volumes:
-          - /home/jack/projects/riot-api-ecosystem/.env:/app/.env:ro
-          - /home/jack/projects/riot-api-ecosystem/app/core/logging/logs:/app/app/core/logging/logs
+          - "{{ $RIOT_PROJECT_DIR }}/.env:/app/.env:ro"
+          - "{{ $RIOT_PROJECT_DIR }}/app/core/logging/logs:/app/app/core/logging/logs"
         networks:
           - riot-api-ecosystem_default
