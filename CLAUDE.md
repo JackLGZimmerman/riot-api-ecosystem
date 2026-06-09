@@ -1,69 +1,23 @@
-# CLAUDE.md
+# Engineering Reductionism
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+- Simplify every code change as much as possible while preserving the requested behavior, safety, and visual quality.
+- Prefer the smallest correct implementation over additive architecture, extra state, new abstractions, or broad refactors.
+- Apply a reductionist mindset before editing: ask whether the same outcome can be achieved with fewer moving parts, fewer lines of code, less duplicated logic, and less runtime work.
+- If less code can deliver the same functionality with equal clarity and maintainability, use less code.
+- Keep changes efficient in both implementation and runtime: avoid unnecessary dependencies, observers, effects, re-renders, network calls, database work, and layout measurement.
+- Remove stale or redundant code created during iteration once the simpler solution is clear.
 
-## Development Philosophy
+# Commit Discipline
 
-### Think Before Coding
+- After every significant completed change, stage, commit, and push the work when the repository is ready.
+- Keep commits scoped to the completed change unless the user explicitly asks to stage everything with `git add .`.
+- Before committing, check the working tree and avoid unintentionally including unrelated user changes.
+- Use clear commit messages that describe the behavior or fix, not the implementation noise.
 
-**Don't assume. Don't hide confusion. Surface tradeoffs
+# Sub-Agent Review Discipline
 
-Before implementing:
-
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-### Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-### Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-- The test: Every changed line should trace directly to the user's request.
-
-### Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-
-"Add validation" → "Write tests for invalid inputs, then make them pass"
-"Fix the bug" → "Write a test that reproduces it, then make it pass"
-"Refactor X" → "Ensure tests pass before and after"
-For multi-step tasks, state a brief plan:
-
-```bash
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
-
-### Documentation (.md)
-
-Documentation is to be written in `.md` files.
-
-- All documentation should be kept as lean as possible, no superflous text, straight to the point, minimal details and maximum clarity.
+- Use sub-agents whenever a task has isolated parts of the functionality that can be implemented, researched, or reviewed independently.
+- Split sub-agent work by meaningful boundaries such as client UI, server/API behavior, data modeling, authorization, performance, tests, accessibility, and visual polish.
+- After every significant adjustment, run a separate review agent to perform a thorough audit of the change.
+- The review audit should look beyond simple bugs: verify functional correctness, edge cases, regressions, security and authorization risks, performance costs, accessibility, UX clarity, data consistency, error handling, test coverage, maintainability, redundant code, stale artifacts, and whether the same outcome could be achieved more simply.
+- Treat review findings as actionable input: fix high-value findings before finalizing, and explicitly call out any residual risk that remains.
