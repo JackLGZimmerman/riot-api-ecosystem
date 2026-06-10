@@ -864,7 +864,7 @@ def audit_json_payload(
     audit_split: str,
     updated: str | None = None,
 ) -> dict[str, object]:
-    """Build a machine-readable companion payload for ablation reporting."""
+    """Build a machine-readable companion payload for audit outcome reporting."""
 
     updated = updated or date.today().isoformat()
     payload = {
@@ -1190,7 +1190,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--json-output",
         type=Path,
-        help="Optional machine-readable audit payload for ablation reports.",
+        help="Optional machine-readable payload for audit outcome reports.",
     )
     parser.add_argument(
         "--bootstrap-samples",

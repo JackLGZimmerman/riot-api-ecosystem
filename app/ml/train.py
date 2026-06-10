@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 EPS = 1e-12
 # Reference single-run cap for the team-swapped training loop on the local
-# RTX 5070 Ti. Use epoch timing telemetry and --train-batch-cap for sweeps.
+# RTX 5070 Ti. Use epoch timing telemetry and --train-batch-cap for candidate runs.
 HGNN_TRAIN_BATCH = DEFAULT_TRAIN_BATCH_CAP
 PRODUCTION_SEMANTIC_MOE_ARCHITECTURE = "convex_encoder_mix"
 PRODUCTION_SEMANTIC_MODEL_OVERRIDES: dict[str, Any] = {
@@ -491,7 +491,7 @@ def _cache_raw_tensor_split(
         dtype = torch.long if name in _LONG_TENSOR_FIELDS else torch.float32
         # CPU caches can share storage with the already loaded NumPy arrays when
         # dtype/layout allow it, avoiding a second large host-memory copy for
-        # parallel ablation runs. CUDA caches still materialise on the GPU.
+        # parallel candidate runs. CUDA caches still materialise on the GPU.
         if device == "cpu":
             return torch.as_tensor(value, dtype=dtype, device=device)
         return torch.tensor(value, dtype=dtype, device=device)
@@ -3571,7 +3571,7 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         default=train_defaults.train_epoch_max_games,
         help=(
             "Optional maximum train games sampled per epoch. Set 0 or omit for "
-            "full train epochs; intended for deterministic ablation screening."
+            "full train epochs; intended for deterministic candidate screening."
         ),
     )
     parser.add_argument("--max-epochs", type=int, default=train_defaults.max_epochs)

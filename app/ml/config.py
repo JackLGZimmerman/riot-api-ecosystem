@@ -14,7 +14,7 @@ from app.core.utils.smoothing import (
 ML_DATA_DIR = PROJECT_ROOT / "app" / "ml" / "data"
 CACHE_DIR = ML_DATA_DIR / "cache"
 DEFAULT_ENCODER_SIDECAR_PATH = (
-    ML_DATA_DIR / "experiments" / "semantic_identity_sidecar_compact.npz"
+    ML_DATA_DIR / "semantic_identity_sidecar_compact.npz"
 )
 DEFAULT_TRAIN_BATCH_CAP = 40960
 
@@ -70,7 +70,7 @@ class TrainConfig:
     metrics_path: Path = ML_DATA_DIR / "metrics_latest.json"
     audit_prediction_cache_path: Path | None = None
     warm_start_model_path: Path | None = None
-    # When warm-starting a larger ablation model from production, optionally
+    # When warm-starting a larger candidate model from production, optionally
     # keep loaded checkpoint parameters fixed and train only newly introduced
     # parameters that were missing from the checkpoint.
     freeze_warm_start_loaded_parameters: bool = False
@@ -78,7 +78,7 @@ class TrainConfig:
     # Effective training batch safety cap for the team-swapped HGNN loop.
     # Set to 0 or None to disable for explicit throughput/allocator sweeps.
     train_batch_cap: int | None = DEFAULT_TRAIN_BATCH_CAP
-    # Optional per-epoch row cap for ablation screens. Production defaults to
+    # Optional per-epoch row cap for candidate screens. Production defaults to
     # full train epochs; sweep runners can set this to compare many candidates
     # before a final full-data promotion run.
     train_epoch_max_games: int | None = None

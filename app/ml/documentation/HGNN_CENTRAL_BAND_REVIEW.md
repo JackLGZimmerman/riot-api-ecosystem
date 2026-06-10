@@ -2,6 +2,12 @@
 
 Date: 2026-06-04
 
+Status note, 2026-06-10: this is now a historical forensic review, not the
+current production source of truth. Keep it for the original central-band
+missing-signal taxonomy and examples. For current experiment rules and the
+semantic-boundary NLL finding, see [EXPERIMENTS.md](EXPERIMENTS.md). For the
+current model surface, see [HGNN_CURRENT.md](HGNN_CURRENT.md).
+
 This audit reviews held-out validation/test games where the reference HGNN model
 predicted `P(blue win)` in the central `0.475-0.525` band and the raw `0.5`
 classification was wrong. The tight-band pass uses batches of 1,000 games; the
@@ -27,13 +33,13 @@ aligns rune rows to participant slots; the analyzer does not materialize it.
 | `app/ml/data/experiments/hgnn_central_band_wide_425_575_deep_b2000_001_review.json` | Wider-band deeper rune/build-profile review. |
 | `app/ml/data/experiments/hgnn_central_band_lift_estimate_475_525.json` | Accuracy-lift estimate for the `0.475-0.525` band. |
 | `app/ml/data/experiments/hgnn_central_band_lift_estimate_425_575.json` | Accuracy-lift estimate for the `0.425-0.575` band. |
-| `app/ml/experiments/hgnn_central_band_candidates.py` | Reproducible central-band candidate generator. |
-| `app/ml/experiments/hgnn_central_band_allowed_review.py` | Reusable allowed-signal analyzer. |
-| `app/ml/experiments/hgnn_central_band_deep_review.py` | Detailed rune page, secondary build, and build-margin analyzer. |
-| `app/ml/experiments/hgnn_central_band_lift_estimate.py` | Reproducible current-vs-theoretical accuracy estimator. |
 
 Earlier 100-game smoke artifacts remain in `app/ml/data/experiments`, but this
 report supersedes them with the reproducible samples above.
+
+The one-off generator/analyzer scripts that produced these outcomes have been
+retired from `app/ml/experiments`; this document now keeps the outcome record
+only.
 
 ## Model Context
 
@@ -44,9 +50,10 @@ use it as central-band diagnosis rather than as the current production audit.
 The checkpoint accounts for champion/build identity, 1vX champion-role-build
 priors, support counts, and the learned semantic MoE/group context path. It does
 not directly consume summoner spells, rune/perk choices, patch/date, or exact
-1v1/2vX relationship arrays. The exact relationship arrays exist in the cache
-and ClickHouse priors, but `use_relationship_integrations` is disabled for this
-checkpoint.
+1v1/2vX relationship arrays. At the time of this review, exact relationship
+priors existed as historical diagnostics, but direct relationship integrations
+were disabled for this checkpoint and are not part of the maintained v29
+production cache contract.
 
 Tight central-band held-out summary:
 
@@ -147,8 +154,8 @@ or an RL search over allowed build shapes.
 
 This section is historical. Loadout and patch-only Temporal have since been
 promoted into the production model and are no longer active ablation families.
-The current ablation scripts from this session now test build-intent diagnostics
-only.
+The one-off build-intent diagnostic scripts have also been removed; this section
+keeps the outcome narrative only.
 
 The leakage-safe follow-up checked all non-relationship families except direct
 matchup/relationship priors. The run uses the current basic-1vX-compatible
@@ -245,7 +252,7 @@ each other's conclusions. The consensus was:
 - Final-build profile evidence is useful for diagnosis, but unsafe as a direct
   pregame feature unless build intent is available before the outcome.
 - Patch drift, loadout choices, and composition can explain each other if tested
-  separately. Any claimed lift should survive patch-stratified ablations and
+  separately. Any claimed lift should survive patch-stratified checks and
   calibration checks.
 
 ## Wider 0.425-0.575 Check
@@ -302,7 +309,7 @@ one.
 The wider sub-agent review agreed with the earlier critique: static train priors
 are split-safe but not rolling, final-build profile evidence is diagnostic only,
 and role-restricted relationships plus pregame loadout priors remain the best
-next ablation targets.
+next diagnostic targets.
 
 ## Accuracy-Lift Estimate
 
@@ -334,7 +341,7 @@ or 84.92% if starting from the current tuned threshold and only fixing
 post-threshold signal-tagged misses. The margin-conditioned heuristic gives
 86.18% raw and 76.47% threshold. These numbers clear the 60% target in theory,
 but they should be read as "there is enough miss-side signal volume to justify
-the ablations," not as expected production accuracy.
+future diagnostics," not as expected production accuracy.
 
 ## Representative Games
 
@@ -349,9 +356,10 @@ the ablations," not as expected production accuracy.
 
 ## Direction
 
-The active ablation direction from this session is build intent only. Loadout
-and patch-only Temporal are production inputs now, and direct relationship /
-matchup priors remain intentionally excluded from the current scope.
+The remaining diagnostic direction from this session is build intent only.
+Loadout and patch-only Temporal are production inputs now, and direct
+relationship / matchup priors remain intentionally excluded from the current
+scope.
 
 1. Keep observed secondary build labels and build-margin profiles as oracle
    diagnostics while they are read from held-out
@@ -371,5 +379,5 @@ The tight `0.475-0.525` band contains 163,910 held-out games and sits near
 52.4% accuracy. The wider `0.425-0.575` band contains 277,652 held-out games and
 covers almost the whole validation/test distribution. The theoretical estimates
 show enough miss-side signal volume to exceed 60% validation accuracy if the
-signals are captured cleanly, but only leakage-safe ablations can turn that into
-an expected production number.
+signals are captured cleanly, but only leakage-safe target construction can turn
+that into an expected production number.

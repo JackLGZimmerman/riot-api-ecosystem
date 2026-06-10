@@ -101,7 +101,7 @@ def test_threshold_and_temperature_are_fit_from_validation_arrays_only() -> None
     assert temperature == _fit_temperature(val_logits, val_labels)
 
 
-def test_prior_1vx_support_bucket_metrics_expose_variance_ablation_risk() -> None:
+def test_prior_1vx_support_bucket_metrics_expose_variance_risk() -> None:
     labels = np.array([0, 1, 0, 1], dtype=np.float64)
     split = _split(labels)
     split.p1_cnt[:] = np.array(

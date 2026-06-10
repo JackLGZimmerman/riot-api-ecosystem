@@ -2,6 +2,12 @@
 
 Updated: 2026-06-07.
 
+Status note, 2026-06-10: keep this document as the lower-noise semantic
+calibration guardrail. It complements the specific context examples in
+[HGNN_CONTEXT_EXAMPLES_AUDIT.md](HGNN_CONTEXT_EXAMPLES_AUDIT.md); neither alone
+is sufficient for semantic-boundary promotion. Current experiment rules and the
+NLL-focused finding are in [EXPERIMENTS.md](EXPERIMENTS.md).
+
 Companion to `HGNN_CONTEXT_EXAMPLES_AUDIT.md`. That audit measures the model gap
 against each split's **raw, champion-specific** empirical win rate, whose per-bin
 sampling variance `p(1-p)/n` is irreducible (median bin n~500 -> floor ~10.5 pp^2).
@@ -49,11 +55,8 @@ directly into node initialization.
 
 ## Production Result (16 groups, 67 populated bins)
 
-Prediction cache:
-
-```text
-app/ml/data/audit_focus_side_probability.npy
-```
+The focus-side prediction cache is generated on demand by the reproduction
+command below; it is not kept as a maintained artifact.
 
 JSON output:
 
@@ -137,7 +140,7 @@ uv run python -m app.ml.context_examples_audit \
   --context-cache-dir app/ml/data/cache \
   --model-cache-dir app/ml/data/cache \
   --model-path app/ml/data/hgnn_production_model.pt \
-  --encoder-sidecar-path app/ml/data/experiments/semantic_identity_sidecar_compact.npz \
+  --encoder-sidecar-path app/ml/data/semantic_identity_sidecar_compact.npz \
   --prediction-cache app/ml/data/audit_focus_side_probability.npy \
   --audit-split val \
   --output app/ml/documentation/HGNN_CONTEXT_EXAMPLES_AUDIT.md \

@@ -1,6 +1,11 @@
 # HGNN Current State
 
-Last updated: 2026-06-07.
+Last updated: 2026-06-10.
+
+Experiment guidance and the latest semantic-boundary findings are in
+[EXPERIMENTS.md](EXPERIMENTS.md). In short: semantic group examples remain
+critical evaluation fixtures, but the current grouped residual targets did not
+extract stable enough row-level boundary direction to move held-out NLL.
 
 ## Production Path
 
@@ -30,8 +35,10 @@ cache 1vX priors + support
 ```
 
 Direct 1v1/2vX champion matchup and synergy relationship integrations have been
-removed from the model, cache, priors, and predictor; they are no longer part of
-`build_hgnn_inputs()` or `HGNNWinModel.forward()`. Loadout and patch-only
+removed from the model contract, cache layout, priors, and predictor; they are
+no longer part of `build_hgnn_inputs()` or `HGNNWinModel.forward()`. Older local
+cache directories may still contain ignored relationship `.npy` files, but v29
+production loading does not declare or consume them. Loadout and patch-only
 Temporal are no longer tracked as ablation families in this document; they are
 part of the default production model when the v29 cache provides
 `loadout_features.npy` and `patch_features.npy`.
@@ -171,7 +178,7 @@ context path over the same required sidecar inputs plus the champion, role,
 build, and fused identity embeddings. Production defaults enable this path with
 `semantic_moe_architecture="convex_encoder_mix"`. It builds support/log-support
 sidecar tokens, derives own / ally / enemy / extremity factors, routes each slot
-through top-k experts (default 2 of 8), support-gates zero-initialised slot
+through top-k experts (production default 32 of 128), support-gates zero-initialised slot
 deltas, and adds `semantic_moe_logit` into `context_logit`. It can run alone or
 alongside the identity semantic context head; training consumes
 `semantic_moe_regularization_loss` and reports router usage, entropy, factor
@@ -219,9 +226,8 @@ promote, so the service path remains the compact sidecar plus
 Temporary MoE expert-count / `top_k` runners, report helpers, generated
 checkpoints, and parser tests were removed from the maintained workspace on
 2026-06-07 after their outcomes were captured here. These runs were research
-ablations only: production remains `convex_encoder_mix` with the default
-8-expert / `top_k=2` recipe until a multi-seed confirmation explicitly promotes
-a replacement.
+ablations only; after review, the production recipe was promoted to
+`convex_encoder_mix` with 128 experts and `top_k=32`.
 
 The seed-4 sweeps varied only `semantic_moe_num_experts` and
 `semantic_moe_top_k`, using the compact identity sidecar, frozen production warm
@@ -315,7 +321,7 @@ flowchart TD
     moe_context --> moe_token
     gate --> moe_token
     moe_token --> factor["semantic factor MLP"]
-    factor --> router["router top-k experts<br/>default 2 of 8"]
+    factor --> router["router top-k experts<br/>production 32 of 128"]
     factor --> experts["zero-initialised expert deltas"]
     router --> moe_slots["support-gated slot deltas"]
     experts --> moe_slots

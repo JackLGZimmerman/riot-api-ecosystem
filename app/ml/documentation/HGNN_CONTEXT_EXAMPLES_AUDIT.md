@@ -2,6 +2,12 @@
 
 Updated: 2026-06-08.
 
+Status note, 2026-06-10: keep this document as a qualitative evaluation fixture.
+The specific group-context instances are critical for inspecting semantic
+failures, but they should be paired with the lower-noise EB/group guardrail in
+[HGNN_GROUP_CONTEXT_AUDIT.md](HGNN_GROUP_CONTEXT_AUDIT.md) and the experiment
+rules in [EXPERIMENTS.md](EXPERIMENTS.md).
+
 This audit joins the empirical focus-side context examples to the trained semantic HGNN predictions for the same cached games. Each audit is its own table: one row per threshold bin reporting `n / empirical WR / HGNN WR / gap / accuracy`, with a per-table Gap MSE, accuracy, and the accuracy headroom from perfect calibration (`Calibration lift`) above it. Gap is `HGNN WR - empirical WR`; zero gap is the target.
 
 ## Scope And Threshold Definitions

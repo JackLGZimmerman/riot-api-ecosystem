@@ -1,14 +1,15 @@
 # ML Win-Rate Model
 
-As of 2026-06-04, production uses champion/build identity embeddings on top of
-the smoothed 1vX player prior, plus the promoted all-encoder learned semantic
-MoE over frozen static, full-game, and temporal identity latents. The old
-classification-derived semantic, profile, and context inputs have been removed
-from the HGNN contract.
+As of 2026-06-10, production uses champion/build identity embeddings on top of
+the smoothed 1vX player prior, the production Loadout head, the bounded
+patch-only Temporal head, and the promoted all-encoder learned semantic MoE over
+frozen static, full-game, and temporal identity latents. The old
+classification-derived semantic, profile, context, and direct relationship
+inputs have been removed from the HGNN contract.
 
-Direct 1v1 and 2vX relationship integrations remain removed from production.
 The current identity-signal surface is the frozen identity-encoder sidecar
-artifact. Production consumes all three sidecar blocks through
+artifact at `app/ml/data/semantic_identity_sidecar_compact.npz`. Production
+consumes all three sidecar blocks through
 `semantic_moe_architecture="convex_encoder_mix"`; the older node-init sidecar
 MLPs remain disabled by default. See
 [HGNN_CURRENT.md](HGNN_CURRENT.md#identity-encoder-sidecars).
@@ -19,6 +20,7 @@ MLPs remain disabled by default. See
 cache/prior arrays
 -> posterior and support features
 -> champion/role/build identity + 1vX node prior
+-> Loadout + patch-only Temporal residual heads
 -> static/full-game/temporal sidecars into convex semantic MoE
 -> blue/red mean + attention team readout
 -> final logit
@@ -42,7 +44,7 @@ Runtime prediction uses `load_predictor()` from `app/ml/predictor.py`.
 
 ## Cache Contract
 
-The model consumes `npy-memmap-v27` cache arrays with 10 ordered slots:
+The model consumes `npy-memmap-v29` cache arrays with 10 ordered slots:
 
 ```text
 0..4 = blue TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
@@ -55,30 +57,9 @@ The model consumes `npy-memmap-v27` cache arrays with 10 ordered slots:
 | `p1_cnt.npy` | `[games, 10]` | raw `1vX` support for node confidence |
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
+| `loadout_features.npy` | `[games, 10]` | production Loadout residual features |
+| `patch_features.npy` | `[games, 2]` | bounded patch-only Temporal residual features |
 | `blue_win.npy` | `[games]` | target label |
-
-Relationship arrays are still written for opt-in research runs:
-
-| Array | Shape | Default use |
-| --- | --- | --- |
-| `matchup_1v1.npy` | `[games, 25]` | ignored |
-| `synergy_2vx.npy` | `[games, 20]` | ignored |
-| `m1v1_cnt.npy` | `[games, 25]` | ignored |
-| `s2vx_cnt.npy` | `[games, 20]` | ignored |
-| `m1v1_eff_n.npy` | `[games, 25]` | ignored |
-| `s2vx_eff_n.npy` | `[games, 20]` | ignored |
-
-## Relationship Features
-
-When relationship integrations are enabled, the residual features are:
-
-```text
-1v1 delta        = logit(blue beats red prior) - logit(generic 1vX baseline)
-blue 2vX delta   = +team-local synergy delta
-red 2vX delta    = -team-local synergy delta
-confidence       = raw_count / (raw_count + confidence_strength)
-missing          = raw_count <= 0
-```
 
 The default model path now points at the promoted `convex_encoder_mix` semantic
 MoE checkpoint copied into `app/ml/data/hgnn_production_model.pt`.

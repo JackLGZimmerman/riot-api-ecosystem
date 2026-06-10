@@ -8,7 +8,7 @@ row per observed `(championid, teamposition, build)` identity:
 * temporal champion/role/build latents
 
 Run with:
-    python -m app.ml.build_encoder_sidecar --output app/ml/data/experiments/semantic_identity_sidecar_compact.npz
+    python -m app.ml.build_encoder_sidecar --output app/ml/data/semantic_identity_sidecar_compact.npz
 """
 
 from __future__ import annotations
@@ -934,7 +934,7 @@ def _metadata_with_reused_static_full_game(
             "reused_static_full_game_from": str(base_sidecar_path),
         }
     )
-    metadata["temporal_encoder_ablation"] = {
+    metadata["temporal_encoder_replacement"] = {
         "kind": "replace_temporal_only",
         "reused_static_full_game_from": str(base_sidecar_path),
         "temporal_config": temporal_summary["config"],
