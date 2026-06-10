@@ -1,9 +1,9 @@
 # pyright: reportPrivateImportUsage=false
 
-"""Match-Outcome HGNN win-rate model.
+"""Match-outcome HGNN validation model.
 
-Production uses identity embeddings on top of the 1vX player prior. Training
-and inference share one model shape.
+Production validation uses champion/build identity, 1vX priors, and optional
+residual heads. Runtime serving must provide any configured feature tensors.
 """
 
 from __future__ import annotations

@@ -40,9 +40,10 @@ uv run python -m app.ml.train \
   --metrics-path app/ml/data/experiments/manual/metrics.json
 ```
 
-Routine training requests train/validation splits and writes train/validation
-metrics only. Add `--eval-test` only after selecting a final candidate from validation, and add
-`--allow-production-artifact-overwrite` only for an explicit promotion run.
+Routine training tensor-caches train/validation splits and writes
+train/validation metrics only. Add `--eval-test` only after selecting a final
+candidate from validation, and add `--allow-production-artifact-overwrite` only
+for an explicit promotion run.
 
 Training writes:
 

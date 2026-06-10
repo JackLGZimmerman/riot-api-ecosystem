@@ -1513,16 +1513,13 @@ def train(
         model_config.use_learned_semantic_moe
         and model_config.use_semantic_group_features
     )
-    split_names = ("train", "val") + (("test",) if train_cfg.eval_test else ())
     loaded_splits = {
         name: _limit_split(split, dataset_cfg.max_games)
         for name, split in load_splits(
             dataset_cfg,
             require_counts=True,
             load_semantic_group_features=load_semantic_group_features,
-            allow_semantic_group_feature_materialization=train_cfg.eval_test,
             load_context_raw=load_semantic_group_features,
-            split_names=split_names,
         ).items()
     }
     # Compact caches omit per-game sidecar arrays; build the on-device gather
@@ -1895,7 +1892,9 @@ def train(
     model.load_state_dict(best_state)
     save_hgnn_model(train_cfg.model_path, model, confidence_strength=strength)
 
-    prediction_split_names = split_names
+    prediction_split_names = ("train", "val") + (
+        ("test",) if train_cfg.eval_test else ()
+    )
     prediction_tensor_splits = dict(tensor_splits)
     if train_cfg.eval_test:
         prediction_tensor_splits["test"] = _cache_raw_tensor_split(

@@ -176,7 +176,7 @@ from app.rl.pool import load_pool
 from app.rl.reward import make_pool_sampler
 
 predictor = load_predictor(
-    cfg=TrainConfig(model_path=Path("app/ml/data/serving_compatible_model.pt"))
+    cfg=TrainConfig(model_path=Path("<serving-compatible-hgnn.pt>"))
 )
 pool = load_pool()                   # reads app/rl/data/champion_pool.json
 sampler = make_pool_sampler(pool, top_k_build_configs=8)

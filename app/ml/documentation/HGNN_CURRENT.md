@@ -415,7 +415,7 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 | Learning rate / patience / weight decay | `3e-4` / `5` / `0.0` |
 | Report-only temperature scaling | Fit on validation logits only; never changes served probabilities. |
 | Raw tensor cache device | `cpu`; model-device caching is an explicit throughput sweep option. |
-| Test split reads | Off by default; `--eval-test` is required after validation selection. Current shared `.npy` files are opened as memmaps, but test rows are not sliced, label-validated, materialized into tensors, evaluated, or written to metrics. |
+| Test evaluation | Off by default; `--eval-test` is required after validation selection. Routine training does not tensor-cache, evaluate, or write test metrics; shared cache files may still be opened as memmaps. |
 | Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required for promotion. |
 | Direct 1v1/2vX integrations | Removed from the model, cache, priors, and predictor. |
 | Loadout head | Production validation-on with v30 cache metadata and `loadout_features.npy`; current RL serving bridge rejects checkpoints that require it. |
@@ -427,5 +427,5 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 
 Invalid training config combinations fail early in `app/ml/train.py`. Test
 labels are not used for threshold selection, temperature fitting, checkpoint
-selection, or model selection, and routine training does not request or
-materialize the test split unless `--eval-test` is set.
+selection, or model selection, and routine training does not evaluate or write
+the test split unless `--eval-test` is set.

@@ -185,29 +185,14 @@ def _validate_blue_win(values: np.ndarray) -> None:
         raise ValueError("Cache blue_win labels must be binary; rebuild the cache.")
 
 
-def _selected_split_names(split_names: tuple[str, ...] | None) -> tuple[str, ...]:
-    if split_names is None:
-        return SPLIT_ORDER
-    selected = tuple(str(name) for name in split_names)
-    unknown = [name for name in selected if name not in SPLIT_ORDER]
-    if unknown:
-        raise ValueError("Unknown cache split(s): " + ", ".join(unknown))
-    if len(set(selected)) != len(selected):
-        raise ValueError("Cache split names must be unique")
-    return selected
-
-
 def load_splits(
     cfg: DatasetConfig,
     *,
     require_counts: bool = False,
     load_semantic_group_features: bool = False,
     semantic_group_feature_dim: int | None = None,
-    allow_semantic_group_feature_materialization: bool = True,
     load_context_raw: bool = False,
-    split_names: tuple[str, ...] | None = None,
 ) -> dict[str, SplitData]:
-    selected_split_names = _selected_split_names(split_names)
     meta = json.loads((cfg.cache_dir / CACHE_META_FILE).read_text())
     cache_format = meta.get("format")
     if cache_format != CACHE_FORMAT and cache_format not in LEGACY_CACHE_FORMATS:
@@ -280,17 +265,6 @@ def load_splits(
         identity = meta.get("identity")
         if not isinstance(identity, dict) or "build_vocab" not in identity:
             raise ValueError("Cache metadata is missing identity.build_vocab; rebuild the cache.")
-        feature_path = cfg.cache_dir / "semantic_group_features.npy"
-        meta_path = cfg.cache_dir / "semantic_group_features_meta.json"
-        if (
-            not allow_semantic_group_feature_materialization
-            and not (feature_path.exists() and meta_path.exists())
-        ):
-            raise ValueError(
-                "Routine training requires precomputed semantic_group_features.npy; "
-                "run an explicit cache/materialization step or use --eval-test for "
-                "a final candidate run that may create full-cache diagnostics."
-            )
         try:
             arrays["semantic_group_features"] = materialize_semantic_group_feature_cache(
                 cache_dir=cfg.cache_dir,
@@ -300,6 +274,7 @@ def load_splits(
         except ValueError as exc:
             if semantic_group_feature_dim is None:
                 raise
+            feature_path = cfg.cache_dir / "semantic_group_features.npy"
             if not feature_path.exists():
                 raise
             features = np.load(feature_path, mmap_mode="r")[:n]
@@ -328,6 +303,5 @@ def load_splits(
                 "rebuild the cache."
             )
         arrays["context_raw"] = context_raw
-    for name in selected_split_names:
-        _validate_blue_win(arrays["blue_win"][slice(*split_ranges[name])])
-    return {name: _slice(arrays, *split_ranges[name]) for name in selected_split_names}
+    _validate_blue_win(arrays["blue_win"])
+    return {name: _slice(arrays, *split_ranges[name]) for name in SPLIT_ORDER}
