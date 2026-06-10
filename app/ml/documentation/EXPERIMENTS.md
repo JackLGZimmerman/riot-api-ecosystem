@@ -42,6 +42,65 @@ current EB/group residual targets remain near zero held-out NLL lift. That means
 the gate is attainable in principle, but the current semantic target direction is
 not precise enough.
 
+## In-Band Ceiling Decomposition (2026-06-10)
+
+A split-safe fixed-feature ceiling separated two competing root causes for the
+static-NLL plateau: "identity-derived surfaces have no further row-level
+signal" versus "the signal exists but does not transfer across the
+chronological patch boundary." The v29 cache makes the decomposition
+observable without new data: `patch_features[:, 1]` is `1.0` only for games
+whose patch has train coverage. Validation splits into `18,561` covered-patch
+and `35,420` uncovered-patch central-band games; test is 100% uncovered.
+
+Setup: production checkpoint frozen; no-group base = forward pass with
+`semantic_group_features` zeroed; feature surface = union of compact group
+features (25), raw identity-context axes (62), and frozen sidecar latents
+(144) composed per game as blue-minus-red team difference, team sum, and
+per-role differences plus the no-group logit (900 dims, train-stat
+standardized); learner = capped (`0.5` logit, tanh) residual MLP `256/64` fit
+with BCE on top of the frozen no-group logit, inner 10% holdout early
+stopping, seed 4. Harness checks reproduced the recorded oracle
+(`+0.009919` central val NLL at `+5.30pp`) and the production group path
+(`+0.56pp` / `0.001175` central val).
+
+| fit | fit rows | scope (val) | acc lift | NLL lift |
+| --- | ---: | --- | ---: | ---: |
+| train_full | 1,145,051 | central | +0.55pp | `0.001354` |
+| train_full | 1,145,051 | central, covered patches | -0.04pp | `0.000795` |
+| train_full | 1,145,051 | central, uncovered patches | +0.86pp | `0.001647` |
+| train_match | 114,505 | central | +0.30pp | `0.000925` |
+| val_crossfit (5-fold OOF) | ~114,505 | central | +1.32pp | `0.002414` |
+| val_crossfit (5-fold OOF) | ~114,505 | central, covered patches | -0.50pp | `-0.001013` |
+| val_crossfit (5-fold OOF) | ~114,505 | central, uncovered patches | +2.27pp | `0.004210` |
+
+`train_full` on test central (100% uncovered) reached `+1.25pp` / `0.002050`.
+
+Findings:
+
+- The train-fit union surface lands exactly on the historical `~0.0014`
+  plateau, confirming the plateau is not a feature-representation artifact:
+  richer identity-derived features do not move a train-fit teacher.
+- Same-era fitting more than doubles the recoverable signal at 10x less
+  fitting data: the size-matched train fit reaches `0.000925` on val central
+  while the val-crossfit out-of-fold fit reaches `0.002414`.
+- The decomposition is sharp: on new-patch central games the in-era ceiling is
+  `+0.004210` NLL with `+2.27pp` accuracy, clearing the `+0.003` gate level,
+  while the same learner *hurts* the covered-patch cohort (`-0.001013`).
+  Residual direction is patch-era-conditional; mixing eras in one teacher
+  actively cancels signal.
+- Verdict under the pre-registered rule (overall val central, train-only and
+  crossfit both below `+0.003`): reject train-fit identity-derived boundary
+  surfaces. The actionable root cause is temporal/patch drift of the residual
+  field, not missing identity information from `app/classification`.
+
+The val-crossfit numbers are diagnostic ceilings (out-of-fold, no test
+contact), never promotion evidence: promotion still requires a train-side
+construction evaluated on untouched splits. Artifacts:
+`app/ml/data/experiments/semantic_boundary_inband_ceiling/inband_ceiling.{json,md}`
+plus cached frozen-base predictions. The one-off runner and its tests were
+removed after this conclusion was recorded, per the experiment rules; the
+construction above is sufficient to rebuild it.
+
 ## Where The Issue Lies
 
 The issue lies in extracting decision signal from semantic groups, not in the
@@ -130,18 +189,22 @@ Any model that improves central accuracy but leaves central NLL near the current
 
 ## Next Data Direction
 
-The next experiment should not be another cap/LR/confidence sweep. It should
-build a richer split-safe target surface that preserves decision context:
+The in-band ceiling decomposition (2026-06-10) replaces the earlier "richer
+identity surface" direction: richer identity-derived features do not move a
+train-fit teacher off the `~0.0014` plateau, but the same features carry
+`+0.0042` central NLL on new-patch validation games when the teacher is fit
+in-era. The next experiment should therefore make the target construction
+time-local rather than the feature surface richer:
 
-- no-group probability band,
-- role and side,
-- champion/build identity group,
-- patch or temporal cohort where support allows,
-- relationship prior direction and support,
-- semantic group balance,
-- loadout context when it is known pregame,
-- cross-fit label-derived residual direction.
+- rolling residual teacher fit only on games before each candidate's
+  timestamp (or trailing patch window), replacing the static all-train fit,
+- patch-era interaction features or era-bucketed teacher heads, so old-era
+  rows stop cancelling new-era direction,
+- time-decayed sample weights as the cheapest variant of the same idea,
+- rolling 1vX/loadout priors as the production analogue once a teacher
+  variant clears the ceiling.
 
-The target should be evaluated first with replay and fixed-feature ceiling
-learners. Only after that surface clears central-band NLL should it be wired into
-HGNN training.
+Each variant should be evaluated with the same fixed-feature ceiling harness
+(frozen no-group base, capped residual learner, covered/uncovered cohort
+report) before any HGNN wiring. The promotion gates are unchanged; in-era
+crossfit numbers remain diagnostics only.
