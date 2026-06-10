@@ -93,6 +93,15 @@ Findings:
   surfaces. The actionable root cause is temporal/patch drift of the residual
   field, not missing identity information from `app/classification`.
 
+A post-run audit verified test isolation, out-of-fold assembly, and
+inner-holdout early stopping, and bounded the one mechanism that could have
+inflated the transfer gap: train-degenerate feature columns amplified by the
+`1e-6` standardization floor. Only 2 of 900 columns (context axes 54/57
+JUNGLE-role diffs, train-constant at that role) are degenerate, touching ~16
+of 143,131 validation rows — at most `1e-4` central NLL, two orders below the
+decision margins. Future reruns should still floor or drop train-degenerate
+columns.
+
 The val-crossfit numbers are diagnostic ceilings (out-of-fold, no test
 contact), never promotion evidence: promotion still requires a train-side
 construction evaluated on untouched splits. Artifacts:
