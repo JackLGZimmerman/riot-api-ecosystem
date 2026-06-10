@@ -31,6 +31,19 @@ Attach these code files for implementation context:
 - `app/classification/full_game_encoder.py`
 - `app/classification/temporal_autoencoder.py`
 
+Attach these classification semantic-source files when evaluating data/target
+construction:
+
+- `app/classification/documentation/README.md`
+- `app/classification/documentation/AUTOENCODER_README.md`
+- `app/classification/documentation/ENCODER_METRICS.md`
+- `app/classification/embeddings/config.py`
+- `app/classification/embeddings/registry.py`
+- `app/classification/embeddings/context_features.py`
+- `app/classification/embeddings/load.py`
+- `app/classification/embeddings/matrices.py`
+- `app/classification/embeddings/build_tables.py`
+
 Attach these tests if proposing code changes:
 
 - `tests/ml/test_train_defaults.py`
@@ -73,6 +86,17 @@ failures. The group EB audit gives a lower-noise calibration guardrail. However,
 attempts to turn those grouped contexts into per-game boundary decisions have
 mostly produced threshold accuracy movement without enough NLL movement.
 
+Important omission: HGNN does not directly include the explicit semantic-group
+information from the `app/classification` sub-project. `app/classification`
+defines the semantic metric catalogue, derived ratios, identity rollups,
+team-share context features, and role-matchup context features used to create
+the identity encoders. HGNN currently consumes frozen sidecar latents exported
+from those encoders plus a compact `app/ml/semantic_group_features.py` tensor,
+but it does not expose the classification semantic axes, metric groups,
+context-feature values, latent-neighborhood groups, or semantic targets as
+first-class supervised inputs. This may be a core reason the model has semantic
+context in aggregate but weak row-level boundary semantics.
+
 Observed failure pattern:
 
 - Central-band accuracy often moved by roughly `+0.5pp` to `+0.8pp`.
@@ -101,6 +125,11 @@ Why the current architecture does not satisfy the goal:
   objectives, not cross-fit prediction of semantic residual direction. They may
   preserve broad identity context while losing the row-level signal needed for
   boundary flips.
+- The architecture treats the classification encoders mostly as opaque latent
+  suppliers. It does not ask the HGNN loss to preserve or use the explicit
+  semantic groups already available in `app/classification`, especially the
+  215-metric full-game surface and 60 team-share / role-matchup context
+  features that require teammate/opponent context.
 - The current loss can reduce audit gaps or move thresholds without learning a
   stable held-out probability correction, which is why NLL remains nearly flat.
 - Direct matchup/relationship priors and completed-game build-profile signals
@@ -219,6 +248,9 @@ Your task:
    change needed to integrate the target. If it does not clear, reject the branch.
 5. Keep test data untouched for selection. Use train-only, leave-one-out, or
    cross-fit targets where labels are involved.
+6. Explicitly decide whether the missing `app/classification` semantic-source
+   information should become direct HGNN input, a supervised target for the
+   sidecar encoders, a cross-fit residual teacher, or an audit-only fixture.
 
 Prefer solutions that add better information or better supervision over bigger
 heads. The likely breakthrough is how the data is provided, not parameter tuning.
