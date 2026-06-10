@@ -5,7 +5,15 @@ Last updated: 2026-06-10.
 Experiment guidance and the latest semantic-boundary findings are in
 [EXPERIMENTS.md](EXPERIMENTS.md). In short: semantic group examples remain
 critical evaluation fixtures, but the current grouped residual targets did not
-extract stable enough row-level boundary direction to move held-out NLL.
+extract stable enough row-level boundary direction to move held-out NLL. The
+2026-06-10 time-local teacher ceiling localized the remaining headroom to data
+freshness: the pre-registered train+val refresh teacher cleared the test NLL
+gate on all three seeds (central mean `+0.0022`, `+1.3pp` central accuracy;
+the uniform variant averaged `+0.0026` with high seed variance) while every
+train-boundary-respecting construction stayed at or below the `~0.0015`
+plateau, so the next production lever is rolling the chronological split
+boundary forward (see EXPERIMENTS.md "Next Data Direction"), not model
+wiring.
 
 ## Production Path
 

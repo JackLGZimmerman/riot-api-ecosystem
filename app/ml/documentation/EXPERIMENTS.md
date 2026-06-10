@@ -110,6 +110,88 @@ plus cached frozen-base predictions. The one-off runner and its tests were
 removed after this conclusion was recorded, per the experiment rules; the
 construction above is sufficient to rebuild it.
 
+## Time-Local Teacher Ceiling (2026-06-10)
+
+This experiment ran the "time-local target construction" follow-up to the
+in-band decomposition and settled which time-local variant carries signal.
+Same documented harness (frozen production no-group base, 900-dim identity
+surface, capped `0.5`-logit residual MLP `256/64` fit with AdamW lr `1e-3`,
+batch `16384`, at most 12 epochs with patience 2 on an inner 10% holdout;
+features train-stat standardized, degenerate columns masked, and held as
+float16; 5 prequential buckets; seeds 4 and 5, plus post-decision robustness
+seeds on the test refresh teachers). Validity anchors reproduced the recorded
+oracle (`0.009919`) and production group path (`0.001175` / `+0.559pp`
+central val) exactly.
+
+Per-row time metadata: the cache stream is deterministic (keyset-paginated
+`ORDER BY matchid` per split), so `(season, patch, gamestarttimestamp)` was
+re-derived from ClickHouse (`ml_game_player_pivot` joined to `game_data.info`)
+in cache row order and verified by exact `blue_win` equality on all 1,431,313
+rows. Artifact:
+`app/ml/data/experiments/semantic_boundary_timelocal_ceiling/row_time_meta.npz`.
+
+The era layout this exposed: the v29 splits are purely chronological and cut
+*inside* patches. Train spans 1601-1608 (ends 2026-04-22), validation is the
+1608 tail (48,908 rows, train-covered) plus the first 8.6 days of 1609
+(94,223 rows, uncovered); within the central band, test splits into 18,558
+patch-1609 rows and 35,496 patch-1610 rows. Every protocol-clean teacher is
+therefore >= 1 patch stale for most held-out rows.
+
+Teachers (H\* = 28d half-life, selected on validation from {7, 14, 28}):
+
+| teacher | fit data | eval | central NLL lift | era cohorts (NLL lift) |
+| --- | --- | --- | ---: | --- |
+| train_static (s4/s5) | train, uniform | val | `0.001550` / `0.001489` | 1608 `~0.0010`; 1609 `~0.0018` |
+| train_recency_h28 (s4/s5) | train, decayed | val | `0.001399` / `0.001041` | 1608 `~0.0004`; 1609 `~0.0017` |
+| prequential_h28 (s4/s5) | train + strictly-past val | val | `0.001684` / `0.001903` | 1608 `~0.0008`; 1609 `0.002138` / `0.002533` |
+| prequential_uniform (s4) | train + strictly-past val | val | `0.001722` | 1609 `0.002202` |
+| trainval_static (s4/s5/s6) | train + val, uniform | test | `0.002519` / `0.001957` / `0.003386` | 1609 mean `0.0034`; 1610 mean `0.0022` |
+| trainval_recency_h28 (s4/s5/s6) | train + val, decayed | test | `0.002276` / `0.002078` / `0.002249` | 1609 mean `0.0030`; 1610 mean `0.0018` |
+
+Pre-registered decision: `timelocal_mixed`. The prequential validation gate
+failed (`0.001794` mean vs `0.003`); the pre-registered test candidate
+(trainval_recency_h28, seeds 4/5) cleared the test gate (`0.002177` mean vs
+`0.002`, global guardrails positive). Post-decision robustness seeds
+(trainval_static s5/s6, trainval_recency s6) were appended without
+re-evaluating the rule: the candidate clears the test gate on every seed
+(three-seed mean `0.002201`, range `2.0e-4`), while the uniform refresh has a
+higher but seed-noisy mean (`0.002621`, range `1.4e-3`, one seed below the
+gate). Under the experiment rules a failed validation ceiling means no HGNN
+architecture change and no promotion this round.
+
+Findings:
+
+- Era *inclusion* is the lever; era *weighting* is second-order. On
+  train-only fits recency weighting was neutral-to-negative at every tested
+  half-life (sign-consistent across 7 of 8 comparisons, each delta within
+  seed spread). On the refresh teacher it traded a little mean lift
+  (`0.00220` vs `0.00262` uniform) for roughly sevenfold lower seed
+  variance. Time-decayed loss weights are not a production lever for closing
+  the gate; do not pursue them as one.
+- In-era history is the real lever, and its value grows with volume
+  (directionally — two confounded measurement points, not a dose-response
+  curve): val-1609 prequential rows (mean ~3 days of own-patch history)
+  reached `~0.0023`; test-1609 rows scored with the full 8.6-day, 94k-row
+  val-1609 history reached a three-seed candidate mean of `0.00304`
+  (`0.00300-0.00308`) with `+1.3-1.8pp` accuracy — at the validation-gate
+  level on that cohort. One-patch-stale cohorts (val-1609 from train,
+  test-1610 from the refresh candidate) sit at `~0.0018`.
+- The binding constraint is now the frozen chronological split boundary, not
+  the feature surface, the targets, or the model: no construction that
+  respects the Apr-22 train cutoff can deliver same-patch history to most
+  held-out rows, and same-patch history is where the gate-clearing signal
+  lives. Train-boundary-respecting teachers stayed at or below the historical
+  plateau (train_static `0.001550`/`0.001489` here vs `0.001354` in the f32
+  in-band run — the same plateau at gate scale under the f16/masked-column
+  harness). All priors (1vX, loadout, patch) are also hard-scoped to
+  `split = 'train'`, so served features carry the same staleness.
+
+Artifacts:
+`app/ml/data/experiments/semantic_boundary_timelocal_ceiling/timelocal_ceiling.{json,md}`
+plus `row_time_meta.npz`. The one-off runner was removed after this conclusion
+was recorded; the construction above plus the in-band section is sufficient to
+rebuild it.
+
 ## Where The Issue Lies
 
 The issue lies in extracting decision signal from semantic groups, not in the
@@ -139,6 +221,10 @@ Future work should therefore change the data/target construction before changing
 model capacity. The next useful target surface should be split-safe, train-only,
 cross-fit where possible, and explicitly optimized for central-band NLL
 direction rather than audit-bin mean alignment.
+
+Status 2026-06-10: the two ceiling experiments below resolved this section's
+question — the missing precision is era freshness, not target construction.
+See "Next Data Direction".
 
 ## Documentation Review
 
@@ -198,22 +284,31 @@ Any model that improves central accuracy but leaves central NLL near the current
 
 ## Next Data Direction
 
-The in-band ceiling decomposition (2026-06-10) replaces the earlier "richer
-identity surface" direction: richer identity-derived features do not move a
-train-fit teacher off the `~0.0014` plateau, but the same features carry
-`+0.0042` central NLL on new-patch validation games when the teacher is fit
-in-era. The next experiment should therefore make the target construction
-time-local rather than the feature surface richer:
+The time-local teacher ceiling (2026-06-10) resolved the previous direction
+list: rolling/refresh teachers carry real signal, recency loss-weighting does
+not, and no train-boundary-respecting construction can clear the validation
+gate because the gate-clearing signal lives in same-patch history that the
+frozen Apr-22 boundary withholds. The next change is therefore to the split
+protocol itself, not to targets or architecture:
 
-- rolling residual teacher fit only on games before each candidate's
-  timestamp (or trailing patch window), replacing the static all-train fit,
-- patch-era interaction features or era-bucketed teacher heads, so old-era
-  rows stop cancelling new-era direction,
-- time-decayed sample weights as the cheapest variant of the same idea,
-- rolling 1vX/loadout priors as the production analogue once a teacher
-  variant clears the ceiling.
+- Roll the chronological windows forward: extend train through the freshest
+  complete patch, assign new validation/test windows after the new boundary
+  (`ml_game_split` reassignment), and rebuild the filtered tables, priors,
+  sidecar artifacts, and v29 cache on the rolled boundary.
+- Retrain and evaluate the standard gates on the rolled held-out windows.
+  This is the production-true protocol: deployment always has data up to the
+  refresh point. Measured dividend at the teacher level, by cohort: the
+  half-patch-stale 1609 cohort reached a `0.00304` three-seed candidate mean
+  (`+1.3-1.8pp` accuracy; uniform refresh higher-mean but seed-noisy), while
+  one-patch-stale cohorts sat at `~0.0018`.
+- Keep refresh cadence well inside a patch if the in-era dividend is the
+  goal. The two available measurement points (~3 days own-patch history
+  `~0.0023`; 8.6 days `~0.0030`) are directional cadence evidence, not a
+  fitted curve — they differ in cohort and construction.
+- The fixed-feature ceiling harness (in-band + time-local sections above)
+  remains the gate for any cheaper variant before HGNN wiring changes.
 
-Each variant should be evaluated with the same fixed-feature ceiling harness
-(frozen no-group base, capped residual learner, covered/uncovered cohort
-report) before any HGNN wiring. The promotion gates are unchanged; in-era
-crossfit numbers remain diagnostics only.
+Rolling the boundary regenerates split-scoped artifacts (filter tables,
+priors, encoder sidecars, semantic context tables, cache), so it is a
+deliberate pipeline operation, not a casual rerun. Promotion gates are
+unchanged and apply on the rolled windows.
