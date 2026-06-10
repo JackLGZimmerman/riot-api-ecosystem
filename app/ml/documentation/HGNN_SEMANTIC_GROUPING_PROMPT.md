@@ -130,6 +130,67 @@ What has already been tried:
 Do not repeat those as hyperparameter sweeps unless you first identify a new
 target/data surface whose fixed-feature ceiling clears the NLL gate.
 
+Research-backed techniques that are relevant to the static-NLL problem:
+
+- Treat log loss/NLL as a strictly proper scoring-rule gate, not a secondary
+  metric. Accuracy can improve from threshold crossings while probability
+  quality stays flat; this branch is only valuable if the proper score improves.
+  Use this framing from proper scoring-rule work to reject accuracy-only wins.
+- Decompose the failure into refinement/resolution versus calibration. If
+  accuracy rises but NLL does not, test whether the new signal improves ranking
+  inside the central band, probability calibration inside the central band, or
+  neither. A useful branch should improve at least one component without
+  worsening the other enough to cancel the NLL gain.
+- Use post-hoc calibration only as a diagnostic or final wrapper: temperature
+  scaling, Platt/beta calibration, isotonic calibration, or a small
+  group-conditioned calibration map can show whether the logits contain usable
+  probability information. Fit on validation or cross-fit train folds only.
+  Keep the branch only if central-band and global NLL improve without hiding a
+  weak semantic signal behind test-set calibration.
+- Consider multicalibration-style subgroup correction only when it is
+  split-safe and NLL-gated. It is relevant because semantic groups are
+  overlapping subpopulations, but group calibration alone is not success unless
+  it also improves central-band NLL and preserves accuracy/AUC.
+- Consider "refine, then calibrate" as the preferred sequence: first prove the
+  semantic target improves central-band ranking/resolution in a fixed-feature
+  ceiling; then calibrate the resulting score. Do not start with a richer
+  calibration map if the underlying semantic score has no NLL ceiling.
+- Losses such as focal loss, label smoothing, confidence penalties, or ranking
+  losses are allowed only if the smoke run shows central-band NLL movement.
+  Ignore them when they merely improve flips, ECE, AUC, or accuracy while NLL
+  remains static.
+
+Research ideas to ignore for this issue unless a smoke test proves NLL lift:
+
+- Pure threshold tuning, class-weighting, AUC/ranking objectives, hard flip
+  losses, or margin losses that do not produce calibrated probabilities.
+- Conformal prediction or coverage-only uncertainty wrappers; they may be useful
+  for intervals/sets, but they do not solve static NLL for point win rates.
+- Larger heads, more experts, wider sidecars, or confidence-gate sweeps without
+  a new target/data surface whose fixed-feature ceiling clears central NLL.
+
+Useful research references:
+
+- [Gneiting & Raftery, "Strictly Proper Scoring Rules, Prediction, and
+  Estimation" (2007)](https://sites.stat.washington.edu/raftery/Research/PDF/Gneiting2007jasa.pdf):
+  log-loss/NLL must be treated as probability quality.
+- [Kull & Flach, "Novel Decompositions of Proper Scoring Rules for
+  Classification" (2015)](https://research-information.bris.ac.uk/files/76351926/2015_ecml_decomposition_cameraready.pdf):
+  separate score adjustment/refinement from calibration.
+- [Guo et al., "On Calibration of Modern Neural Networks"
+  (2017)](https://arxiv.org/abs/1706.04599): temperature scaling is a simple
+  NLL/ECE calibration diagnostic, not a ranking fix.
+- [Kull, Silva Filho & Flach, "Beta calibration"
+  (2017)](https://proceedings.mlr.press/v54/kull17a.html): binary calibration
+  baseline beyond Platt scaling.
+- [Hebert-Johnson et al., "Multicalibration"
+  (2018)](https://proceedings.mlr.press/v80/hebert-johnson18a.html):
+  group/subpopulation calibration framing for overlapping semantic groups.
+- [Mukhoti et al., "Calibrating Deep Neural Networks using Focal Loss"
+  (2020)](https://proceedings.neurips.cc/paper_files/paper/2020/file/aeb7b30ef1d024a76f21a1d40e30c302-Paper.pdf):
+  consider only if it moves NLL, because this project rejects accuracy-only
+  gains.
+
 Required evaluation gates for a promotion candidate:
 
 - Global validation and test accuracy must move toward the hard `60% / 60%`
