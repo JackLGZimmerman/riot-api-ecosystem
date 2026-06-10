@@ -66,7 +66,8 @@ app/ml/data/group_context_audit_production.json
 
 `systematic_gap_mse` is in pp^2 and lower is better. On held-out splits, the raw
 target floor is ~0.18 pp^2 and the EB target floor is ~0.11 pp^2. Values below
-are from `app/ml/data/metrics_latest.json` for the promoted 128x32 checkpoint.
+are the frozen-boundary audit for the promoted 128x32 checkpoint; rerun this
+audit after rolled-split retraining before making a new promotion claim.
 
 | Split | bins | median n | min n | raw MSE | raw floor | EB MSE | EB floor | systematic | clipped | mean abs EB gap | max abs EB gap |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -78,8 +79,8 @@ Held-out production metrics from `app/ml/data/metrics_latest.json`:
 
 | Split | accuracy | AUC | NLL | ECE |
 |---|---:|---:|---:|---:|
-| Validation | 0.5789 | 0.6091 | 0.6732 | 0.0320 |
-| Test | 0.5730 | 0.6029 | 0.6762 | 0.0341 |
+| Validation | 0.5789 | 0.6091 | 0.672978 | 0.0320 |
+| Test | 0.5738 | 0.6029 | 0.675965 | 0.0341 |
 
 Train->test EB target movement: MSE 0.29 pp^2, mean abs 0.37 pp, max abs 2.14 pp
 over the same 67 bins.
@@ -89,13 +90,13 @@ over the same 67 bins.
 - The promoted `convex_encoder_mix` checkpoint clears the old calibration-weight
   concern. Validation systematic gap is **0.07 pp^2**, below the EB target floor
   of **0.11 pp^2** and far below the retired calibration-weight comparison.
-- Test systematic gap is higher at **0.23 pp^2**, but still in the range implied by
+- Test systematic gap is higher at **0.29 pp^2**, but still in the range implied by
   train->test target movement (**0.29 pp^2**). The remaining issue looks more like
   temporal/group drift and tail behavior than a broad validation calibration miss.
 - The largest validation residuals are concentrated in a few interpretable static
   contexts: armor/frontline tanks into high physical damage, marksmen into low enemy
   range count, AP casters into enemy magic profile, and MR tanks into magic bins.
-- The raw 60% accuracy target is still not met (`57.89%` val, `57.30%` test), but
+- The raw 60% accuracy target is still not met (`57.89%` val, `57.38%` test), but
   group-level semantic calibration is no longer the obvious bottleneck.
 - We did not prove that separate, per-encoder MoEs are better. The production win is
   specifically the learned convex mixer across static/full-game/temporal encoder
@@ -127,9 +128,10 @@ Rows are sorted by debiased `systematic_gap_mse`; `gap` is HGNN minus EB target.
 - The group EB audit should remain a promotion guard alongside accuracy, NLL, AUC,
   and ECE. It caught the noisy calibration-weight failure mode and now gives a clean
   read on whether semantic architecture changes generalize.
-- Next semantic work should focus on test-split residual tails and raw ranking /
-  accuracy lift. A separate MoE per encoder remains an untested architecture
-  hypothesis; this audit only validates the current convex encoder mixer.
+- Next semantic work should follow the rolled chronological split direction in
+  [EXPERIMENTS.md](EXPERIMENTS.md#next-data-direction). This audit should remain
+  a guardrail after the refreshed split-scoped artifacts are rebuilt, not the
+  reason to start another semantic capacity sweep.
 
 ## Reproduction
 

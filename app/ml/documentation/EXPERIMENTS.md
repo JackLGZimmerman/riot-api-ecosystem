@@ -312,3 +312,71 @@ Rolling the boundary regenerates split-scoped artifacts (filter tables,
 priors, encoder sidecars, semantic context tables, cache), so it is a
 deliberate pipeline operation, not a casual rerun. Promotion gates are
 unchanged and apply on the rolled windows.
+
+### Refreshed Data State (2026-06-10)
+
+The model-development data refresh completed through the documented ClickHouse
+path in `database/clickhouse/commands.md`: corrected participant rows, filter
+stages, `valid_game_ids`, filtered participant rows, item-value totals,
+`ml_game_split`, `ml_game_player_pivot`, active 6000/6020 priors, 7000
+dictionaries, compact encoder sidecar, and the v29 Python cache. The split and
+cache counts below are the verification anchor for this refreshed state.
+
+Raw `game_data.info` currently contains season 16 through patch 24, but the
+current ML-valid pool after filtering reaches patch 11. The refreshed v29 cache
+contains `1,647,915` games:
+
+| Split | Games | Season | Patch range | Timestamp range |
+|---|---:|---|---|---|
+| train | 1,318,331 | 16 | 1-9 | `1767834983987` - `1777993488223` |
+| validation | 164,792 | 16 | 9-10 | `1777993501649` - `1779515542851` |
+| test | 164,792 | 16 | 10-11 | `1779515564023` - `1780922846108` |
+
+Patch distribution:
+
+| Split | Patch rows |
+|---|---|
+| train | S16.1 `196,280`; S16.2 `166,734`; S16.3 `167,810`; S16.4 `136,967`; S16.5 `138,764`; S16.6 `159,109`; S16.7 `151,105`; S16.8 `122,466`; S16.9 `79,096` |
+| validation | S16.9 `76,521`; S16.10 `88,271` |
+| test | S16.10 `40,357`; S16.11 `124,435` |
+
+The compact sidecar was regenerated from train-only classification matrices and
+rewritten to `app/ml/data/semantic_identity_sidecar_compact.npz` (`5,518`
+identity rows; static/full-game/temporal dims `16/64/64`). `build_dataset` was
+then rerun so `app/ml/data/cache/cache_meta.json` records the refreshed sidecar
+metadata and split sizes.
+
+### Rolled Split Test Plan
+
+1. Freeze this refreshed data state as the candidate rolled-boundary protocol.
+   Record the split ranges above with every run so results are not compared
+   against the older Apr-22/S16.8 boundary by accident.
+2. Run a smoke train on seed `4` with the existing production recipe:
+   1vX prior, champion/build identity embeddings, Loadout, patch-only Temporal,
+   compact sidecar, semantic group features, and `convex_encoder_mix` 128x32.
+   Verify cache loading, sidecar gather, metric writing, and no-group ablation
+   evaluation before spending full training time.
+3. If the smoke is clean, run the full production recipe on seed `4` plus at
+   least one additional seed. Select only on validation; keep test untouched
+   until the predeclared candidate is fixed.
+4. For each seed, evaluate the full model and the no-group ablation on:
+   global validation/test, central `p_no_group in [0.45, 0.55]`, and diagnostic
+   `p_no_group in [0.475, 0.525]`.
+5. Apply validation selection gates first: central NLL lift at least `+0.003`,
+   central accuracy lift at least `+0.50pp`, positive global guardrails, and
+   non-regressing semantic direction/audit metrics. Do not inspect test while
+   choosing seeds, cadence, thresholds, teachers, or checkpoints.
+6. After the validation-selected candidate is fixed, run one final test
+   confirmation: central NLL lift at least `+0.002`, central accuracy lift at
+   least `+0.30pp`, and the same global/audit guardrails. If test fails, reject
+   the candidate; do not tune and retest on the same test window.
+7. Re-run `HGNN_GROUP_CONTEXT_AUDIT.md` and the high-support examples in
+   `HGNN_CONTEXT_EXAMPLES_AUDIT.md` as guardrails. Treat low-support context
+   examples as qualitative only, not max-gap evidence.
+8. Compare the rolled-boundary results to the old frozen-boundary production
+   checkpoint and the time-local teacher ceiling. The key question is whether
+   adding same-patch train history in a production-true split closes the
+   historical `~0.0015` central NLL plateau.
+9. If the refreshed protocol fails the NLL gates, reject another semantic
+   architecture sweep until a cheaper fixed-feature ceiling on the refreshed
+   split shows gate-level central NLL signal.

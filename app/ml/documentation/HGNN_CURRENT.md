@@ -15,6 +15,13 @@ plateau, so the next production lever is rolling the chronological split
 boundary forward (see EXPERIMENTS.md "Next Data Direction"), not model
 wiring.
 
+Data refresh note, 2026-06-10: the ClickHouse ML path, compact encoder sidecar,
+and v29 cache were rebuilt after newer season 16 data became available. The
+current cache now contains `1,647,915` games through the ML-valid S16.11 window
+(`1,318,331` train / `164,792` validation / `164,792` test). The promoted
+checkpoint and metrics below remain the previous production record until the
+rolled-split production recipe is retrained and evaluated.
+
 ## Production Path
 
 Default training and serving use the 1vX player prior, champion/build identity
