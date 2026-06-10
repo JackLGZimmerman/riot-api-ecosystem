@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
+
 WORK_POOL_NAME="${WORK_POOL_NAME:-docker-pool}"
 WORK_QUEUE_NAME="${WORK_QUEUE_NAME:-default}"
 DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-riot-pipeline/riot-pipeline}"

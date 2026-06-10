@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
+export RIOT_PROJECT_DIR="$PROJECT_ROOT"
+
 WORK_POOL_NAME="${WORK_POOL_NAME:-docker-pool}"
 WORK_QUEUE_NAME="${WORK_QUEUE_NAME:-default}"
 DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-riot-pipeline/riot-pipeline}"
@@ -19,6 +23,11 @@ case "${1:-}" in
     exit 2
     ;;
 esac
+
+if [ ! -f "$RIOT_PROJECT_DIR/.env" ]; then
+  echo "Missing $RIOT_PROJECT_DIR/.env; Prefect run containers need it mounted at /app/.env." >&2
+  exit 1
+fi
 
 echo "Stopping current pipeline"
 ./stop_pipeline_safely.sh

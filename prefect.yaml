@@ -31,8 +31,10 @@ deployments:
         user: "1000:1000"
         env:
           CLICKHOUSE_HOST: clickhouse
-        # RIOT_PROJECT_DIR must be exported to the absolute repo root before
-        # `prefect deploy` (the docker work pool mounts host paths into the job).
+          HOME: /tmp
+          PREFECT_HOME: /tmp/.prefect
+        # restart.sh exports RIOT_PROJECT_DIR to the absolute repo root before
+        # deploy; do the same for manual `prefect deploy` runs.
         volumes:
           - "{{ $RIOT_PROJECT_DIR }}/.env:/app/.env:ro"
           - "{{ $RIOT_PROJECT_DIR }}/app/core/logging/logs:/app/app/core/logging/logs"
