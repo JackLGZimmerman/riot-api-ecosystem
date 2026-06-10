@@ -70,8 +70,8 @@ For clustering, use the exported `latent_*` columns keyed by
 `champion_id`, `teamposition_id`, and `build_id`; keep `--neighbor-k 10` on
 regeneration runs so semantic-neighborhood preservation is visible next to MSE.
 For HGNN semantic-context experiments, package static, full-game, and temporal
-latents plus support into the encoder sidecar artifact and enable
-`use_identity_semantic_context_head=True`.
+latents plus support into the encoder sidecar artifact and enable the learned
+semantic MoE production path.
 
 If the embedding pipeline reports a stale `classification_identity_base`
 catalogue hash or missing context columns, rebuild the classification

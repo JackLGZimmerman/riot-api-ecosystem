@@ -3,8 +3,7 @@
 PyTorch baseline that learns full-game behavioral identity representations from
 normalized historical profile/context rows. Implementation:
 `app/classification/full_game_encoder.py`. Standalone — exported latents feed the
-**optional** HGNN identity-encoder sidecar path and semantic-context head, both
-disabled by default.
+HGNN semantic MoE sidecar path used by production testing.
 
 ## Goal
 

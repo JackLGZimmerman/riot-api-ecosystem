@@ -351,8 +351,8 @@ metadata and split sizes.
 Execution note, 2026-06-10: the rolled-split production recipe is being
 evaluated with the active defaults from `HGNN_CURRENT.md`: `convex_encoder_mix`
 128x32, compact sidecar, semantic group features, batch `16384`, learning rate
-`3e-4`, `max_epochs=40`, `patience=5`, `checkpoint_metric=val_accuracy`, and
-seeds `4` and `5`. Candidate artifacts are written under
+`3e-4`, `max_epochs=40`, `patience=5`, validation-accuracy checkpoint
+selection, and seeds `4` and `5`. Candidate artifacts are written under
 `app/ml/data/experiments/rolled_split_production/` until promotion gates are
 checked.
 

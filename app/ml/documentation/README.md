@@ -75,14 +75,15 @@ MoE checkpoint copied into `app/ml/data/hgnn_production_model.pt`.
 the frozen static, full-game, and temporal identity sidecars. The promoted
 architecture is `convex_encoder_mix`, selected because it kept all three encoder
 views present while producing the lowest validation group-EB semantic gap in the
-architecture matrix. The older `use_identity_semantic_context_head` path remains
-available as research capacity, but it is not the promoted default.
+architecture matrix. The older identity semantic context head remains a
+model-level research path only; `train.py` production testing uses the learned
+semantic MoE route.
 
 ## Training
 
 `app/ml/train.py` trains one production model shape with AdamW, team-swap
-augmentation, validation temperature diagnostics, and validation
-threshold-accuracy checkpointing.
+augmentation, validation temperature diagnostics, and raw validation-accuracy
+checkpointing.
 
 Each batch is trained twice: original blue/red order with label `y`, and a
 team-swapped mirror with label `1 - y`.

@@ -167,54 +167,6 @@ def test_train_gathers_sidecar_for_learned_moe_from_artifact_without_per_game_ar
         assert "regularization_loss" in moe_diagnostics
 
 
-def test_train_gathers_sidecar_for_semantic_context_from_artifact_without_per_game_arrays(
-    tmp_path,
-) -> None:
-    rng = np.random.default_rng(1)
-    cache_dir = tmp_path / "cache"
-    artifact_path = tmp_path / "sidecar.npz"
-    _write_v28_cache(cache_dir, artifact_path, rng=rng)
-
-    assert not (cache_dir / "identity_full_game_sidecar.npy").exists()
-
-    model_path = tmp_path / "model.pt"
-    metrics_path = tmp_path / "metrics.json"
-    train(
-        DatasetConfig(cache_dir=cache_dir, encoder_sidecar_path=artifact_path),
-        TrainConfig(
-            model_path=model_path,
-            metrics_path=metrics_path,
-            max_epochs=1,
-            patience=1,
-            device="cpu",
-        ),
-        model_overrides={
-            "use_identity_semantic_context_head": True,
-            "node_dim": 16,
-            "edge_hidden": 8,
-            "value_hidden": (),
-            "gate_hidden": (),
-            "node_init_hidden": (),
-            "readout_hidden": (),
-            "semantic_context_dim": 8,
-            "semantic_context_hidden": (),
-        },
-    )
-
-    assert model_path.exists()
-    model, config, _ = load_hgnn_model(model_path)
-    assert config.use_identity_semantic_context_head is True
-    assert config.use_learned_semantic_moe is False
-    assert config.identity_full_game_sidecar_dim == SIDE_DIMS["full_game"]
-    assert model.identity_semantic_context is not None
-    assert model.learned_semantic_moe is None
-
-    metrics = json.loads(metrics_path.read_text())
-    for split_name in ("train", "val", "test"):
-        assert "logit_diagnostics" in metrics[split_name]
-        assert "semantic_moe_diagnostics" not in metrics[split_name]
-
-
 def test_train_gathers_sidecar_and_semantic_group_features_from_v28_cache(
     tmp_path,
 ) -> None:

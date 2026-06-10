@@ -198,21 +198,19 @@ is zero-initialised) lets the optimiser grow the context correction, countering
 the systematic effect-shrinkage seen in the audit. The model returns all three
 columns: `base_logit`, `context_logit`, and `final_logit`.
 
-Two report-only tuning knobs target the same audit gap without per-grouping
-fitting: `--auc-ranking-loss-weight` (ranking loss that weights rare extreme
-contexts equally with the common middle) and `--semantic-context-support-strength`
-(lower to amplify context magnitude). Both default off/30.
+Production testing now treats semantic gap checks as diagnostics rather than
+training objectives. The retired ranking and calibration-loss runners are not
+part of the maintained `train.py` surface.
 
 `HGNNConfig.use_learned_semantic_moe=True` enables the learned mixture-of-experts
 context path over the same required sidecar inputs plus the champion, role,
 build, and fused identity embeddings. Production defaults enable this path with
 `semantic_moe_architecture="convex_encoder_mix"`. It builds support/log-support
 sidecar tokens, derives own / ally / enemy / extremity factors, routes each slot
-through top-k experts (production default 32 of 128), support-gates zero-initialised slot
-deltas, and adds `semantic_moe_logit` into `context_logit`. It can run alone or
-alongside the identity semantic context head; training consumes
-`semantic_moe_regularization_loss` and reports router usage, entropy, factor
-diversity, token-dropout, and delta diagnostics.
+through top-k experts (production default 32 of 128), support-gates
+zero-initialised slot deltas, and adds `semantic_moe_logit` into `context_logit`.
+Production training consumes `semantic_moe_regularization_loss` and reports
+router usage, entropy, factor diversity, token-dropout, and delta diagnostics.
 
 When `use_semantic_group_features=True`, the learned MoE also receives the
 compact semantic group feature tensor from `app/ml/semantic_group_features.py`.
@@ -232,15 +230,12 @@ tankiness remain available without reading the large per-game
 Since the context audit is slot-specific, checkpoints with MoE slot deltas are
 now audited with focus-side probabilities rather than one repeated match-level
 probability. Blue slots are scored in the blue frame; red slots are scored in the
-mirrored red frame. `--semantic-context-calibration-loss-weight` adds a
-slot-aware calibration objective over the same audit specs, with stable
-train-split empirical targets and optional tail weighting, so gradients flow
-directly into semantic slot deltas. The promoted production checkpoint is now
-`app/ml/data/hgnn_production_model.pt`, copied from the seed-4
-`convex_encoder_mix` architecture run. On the checked-in focus-slot context
-audit it reports validation Gap MSE `5.39 pp^2`, mean absolute gap `1.69 pp`,
-and max absolute gap `10.12 pp`; the lower-variance group EB audit is the
-semantic promotion selector.
+mirrored red frame. These audits are validation diagnostics for the promoted
+production checkpoint at `app/ml/data/hgnn_production_model.pt`, copied from the
+seed-4 `convex_encoder_mix` architecture run. On the checked-in focus-slot
+context audit it reports validation Gap MSE `5.39 pp^2`, mean absolute gap
+`1.69 pp`, and max absolute gap `10.12 pp`; the lower-variance group EB audit is
+the semantic promotion selector.
 
 ### Semantic Architecture
 
@@ -264,9 +259,8 @@ The seed-4 sweeps varied only `semantic_moe_num_experts` and
 start, semantic group features, focus-side context examples audit, and group EB
 audit. The ablation runner used the config from `metrics_latest.json`
 (`learning_rate=1e-4`, `batch_size=32768`, `max_epochs=40`, `patience=5`,
-`checkpoint_metric=val_accuracy`, `semantic_context_calibration_target=group_eb`,
-`semantic_context_calibration_loss_weight=10.0`), which differs from the
-production defaults documented above (`3e-4`, `16384`).
+validation-accuracy checkpoint selection), which differs from the production
+defaults documented above (`3e-4`, `16384`).
 
 Primary context ranking was the mean of validation/test flagged
 support-weighted mean absolute gap from `HGNN_CONTEXT_EXAMPLES_AUDIT.md`; lower
@@ -376,7 +370,7 @@ flowchart TD
 | [../loadout_patch_features.py](../loadout_patch_features.py) | Production train-only loadout priors and patch-only temporal feature extraction. |
 | [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and sidecar metadata. |
 | [../dataset.py](../dataset.py) | Cache loader and split dataclass. |
-| [../train.py](../train.py) | Production training and validation/report-only calibration diagnostics. |
+| [../train.py](../train.py) | Production training, validation, and semantic gap diagnostics. |
 | [../predictor.py](../predictor.py) | Draft-time runtime bridge. |
 
 ## Throughput Default
@@ -408,7 +402,7 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 
 | Area | Default |
 | --- | --- |
-| Checkpoint metric | `val_accuracy` |
+| Checkpoint selection | validation accuracy |
 | Training batch size / throughput | `16384`; `51,505` augmented samples/s on the 2026-06-10 local RTX 5070 Ti sweep for the current 128x32 recipe. |
 | Learning rate / patience / weight decay | `3e-4` / `5` / `0.0` |
 | Report-only temperature scaling | Fit on validation logits only; never changes served probabilities. |
@@ -416,11 +410,9 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 | Loadout head | Production-on with v29 cache metadata and `loadout_features.npy`. |
 | Patch-only Temporal head | Production-on with v29 cache metadata and `patch_features.npy`; season/patch blue-side drift only. |
 | Identity-encoder node-init sidecar MLPs (static/full-game/temporal) | Disabled by default. |
-| Identity semantic context head over all three identity sidecars | Disabled by default. |
 | Learned semantic MoE head over all three identity sidecars | Enabled by default with `convex_encoder_mix`. |
 | Semantic group features and relationship head | Enabled by default for the learned semantic MoE. |
-| Semantic context calibration loss | Disabled by default; research/audit optimization only. |
 
-Invalid calibration and training config combinations fail early in
-`app/ml/train.py`. Test labels are not used for threshold selection,
-temperature fitting, checkpoint selection, or model selection.
+Invalid training config combinations fail early in `app/ml/train.py`. Test
+labels are not used for threshold selection, temperature fitting, checkpoint
+selection, or model selection.

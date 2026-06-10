@@ -16,7 +16,7 @@ import math
 import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator
 
 import numpy as np
 import torch
@@ -27,12 +27,9 @@ from app.core.logging.logger import setup_logging_config
 from app.ml.config import DEFAULT_TRAIN_BATCH_CAP, DatasetConfig, TrainConfig
 from app.ml.context_audit_lens import AuditLens
 from app.ml.context_audit_specs import (
-    AuditSpec,
-    POSITIONS,
     audit_specs,
     eb_shrink_targets,
     group_audit_specs,
-    training_group_audit_specs,
 )
 from app.ml.dataset import SplitData, identity_meta, load_splits
 from app.ml.encoder_sidecar import EncoderSidecarLookup, SidecarGatherTables
@@ -43,18 +40,6 @@ from app.ml.hgnn_model import (
     build_hgnn_inputs,
     save_hgnn_model,
     swap_hgnn_inputs,
-)
-from app.ml.loadout_patch_features import (
-    LOADOUT_SIGNED_FEATURE_INDICES,
-    PATCH_SIGNED_FEATURE_INDICES,
-)
-from app.ml.semantic_group_features import (
-    CONTEXT_AXIS_INDEX,
-    FOCUS_HP_LOW_THRESHOLD,
-    HIGH_HP_THRESHOLD,
-    LOW_OWN_DAMAGE_THRESHOLD,
-    SEMANTIC_GROUP_FEATURE_INDEX,
-    static_hp_range_lookups,
 )
 
 setup_logging_config()
@@ -157,7 +142,6 @@ def _model_uses_sidecar(config: HGNNConfig) -> bool:
         config.use_identity_static_sidecar
         or config.use_identity_full_game_sidecar
         or config.use_identity_temporal_sidecar
-        or config.use_identity_semantic_context_head
         or config.use_learned_semantic_moe
     )
 
@@ -219,24 +203,18 @@ def _limit_split(split: SplitData, max_games: int | None) -> SplitData:
 def _drop_unused_model_arrays(
     split: SplitData,
     config: HGNNConfig,
-    *,
-    keep_semantic_group_features: bool = False,
 ) -> SplitData:
     """Null out optional sidecar arrays when the configured model ignores them."""
     sidecar_enabled = (
         config.use_identity_static_sidecar
         or config.use_identity_full_game_sidecar
         or config.use_identity_temporal_sidecar
-        or config.use_identity_semantic_context_head
         or config.use_learned_semantic_moe
     )
     semantic_group_features_enabled = bool(
-        keep_semantic_group_features
-        or (config.use_learned_semantic_moe and config.use_semantic_group_features)
+        config.use_learned_semantic_moe and config.use_semantic_group_features
     )
-    requires_all_sidecars = bool(
-        config.use_identity_semantic_context_head or config.use_learned_semantic_moe
-    )
+    requires_all_sidecars = bool(config.use_learned_semantic_moe)
     if requires_all_sidecars:
         sidecar_names = (
             "identity_static_sidecar",
@@ -250,7 +228,7 @@ def _drop_unused_model_arrays(
         if present and len(present) < len(sidecar_names):
             missing = [name for name in sidecar_names if getattr(split, name) is None]
             raise ValueError(
-                "semantic context/MoE head requires cache arrays: "
+                "semantic MoE head requires cache arrays: "
                 + ", ".join(missing)
                 + ". Rebuild the dataset cache with encoder_sidecar_path set "
                 "to a valid three-latent sidecar artifact."
@@ -264,12 +242,12 @@ def _drop_unused_model_arrays(
                 value = getattr(split, name)
                 if value.ndim != 3 or value.shape[1] != 10 or value.shape[2] <= 0:
                     raise ValueError(
-                        f"semantic context/MoE heads require non-empty {name} [games, 10, dim]"
+                        f"semantic MoE head requires non-empty {name} [games, 10, dim]"
                     )
             support = split.identity_encoder_support
             if support.ndim != 2 or support.shape[1] != 10:
                 raise ValueError(
-                    "semantic context/MoE heads require identity_encoder_support [games, 10]"
+                    "semantic MoE head requires identity_encoder_support [games, 10]"
                 )
     drop: dict[str, bool] = {
         "identity_static_sidecar": not (
@@ -584,26 +562,6 @@ SUPPORT_BUCKETS: tuple[tuple[str, float, float], ...] = (
 )
 
 
-CHECKPOINT_METRICS = frozenset(
-    {
-        "val_threshold_accuracy",
-        "val_accuracy",
-        "val_auc",
-        "val_nll",
-        "val_nll_ece",
-        "val_context_gap_mse",
-        "val_context_high_support_max_abs_gap",
-        "val_group_eb_gap_mse",
-        "val_group_systematic_gap_mse",
-        "val_group_systematic_gap_mse_clipped",
-        "val_group_floor_normalized_eb_gap",
-        "val_group_context_high_support_tail",
-        "val_group_clipped_nll_ece",
-        "val_group_first_clipped_nll_ece",
-    }
-)
-
-
 def _resolve_hgnn_overrides_from_meta(
     overrides: dict[str, Any],
 ) -> dict[str, Any]:
@@ -879,136 +837,6 @@ def _attach_output_diagnostics(
             split_metrics[split_name]["semantic_moe_diagnostics"] = semantic_moe
 
 
-def _semantic_gradient_parameter_groups(
-    model: HGNNWinModel,
-) -> tuple[tuple[torch.nn.Parameter, ...], tuple[torch.nn.Parameter, ...]]:
-    semantic_moe_params: list[torch.nn.Parameter] = []
-    group_relationship_params: list[torch.nn.Parameter] = []
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad or "learned_semantic_moe" not in name:
-            continue
-        if "group_relationship" in name:
-            group_relationship_params.append(parameter)
-        else:
-            semantic_moe_params.append(parameter)
-    return tuple(semantic_moe_params), tuple(group_relationship_params)
-
-
-def _gradient_vector(
-    loss: torch.Tensor,
-    parameters: Sequence[torch.nn.Parameter],
-) -> torch.Tensor | None:
-    if not parameters or not loss.requires_grad:
-        return None
-    gradients = torch.autograd.grad(
-        loss,
-        tuple(parameters),
-        retain_graph=True,
-        allow_unused=True,
-    )
-    vectors = [
-        (
-            torch.zeros_like(parameter).detach().flatten()
-            if gradient is None
-            else gradient.detach().flatten()
-        )
-        for parameter, gradient in zip(parameters, gradients)
-    ]
-    if not vectors:
-        return None
-    return torch.cat(vectors)
-
-
-def _vector_norm(value: torch.Tensor | None) -> float:
-    if value is None:
-        return float("nan")
-    return float(value.norm().cpu().item())
-
-
-def _vector_cosine(left: torch.Tensor | None, right: torch.Tensor | None) -> float:
-    if left is None or right is None:
-        return float("nan")
-    left_norm = left.norm()
-    right_norm = right.norm()
-    if float(left_norm.cpu().item()) <= 0.0 or float(right_norm.cpu().item()) <= 0.0:
-        return float("nan")
-    return float(torch.dot(left, right).div(left_norm * right_norm).cpu().item())
-
-
-def _semantic_calibration_gradient_diagnostics(
-    *,
-    bce_loss: torch.Tensor,
-    context_loss: torch.Tensor,
-    semantic_moe_params: Sequence[torch.nn.Parameter],
-    group_relationship_params: Sequence[torch.nn.Parameter],
-) -> dict[str, float]:
-    semantic_bce = _gradient_vector(bce_loss, semantic_moe_params)
-    semantic_context = _gradient_vector(context_loss, semantic_moe_params)
-    group_bce = _gradient_vector(bce_loss, group_relationship_params)
-    group_context = _gradient_vector(context_loss, group_relationship_params)
-    return {
-        "semantic_moe_bce_grad_norm": _vector_norm(semantic_bce),
-        "semantic_moe_context_grad_norm": _vector_norm(semantic_context),
-        "semantic_moe_grad_cosine": _vector_cosine(semantic_bce, semantic_context),
-        "group_relationship_bce_grad_norm": _vector_norm(group_bce),
-        "group_relationship_context_grad_norm": _vector_norm(group_context),
-        "group_relationship_grad_cosine": _vector_cosine(group_bce, group_context),
-    }
-
-
-def _checkpoint_score(
-    metric: str,
-    *,
-    val_metrics: dict[str, float | int],
-    val_threshold_accuracy: float,
-) -> float:
-    if metric == "val_threshold_accuracy":
-        return val_threshold_accuracy
-    if metric == "val_accuracy":
-        return float(val_metrics["accuracy"])
-    if metric == "val_auc":
-        return float(val_metrics["auc"])
-    if metric == "val_nll":
-        return -float(val_metrics["nll"])
-    if metric == "val_nll_ece":
-        return -(float(val_metrics["nll"]) + float(val_metrics["ece"]))
-    if metric == "val_context_gap_mse":
-        return -float(val_metrics["context_gap_mse"])
-    if metric == "val_context_high_support_max_abs_gap":
-        value = float(val_metrics["context_high_support_max_abs_gap"])
-        return -value if math.isfinite(value) else -math.inf
-    if metric == "val_group_eb_gap_mse":
-        return -float(val_metrics["group_eb_gap_mse"])
-    if metric == "val_group_systematic_gap_mse":
-        return -float(val_metrics["group_systematic_gap_mse"])
-    if metric == "val_group_systematic_gap_mse_clipped":
-        return -float(val_metrics["group_systematic_gap_mse_clipped"])
-    if metric == "val_group_floor_normalized_eb_gap":
-        floor = max(float(val_metrics.get("group_eb_floor", 0.0)), EPS)
-        return -(float(val_metrics["group_eb_gap_mse"]) / floor)
-    if metric == "val_group_context_high_support_tail":
-        group_gap_mse = float(val_metrics["group_eb_gap_mse"])
-        context_tail = float(val_metrics["context_high_support_max_abs_gap"])
-        if not math.isfinite(group_gap_mse) or not math.isfinite(context_tail):
-            return -math.inf
-        return -(group_gap_mse + context_tail**2)
-    if metric == "val_group_clipped_nll_ece":
-        return -(
-            float(val_metrics["group_systematic_gap_mse_clipped"])
-            + 100.0 * float(val_metrics["nll"])
-            + 100.0 * float(val_metrics["ece"])
-        )
-    if metric == "val_group_first_clipped_nll_ece":
-        return -(
-            100.0 * float(val_metrics["group_systematic_gap_mse_clipped"])
-            + float(val_metrics["nll"])
-            + float(val_metrics["ece"])
-        )
-    raise ValueError(
-        f"checkpoint_metric must be one of: {', '.join(sorted(CHECKPOINT_METRICS))}"
-    )
-
-
 def _validate_train_config(train_cfg: TrainConfig) -> None:
     if train_cfg.batch_size < 1:
         raise ValueError("batch_size must be >= 1")
@@ -1021,14 +849,6 @@ def _validate_train_config(train_cfg: TrainConfig) -> None:
         raise ValueError("train_epoch_max_games must be >= 0")
     if train_cfg.raw_tensor_cache_device not in {"model", "cpu"}:
         raise ValueError("raw_tensor_cache_device must be 'model' or 'cpu'")
-    if train_cfg.checkpoint_metric not in CHECKPOINT_METRICS:
-        raise ValueError(
-            f"checkpoint_metric must be one of: {', '.join(sorted(CHECKPOINT_METRICS))}"
-        )
-    if train_cfg.auc_ranking_loss_weight < 0.0:
-        raise ValueError("auc_ranking_loss_weight must be >= 0")
-    if train_cfg.auc_ranking_loss_pairs < 1:
-        raise ValueError("auc_ranking_loss_pairs must be >= 1")
     if (
         train_cfg.freeze_warm_start_loaded_parameters
         and train_cfg.warm_start_model_path is None
@@ -1036,101 +856,8 @@ def _validate_train_config(train_cfg: TrainConfig) -> None:
         raise ValueError(
             "freeze_warm_start_loaded_parameters requires warm_start_model_path"
         )
-    if train_cfg.semantic_context_calibration_loss_weight < 0.0:
-        raise ValueError("semantic_context_calibration_loss_weight must be >= 0")
-    if train_cfg.semantic_context_calibration_min_count < 1:
-        raise ValueError("semantic_context_calibration_min_count must be >= 1")
-    if train_cfg.semantic_context_calibration_tail_weight <= 0.0:
-        raise ValueError("semantic_context_calibration_tail_weight must be > 0")
-    if train_cfg.semantic_context_calibration_group_surface not in {
-        "full",
-        "train_core",
-    }:
-        raise ValueError(
-            "semantic_context_calibration_group_surface must be 'full' or 'train_core'"
-        )
-    if train_cfg.semantic_context_calibration_bin_weighting not in {
-        "uniform",
-        "support_family",
-    }:
-        raise ValueError(
-            "semantic_context_calibration_bin_weighting must be 'uniform' or "
-            "'support_family'"
-        )
-    if train_cfg.semantic_context_calibration_objective not in {
-        "absolute",
-        "residual",
-    }:
-        raise ValueError(
-            "semantic_context_calibration_objective must be 'absolute' or 'residual'"
-        )
-    for name in (
-        "semantic_context_calibration_group_residual_shrink_strength",
-        "semantic_context_calibration_context_residual_shrink_strength",
-    ):
-        if float(getattr(train_cfg, name)) < 0.0:
-            raise ValueError(f"{name} must be >= 0")
-    for name in (
-        "semantic_context_calibration_group_residual_clip",
-        "semantic_context_calibration_context_residual_clip",
-    ):
-        if float(getattr(train_cfg, name)) <= 0.0:
-            raise ValueError(f"{name} must be > 0")
-    for name in (
-        "semantic_context_calibration_group_residual_scale",
-        "semantic_context_calibration_context_residual_scale",
-    ):
-        if float(getattr(train_cfg, name)) < 0.0:
-            raise ValueError(f"{name} must be >= 0")
-    if train_cfg.semantic_context_calibration_residual_loss not in {
-        "mse",
-        "uncertainty_huber",
-    }:
-        raise ValueError(
-            "semantic_context_calibration_residual_loss must be 'mse' or "
-            "'uncertainty_huber'"
-        )
-    if (
-        train_cfg.semantic_context_calibration_residual_loss != "mse"
-        and train_cfg.semantic_context_calibration_objective != "residual"
-    ):
-        raise ValueError(
-            "semantic_context_calibration_residual_loss='uncertainty_huber' "
-            "requires semantic_context_calibration_objective='residual'"
-        )
-    if train_cfg.semantic_context_calibration_uncertainty_band_scale < 0.0:
-        raise ValueError(
-            "semantic_context_calibration_uncertainty_band_scale must be >= 0"
-        )
-    if train_cfg.semantic_context_calibration_uncertainty_huber_delta <= 0.0:
-        raise ValueError(
-            "semantic_context_calibration_uncertainty_huber_delta must be > 0"
-        )
-    if train_cfg.semantic_context_calibration_holdout_mode not in {
-        "none",
-        "even_odd",
-    }:
-        raise ValueError(
-            "semantic_context_calibration_holdout_mode must be 'none' or 'even_odd'"
-        )
-    if train_cfg.semantic_context_calibration_holdout_fold not in {0, 1}:
-        raise ValueError("semantic_context_calibration_holdout_fold must be 0 or 1")
     if train_cfg.semantic_context_metric_min_count < 1:
         raise ValueError("semantic_context_metric_min_count must be >= 1")
-    if train_cfg.semantic_context_calibration_gradient_diagnostics_epochs < 0:
-        raise ValueError(
-            "semantic_context_calibration_gradient_diagnostics_epochs must be >= 0"
-        )
-    if train_cfg.semantic_context_calibration_target not in {
-        "champion_raw",
-        "context_eb",
-        "group_eb",
-        "group_context_eb",
-    }:
-        raise ValueError(
-            "semantic_context_calibration_target must be 'champion_raw', "
-            "'context_eb', 'group_eb', or 'group_context_eb'"
-        )
 
 
 def _parse_int_tuple(value: str) -> tuple[int, ...]:
@@ -1350,39 +1077,6 @@ def _predict_hgnn_outputs(
     return result
 
 
-def _auc_ranking_loss(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    weight: float,
-    max_pairs: int,
-) -> torch.Tensor:
-    if weight <= 0.0:
-        return logits.new_zeros(())
-    positives = logits[labels > 0.5]
-    negatives = logits[labels <= 0.5]
-    if positives.numel() == 0 or negatives.numel() == 0:
-        return logits.new_zeros(())
-
-    n_all_pairs = positives.numel() * negatives.numel()
-    if n_all_pairs <= max_pairs:
-        margins = positives[:, None] - negatives[None, :]
-    else:
-        pos_idx = torch.randint(
-            positives.numel(), (int(max_pairs),), device=logits.device
-        )
-        neg_idx = torch.randint(
-            negatives.numel(), (int(max_pairs),), device=logits.device
-        )
-        margins = positives[pos_idx] - negatives[neg_idx]
-    return float(weight) * torch.nn.functional.softplus(-margins).mean()
-
-
-def _side_probabilities_torch(logits: torch.Tensor) -> torch.Tensor:
-    blue = torch.sigmoid(logits).view(-1, 1)
-    return torch.cat([blue.expand(-1, 5), (1.0 - blue).expand(-1, 5)], dim=1)
-
-
 def _focus_side_logits_from_outputs(
     outputs: dict[str, torch.Tensor],
     *,
@@ -1434,15 +1128,6 @@ def _focus_side_probabilities_from_outputs(
     return torch.sigmoid(_focus_side_logits_from_outputs(outputs))
 
 
-def _probability_logit_torch(values: torch.Tensor) -> torch.Tensor:
-    return torch.logit(values.clamp(1.0e-5, 1.0 - 1.0e-5))
-
-
-def _side_labels_torch(labels: torch.Tensor) -> torch.Tensor:
-    blue = labels.to(dtype=torch.float32).view(-1, 1)
-    return torch.cat([blue.expand(-1, 5), (1.0 - blue).expand(-1, 5)], dim=1)
-
-
 def _side_probabilities_np(scores: np.ndarray) -> np.ndarray:
     array = np.asarray(scores, dtype=np.float64)
     if array.ndim == 2:
@@ -1461,909 +1146,6 @@ def _side_labels_np(labels: np.ndarray) -> np.ndarray:
     return np.concatenate(
         [np.repeat(blue, 5, axis=1), np.repeat(1.0 - blue, 5, axis=1)],
         axis=1,
-    )
-
-
-def _team_feature_average_torch(
-    features: torch.Tensor,
-    feature_name: str,
-    *,
-    enemy: bool,
-) -> torch.Tensor:
-    values = features[:, :, SEMANTIC_GROUP_FEATURE_INDEX[feature_name]]
-    blue = values[:, :5].mean(dim=1)
-    red = values[:, 5:].mean(dim=1)
-    blue_focus = red if enemy else blue
-    red_focus = blue if enemy else red
-    return torch.cat(
-        [blue_focus[:, None].expand(-1, 5), red_focus[:, None].expand(-1, 5)],
-        dim=1,
-    )
-
-
-def _side_feature_count_torch(
-    features: torch.Tensor,
-    feature_name: str,
-    *,
-    enemy: bool,
-) -> torch.Tensor:
-    values = features[:, :, SEMANTIC_GROUP_FEATURE_INDEX[feature_name]] > 0.5
-    blue = values[:, :5].sum(dim=1).to(dtype=torch.float32)
-    red = values[:, 5:].sum(dim=1).to(dtype=torch.float32)
-    blue_focus = red if enemy else blue
-    red_focus = blue if enemy else red
-    return torch.cat(
-        [blue_focus[:, None].expand(-1, 5), red_focus[:, None].expand(-1, 5)],
-        dim=1,
-    )
-
-
-def _team_feature_average_np(
-    features: np.ndarray,
-    feature_name: str,
-    *,
-    enemy: bool,
-) -> np.ndarray:
-    values = features[:, :, SEMANTIC_GROUP_FEATURE_INDEX[feature_name]]
-    blue = values[:, :5].mean(axis=1)
-    red = values[:, 5:].mean(axis=1)
-    blue_focus = red if enemy else blue
-    red_focus = blue if enemy else red
-    return np.concatenate(
-        [
-            np.repeat(blue_focus[:, None], 5, axis=1),
-            np.repeat(red_focus[:, None], 5, axis=1),
-        ],
-        axis=1,
-    )
-
-
-def _side_feature_count_np(
-    features: np.ndarray,
-    feature_name: str,
-    *,
-    enemy: bool,
-) -> np.ndarray:
-    values = features[:, :, SEMANTIC_GROUP_FEATURE_INDEX[feature_name]] > 0.5
-    blue = values[:, :5].sum(axis=1).astype(np.float64)
-    red = values[:, 5:].sum(axis=1).astype(np.float64)
-    blue_focus = red if enemy else blue
-    red_focus = blue if enemy else red
-    return np.concatenate(
-        [
-            np.repeat(blue_focus[:, None], 5, axis=1),
-            np.repeat(red_focus[:, None], 5, axis=1),
-        ],
-        axis=1,
-    )
-
-
-def _slot_hp_torch(champion_id: torch.Tensor, hp_lookup: torch.Tensor) -> torch.Tensor:
-    valid = (champion_id >= 0) & (champion_id < hp_lookup.numel())
-    clamped = champion_id.clamp(0, max(int(hp_lookup.numel()) - 1, 0))
-    return torch.where(
-        valid, hp_lookup[clamped], hp_lookup.new_zeros(champion_id.shape)
-    )
-
-
-def _slot_hp_np(champion_id: np.ndarray, hp_lookup: np.ndarray) -> np.ndarray:
-    champions = np.asarray(champion_id, dtype=np.int64)
-    out = np.zeros(champions.shape, dtype=np.float64)
-    valid = (champions >= 0) & (champions < hp_lookup.shape[0])
-    out[valid] = hp_lookup[champions[valid]]
-    return out
-
-
-def _audit_axis_torch(features: torch.Tensor, spec: AuditSpec) -> torch.Tensor:
-    axis = spec.axis
-    if axis.startswith("enemy_") and axis.removeprefix("enemy_") in CONTEXT_AXIS_INDEX:
-        return _team_feature_average_torch(
-            features,
-            axis.removeprefix("enemy_"),
-            enemy=True,
-        )
-    if axis.startswith("ally_") and axis.removeprefix("ally_") in CONTEXT_AXIS_INDEX:
-        return _team_feature_average_torch(
-            features,
-            axis.removeprefix("ally_"),
-            enemy=False,
-        )
-    if axis == "enemy_burst_count":
-        return _side_feature_count_torch(features, "burst", enemy=True)
-    if axis == "enemy_hard_cc_count":
-        return _side_feature_count_torch(features, "hard_cc", enemy=True)
-    if axis == "enemy_frontline_count":
-        return _side_feature_count_torch(features, "frontline", enemy=True)
-    if axis == "enemy_heavy_taken_count":
-        return _side_feature_count_torch(features, "heavy_taken", enemy=True)
-    if axis == "enemy_high_hp_count":
-        return _side_feature_count_torch(features, "high_hp", enemy=True)
-    if axis == "enemy_ranged_count":
-        return _side_feature_count_torch(features, "ranged", enemy=True)
-    if axis == "same_role_range":
-        ranged = features[:, :, SEMANTIC_GROUP_FEATURE_INDEX["same_role_range"]] > 0.5
-        return torch.where(
-            ranged,
-            features.new_full(ranged.shape, 251.0),
-            features.new_full(ranged.shape, 250.0),
-        )
-    if axis == "ally_skirmish_count":
-        return _side_feature_count_torch(features, "skirmish", enemy=False)
-    raise ValueError(f"unknown audit axis: {axis}")
-
-
-def _audit_axis_np(features: np.ndarray, spec: AuditSpec) -> np.ndarray:
-    axis = spec.axis
-    if axis.startswith("enemy_") and axis.removeprefix("enemy_") in CONTEXT_AXIS_INDEX:
-        return _team_feature_average_np(
-            features, axis.removeprefix("enemy_"), enemy=True
-        )
-    if axis.startswith("ally_") and axis.removeprefix("ally_") in CONTEXT_AXIS_INDEX:
-        return _team_feature_average_np(
-            features, axis.removeprefix("ally_"), enemy=False
-        )
-    if axis == "enemy_burst_count":
-        return _side_feature_count_np(features, "burst", enemy=True)
-    if axis == "enemy_hard_cc_count":
-        return _side_feature_count_np(features, "hard_cc", enemy=True)
-    if axis == "enemy_frontline_count":
-        return _side_feature_count_np(features, "frontline", enemy=True)
-    if axis == "enemy_heavy_taken_count":
-        return _side_feature_count_np(features, "heavy_taken", enemy=True)
-    if axis == "enemy_high_hp_count":
-        return _side_feature_count_np(features, "high_hp", enemy=True)
-    if axis == "enemy_ranged_count":
-        return _side_feature_count_np(features, "ranged", enemy=True)
-    if axis == "same_role_range":
-        ranged = features[:, :, SEMANTIC_GROUP_FEATURE_INDEX["same_role_range"]] > 0.5
-        return np.where(ranged, 251.0, 250.0)
-    if axis == "ally_skirmish_count":
-        return _side_feature_count_np(features, "skirmish", enemy=False)
-    raise ValueError(f"unknown audit axis: {axis}")
-
-
-def _audit_focus_mask_torch(
-    raw: RawTensorSplit,
-    spec: AuditSpec,
-    *,
-    hp_lookup: torch.Tensor,
-    build_label_ids: dict[str, int],
-) -> torch.Tensor:
-    if (
-        raw.champion_id is None
-        or raw.build_id is None
-        or raw.semantic_group_features is None
-    ):
-        raise ValueError(
-            "semantic context calibration requires champion/build/group tensors"
-        )
-    mask = torch.ones_like(raw.champion_id, dtype=torch.bool)
-    if spec.champions:
-        champion_mask = torch.zeros_like(mask)
-        for champion in spec.champions:
-            champion_mask |= raw.champion_id == int(champion)
-        mask &= champion_mask
-    if spec.positions:
-        slot_mask = torch.zeros(10, dtype=torch.bool, device=raw.champion_id.device)
-        for position in spec.positions:
-            idx = POSITIONS.index(position)
-            slot_mask[idx] = True
-            slot_mask[idx + 5] = True
-        mask &= slot_mask.view(1, 10)
-    if spec.builds:
-        build_mask = torch.zeros_like(mask)
-        for label in spec.builds:
-            build_idx = build_label_ids.get(label)
-            if build_idx is not None:
-                build_mask |= raw.build_id == int(build_idx)
-        mask &= build_mask
-
-    features = raw.semantic_group_features
-    if spec.focus_condition == "low_own_damage":
-        side_anchor = torch.zeros(10, dtype=torch.bool, device=raw.champion_id.device)
-        side_anchor[0] = True
-        side_anchor[5] = True
-        mask &= side_anchor.view(1, 10)
-        mask &= _team_feature_average_torch(features, "damage", enemy=False) <= (
-            LOW_OWN_DAMAGE_THRESHOLD
-        )
-    elif spec.focus_condition == "focus_hp_low":
-        mask &= _slot_hp_torch(raw.champion_id, hp_lookup) <= FOCUS_HP_LOW_THRESHOLD
-    elif spec.focus_condition == "focus_hp_high":
-        mask &= _slot_hp_torch(raw.champion_id, hp_lookup) >= HIGH_HP_THRESHOLD
-    elif spec.focus_condition == "selected_enchanter":
-        mask &= features[:, :, SEMANTIC_GROUP_FEATURE_INDEX["selected_enchanter"]] > 0.5
-    elif spec.focus_condition is not None:
-        raise ValueError(f"unknown focus condition: {spec.focus_condition}")
-    return mask
-
-
-def _audit_focus_mask_np(
-    split: SplitData,
-    spec: AuditSpec,
-    *,
-    hp_lookup: np.ndarray,
-    build_label_ids: dict[str, int],
-) -> np.ndarray:
-    if (
-        split.champion_id is None
-        or split.build_id is None
-        or split.semantic_group_features is None
-    ):
-        raise ValueError("semantic context metrics require champion/build/group arrays")
-    mask = np.ones(split.champion_id.shape, dtype=bool)
-    if spec.champions:
-        mask &= np.isin(split.champion_id, list(spec.champions))
-    if spec.positions:
-        slot_mask = np.zeros(10, dtype=bool)
-        for position in spec.positions:
-            idx = POSITIONS.index(position)
-            slot_mask[idx] = True
-            slot_mask[idx + 5] = True
-        mask &= slot_mask[None, :]
-    if spec.builds:
-        ids = [
-            build_label_ids[label] for label in spec.builds if label in build_label_ids
-        ]
-        mask &= np.isin(split.build_id, ids)
-
-    features = split.semantic_group_features
-    if spec.focus_condition == "low_own_damage":
-        side_anchor = np.zeros(10, dtype=bool)
-        side_anchor[[0, 5]] = True
-        mask &= side_anchor[None, :]
-        mask &= _team_feature_average_np(features, "damage", enemy=False) <= (
-            LOW_OWN_DAMAGE_THRESHOLD
-        )
-    elif spec.focus_condition == "focus_hp_low":
-        mask &= _slot_hp_np(split.champion_id, hp_lookup) <= FOCUS_HP_LOW_THRESHOLD
-    elif spec.focus_condition == "focus_hp_high":
-        mask &= _slot_hp_np(split.champion_id, hp_lookup) >= HIGH_HP_THRESHOLD
-    elif spec.focus_condition == "selected_enchanter":
-        mask &= features[:, :, SEMANTIC_GROUP_FEATURE_INDEX["selected_enchanter"]] > 0.5
-    elif spec.focus_condition is not None:
-        raise ValueError(f"unknown focus condition: {spec.focus_condition}")
-    return mask
-
-
-_SUPPORT_FAMILY_WEIGHT_FLOOR = 32.0
-_SUPPORT_FAMILY_WEIGHT_CAP = 200_000.0
-_SUPPORT_FAMILY_WEIGHT_MIN = 0.25
-_SUPPORT_FAMILY_WEIGHT_MAX = 2.0
-_SUPPORT_FAMILY_TAIL_MIN_COUNT = 1024
-
-
-class _SemanticContextCalibrationLoss:
-    def __init__(
-        self,
-        *,
-        build_vocab: tuple[str, ...],
-        train_cfg: TrainConfig,
-        device: str,
-    ) -> None:
-        hp_lookup, _ = static_hp_range_lookups()
-        self.device = device
-        self.hp_lookup = torch.as_tensor(hp_lookup, dtype=torch.float32, device=device)
-        self.build_label_ids = {label: idx for idx, label in enumerate(build_vocab)}
-        self.target_family = str(train_cfg.semantic_context_calibration_target)
-        self.objective = str(train_cfg.semantic_context_calibration_objective)
-        self.group_surface = str(train_cfg.semantic_context_calibration_group_surface)
-        self.bin_weighting = str(train_cfg.semantic_context_calibration_bin_weighting)
-        self.residual_loss = str(train_cfg.semantic_context_calibration_residual_loss)
-        self.uncertainty_band_scale = float(
-            train_cfg.semantic_context_calibration_uncertainty_band_scale
-        )
-        self.uncertainty_huber_delta = float(
-            train_cfg.semantic_context_calibration_uncertainty_huber_delta
-        )
-        self.holdout_mode = str(train_cfg.semantic_context_calibration_holdout_mode)
-        self.holdout_fold = int(train_cfg.semantic_context_calibration_holdout_fold)
-        self.eb_shrink = self.target_family != "champion_raw"
-        group_specs = (
-            group_audit_specs()
-            if self.group_surface == "full"
-            else training_group_audit_specs(self.group_surface)
-        )
-        if self.target_family == "group_eb":
-            self.specs = group_specs
-            self.spec_components = ("group",) * len(self.specs)
-        elif self.target_family == "group_context_eb":
-            context_specs = audit_specs()
-            self.specs = (*group_specs, *context_specs)
-            self.spec_components = (
-                *(("group",) * len(group_specs)),
-                *(("context",) * len(context_specs)),
-            )
-        else:
-            self.specs = audit_specs()
-            self.spec_components = ("context",) * len(self.specs)
-        self.spec_holdout = tuple(
-            self._is_heldout_spec(spec_idx) for spec_idx in range(len(self.specs))
-        )
-        self.weight = float(train_cfg.semantic_context_calibration_loss_weight)
-        self.min_count = int(train_cfg.semantic_context_calibration_min_count)
-        self.tail_weight = float(train_cfg.semantic_context_calibration_tail_weight)
-        self.group_residual_shrink_strength = float(
-            train_cfg.semantic_context_calibration_group_residual_shrink_strength
-        )
-        self.group_residual_clip = float(
-            train_cfg.semantic_context_calibration_group_residual_clip
-        )
-        self.group_residual_scale = float(
-            train_cfg.semantic_context_calibration_group_residual_scale
-        )
-        self.context_residual_shrink_strength = float(
-            train_cfg.semantic_context_calibration_context_residual_shrink_strength
-        )
-        self.context_residual_clip = float(
-            train_cfg.semantic_context_calibration_context_residual_clip
-        )
-        self.context_residual_scale = float(
-            train_cfg.semantic_context_calibration_context_residual_scale
-        )
-        self.reference_targets: dict[tuple[int, int], torch.Tensor] = {}
-        self.reference_counts: dict[tuple[int, int], int] = {}
-        self.reference_eb_variances: dict[tuple[int, int], float] = {}
-        self.reference_residual_targets: dict[tuple[int, int], torch.Tensor] = {}
-        self.reference_residual_uncertainty_bands: dict[
-            tuple[int, int], torch.Tensor
-        ] = {}
-        self.reference_bin_weights: dict[tuple[int, int], float] = {}
-        self.reference_family_multiplicity: dict[int, int] = {}
-        self.reference_support_median: float | None = None
-
-    @property
-    def enabled(self) -> bool:
-        return self.weight > 0.0
-
-    @property
-    def residual_objective(self) -> bool:
-        return self.objective == "residual"
-
-    def _is_heldout_spec(self, spec_idx: int) -> bool:
-        if self.holdout_mode == "none":
-            return False
-        if self.spec_components[spec_idx] != "group":
-            return False
-        return spec_idx % 2 == self.holdout_fold
-
-    def _focus_family_key(
-        self, spec_idx: int
-    ) -> tuple[str, tuple[int, ...], tuple[str, ...], tuple[str, ...], str]:
-        spec = self.specs[spec_idx]
-        return (
-            self.spec_components[spec_idx],
-            tuple(spec.champions),
-            tuple(spec.positions),
-            tuple(spec.builds),
-            spec.focus_condition or "",
-        )
-
-    def _active_focus_family_multiplicity(self) -> dict[int, int]:
-        active_specs = {spec_idx for spec_idx, _ in self.reference_counts}
-        if not active_specs:
-            return {}
-        family_counts: dict[
-            tuple[str, tuple[int, ...], tuple[str, ...], tuple[str, ...], str], int
-        ] = {}
-        for spec_idx in active_specs:
-            key = self._focus_family_key(spec_idx)
-            family_counts[key] = family_counts.get(key, 0) + 1
-        return {
-            spec_idx: max(family_counts[self._focus_family_key(spec_idx)], 1)
-            for spec_idx in active_specs
-        }
-
-    def _tail_multiplier(self, spec_idx: int, bin_idx: int, count: int) -> float:
-        last_bin_idx = len(self.specs[spec_idx].bins) - 1
-        if bin_idx not in {0, last_bin_idx}:
-            return 1.0
-        if self.bin_weighting == "support_family" and count < max(
-            self.min_count, _SUPPORT_FAMILY_TAIL_MIN_COUNT
-        ):
-            return 1.0
-        return self.tail_weight
-
-    def _refresh_reference_bin_weights(self) -> None:
-        self.reference_bin_weights.clear()
-        self.reference_family_multiplicity.clear()
-        self.reference_support_median = None
-        if not self.reference_counts:
-            return
-        multiplicity = self._active_focus_family_multiplicity()
-        self.reference_family_multiplicity.update(multiplicity)
-        if self.bin_weighting == "uniform":
-            for (spec_idx, bin_idx), count in self.reference_counts.items():
-                self.reference_bin_weights[(spec_idx, bin_idx)] = self._tail_multiplier(
-                    spec_idx, bin_idx, count
-                )
-            return
-
-        clipped_counts = np.clip(
-            np.asarray(list(self.reference_counts.values()), dtype=np.float64),
-            _SUPPORT_FAMILY_WEIGHT_FLOOR,
-            _SUPPORT_FAMILY_WEIGHT_CAP,
-        )
-        support_median = max(
-            float(np.median(clipped_counts)), _SUPPORT_FAMILY_WEIGHT_FLOOR
-        )
-        self.reference_support_median = support_median
-        for (spec_idx, bin_idx), count in self.reference_counts.items():
-            support = min(
-                max(float(count), _SUPPORT_FAMILY_WEIGHT_FLOOR),
-                _SUPPORT_FAMILY_WEIGHT_CAP,
-            )
-            support_weight = math.sqrt(support / support_median)
-            support_weight = min(
-                max(support_weight, _SUPPORT_FAMILY_WEIGHT_MIN),
-                _SUPPORT_FAMILY_WEIGHT_MAX,
-            )
-            family_count = max(multiplicity.get(spec_idx, 1), 1)
-            self.reference_bin_weights[(spec_idx, bin_idx)] = (
-                support_weight
-                * self._tail_multiplier(spec_idx, bin_idx, count)
-                / float(family_count)
-            )
-
-    def _bin_weight(self, spec_idx: int, bin_idx: int, count: int) -> float:
-        reference_weight = self.reference_bin_weights.get((spec_idx, bin_idx))
-        if reference_weight is not None:
-            return reference_weight
-        return self._tail_multiplier(spec_idx, bin_idx, count)
-
-    def _spec_metadata_key(self, spec_idx: int) -> str:
-        spec = self.specs[spec_idx]
-        return f"{self.spec_components[spec_idx]}::{spec.title}"
-
-    def _reference_metadata_key(self, spec_idx: int, bin_idx: int) -> str:
-        spec = self.specs[spec_idx]
-        return f"{self._spec_metadata_key(spec_idx)}::{spec.bins[bin_idx].label}"
-
-    def metadata(self) -> dict[str, object]:
-        return {
-            "enabled": self.enabled,
-            "target": self.target_family,
-            "objective": self.objective,
-            "group_surface": self.group_surface,
-            "bin_weighting": self.bin_weighting,
-            "residual_loss": self.residual_loss,
-            "uncertainty_band_scale": self.uncertainty_band_scale,
-            "uncertainty_huber_delta": self.uncertainty_huber_delta,
-            "holdout_mode": self.holdout_mode,
-            "holdout_fold": self.holdout_fold,
-            "spec_count": len(self.specs),
-            "group_spec_count": sum(
-                1 for component in self.spec_components if component == "group"
-            ),
-            "trained_group_spec_count": sum(
-                1
-                for component, heldout in zip(self.spec_components, self.spec_holdout)
-                if component == "group" and not heldout
-            ),
-            "heldout_group_spec_count": sum(
-                1
-                for component, heldout in zip(self.spec_components, self.spec_holdout)
-                if component == "group" and heldout
-            ),
-            "context_spec_count": sum(
-                1 for component in self.spec_components if component == "context"
-            ),
-            "reference_bin_count": len(self.reference_counts),
-            "reference_support_median": self.reference_support_median,
-            "focus_family_multiplicity": {
-                self._spec_metadata_key(spec_idx): int(count)
-                for spec_idx, count in sorted(
-                    self.reference_family_multiplicity.items()
-                )
-            },
-            "reference_counts": {
-                self._reference_metadata_key(spec_idx, bin_idx): int(count)
-                for (spec_idx, bin_idx), count in sorted(self.reference_counts.items())
-            },
-            "reference_eb_variances": {
-                self._reference_metadata_key(spec_idx, bin_idx): float(value)
-                for (spec_idx, bin_idx), value in sorted(
-                    self.reference_eb_variances.items()
-                )
-            },
-            "reference_residual_uncertainty_bands": {
-                self._reference_metadata_key(spec_idx, bin_idx): float(
-                    value.detach().cpu().item()
-                )
-                for (spec_idx, bin_idx), value in sorted(
-                    self.reference_residual_uncertainty_bands.items()
-                )
-            },
-            "reference_bin_weights": {
-                self._reference_metadata_key(spec_idx, bin_idx): float(value)
-                for (spec_idx, bin_idx), value in sorted(
-                    self.reference_bin_weights.items()
-                )
-            },
-        }
-
-    def _residual_params(self, component: str) -> tuple[float, float, float]:
-        if component == "group":
-            return (
-                self.group_residual_shrink_strength,
-                self.group_residual_clip,
-                self.group_residual_scale,
-            )
-        return (
-            self.context_residual_shrink_strength,
-            self.context_residual_clip,
-            self.context_residual_scale,
-        )
-
-    def _residual_uncertainty_band(
-        self,
-        *,
-        target_probability: float,
-        target_variance: float,
-    ) -> float:
-        if self.residual_loss != "uncertainty_huber":
-            return 0.0
-        if self.uncertainty_band_scale <= 0.0 or target_variance <= 0.0:
-            return 0.0
-        probability = min(max(float(target_probability), 1.0e-4), 1.0 - 1.0e-4)
-        logit_slope = 1.0 / max(probability * (1.0 - probability), 1.0e-6)
-        return (
-            self.uncertainty_band_scale
-            * math.sqrt(max(float(target_variance), 0.0))
-            * logit_slope
-        )
-
-    def _residual_gap_penalty(
-        self,
-        gap: torch.Tensor,
-        key: tuple[int, int],
-    ) -> torch.Tensor:
-        if self.residual_loss == "mse":
-            return gap.square()
-        band = self.reference_residual_uncertainty_bands.get(key)
-        if band is None:
-            band = gap.new_zeros(())
-        excess = torch.relu(torch.abs(gap) - band.to(device=gap.device))
-        delta = float(self.uncertainty_huber_delta)
-        return torch.where(
-            excess <= delta,
-            0.5 * excess.square() / delta,
-            excess - 0.5 * delta,
-        )
-
-    def fit_reference(
-        self,
-        raw: RawTensorSplit,
-        *,
-        reference_predictions: torch.Tensor | None = None,
-        reference_semantic_deltas: torch.Tensor | None = None,
-    ) -> None:
-        if not self.enabled:
-            return
-        if self.residual_objective and (
-            reference_predictions is None or reference_semantic_deltas is None
-        ):
-            raise ValueError(
-                "residual semantic context calibration requires warm-start "
-                "reference_predictions and reference_semantic_deltas"
-            )
-        if raw.semantic_group_features is None:
-            raise ValueError(
-                "semantic context calibration requires semantic_group_features; "
-                "enable --use-semantic-group-features or the calibration loss."
-            )
-        targets = _side_labels_torch(raw.blue_win)
-        self.reference_targets.clear()
-        self.reference_counts.clear()
-        self.reference_eb_variances.clear()
-        self.reference_residual_targets.clear()
-        self.reference_residual_uncertainty_bands.clear()
-        self.reference_bin_weights.clear()
-        self.reference_family_multiplicity.clear()
-        self.reference_support_median = None
-        device = targets.device
-        hp_lookup = self.hp_lookup.to(device=device, non_blocking=True)
-        for spec_idx, spec in enumerate(self.specs):
-            focus = _audit_focus_mask_torch(
-                raw,
-                spec,
-                hp_lookup=hp_lookup,
-                build_label_ids=self.build_label_ids,
-            )
-            axis = _audit_axis_torch(raw.semantic_group_features, spec)
-            bin_idxs: list[int] = []
-            means: list[float] = []
-            counts: list[int] = []
-            for bin_idx, bin_spec in enumerate(spec.bins):
-                mask = focus & bin_spec.predicate(axis)
-                count = int(mask.sum().detach().cpu().item())
-                if count < self.min_count:
-                    continue
-                bin_idxs.append(bin_idx)
-                means.append(float(targets[mask].mean().detach().cpu().item()))
-                counts.append(count)
-            if not bin_idxs:
-                continue
-            if self.eb_shrink:
-                eb, eb_var = eb_shrink_targets(np.asarray(counts), np.asarray(means))
-                target_values = eb.tolist()
-                variance_values = eb_var.tolist()
-            else:
-                target_values = means
-                variance_values = [0.0] * len(target_values)
-            for bin_idx, value, count, variance in zip(
-                bin_idxs, target_values, counts, variance_values
-            ):
-                key = (spec_idx, bin_idx)
-                self.reference_targets[key] = torch.tensor(
-                    float(value), dtype=torch.float32, device=self.device
-                )
-                self.reference_counts[key] = count
-                self.reference_eb_variances[key] = float(variance)
-                if self.residual_objective:
-                    assert reference_predictions is not None
-                    assert reference_semantic_deltas is not None
-                    focus = _audit_focus_mask_torch(
-                        raw,
-                        spec,
-                        hp_lookup=hp_lookup,
-                        build_label_ids=self.build_label_ids,
-                    )
-                    axis = _audit_axis_torch(raw.semantic_group_features, spec)
-                    mask = focus & spec.bins[bin_idx].predicate(axis)
-                    reference_mean = reference_predictions[mask].mean()
-                    initial_delta = reference_semantic_deltas[mask].mean()
-                    raw_delta = _probability_logit_torch(
-                        torch.tensor(float(value), dtype=torch.float32, device=device)
-                    ) - _probability_logit_torch(reference_mean)
-                    shrink_strength, clip, scale = self._residual_params(
-                        self.spec_components[spec_idx]
-                    )
-                    shrink = float(count) / (float(count) + float(shrink_strength))
-                    correction = torch.clamp(
-                        raw_delta * float(shrink),
-                        min=-float(clip),
-                        max=float(clip),
-                    )
-                    total_delta = initial_delta + float(scale) * correction
-                    self.reference_residual_targets[key] = total_delta.detach().to(
-                        self.device, non_blocking=True
-                    )
-                    self.reference_residual_uncertainty_bands[key] = torch.tensor(
-                        self._residual_uncertainty_band(
-                            target_probability=float(value),
-                            target_variance=float(variance),
-                        ),
-                        dtype=torch.float32,
-                        device=self.device,
-                    )
-        self._refresh_reference_bin_weights()
-
-    def __call__(
-        self,
-        outputs: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-        raw: RawTensorSplit,
-    ) -> torch.Tensor:
-        logits = outputs["final_logit"]
-        if not self.enabled:
-            return logits.new_zeros(())
-        if raw.semantic_group_features is None:
-            raise ValueError(
-                "semantic context calibration requires semantic_group_features; "
-                "enable --use-semantic-group-features or the calibration loss."
-            )
-        predictions = _focus_side_probabilities_from_outputs(outputs)
-        if self.residual_objective:
-            focus_logits = _focus_side_logits_from_outputs(outputs)
-            base_logits = _focus_side_logits_from_outputs(
-                outputs,
-                include_semantic_delta=False,
-            )
-            semantic_deltas = focus_logits - base_logits
-        else:
-            semantic_deltas = None
-        targets = _side_labels_torch(labels)
-        total = logits.new_zeros(())
-        denom = 0.0
-        for spec_idx, spec in enumerate(self.specs):
-            if self.spec_holdout[spec_idx]:
-                continue
-            focus = _audit_focus_mask_torch(
-                raw,
-                spec,
-                hp_lookup=self.hp_lookup,
-                build_label_ids=self.build_label_ids,
-            )
-            axis = _audit_axis_torch(raw.semantic_group_features, spec)
-            for bin_idx, bin_spec in enumerate(spec.bins):
-                mask = focus & bin_spec.predicate(axis)
-                count = int(mask.sum().detach().cpu().item())
-                if count < self.min_count:
-                    continue
-                reference_target = self.reference_targets.get((spec_idx, bin_idx))
-                target = (
-                    targets[mask].mean()
-                    if reference_target is None
-                    else reference_target
-                )
-                if self.residual_objective:
-                    reference_delta = self.reference_residual_targets.get(
-                        (spec_idx, bin_idx)
-                    )
-                    if reference_delta is None:
-                        continue
-                    assert semantic_deltas is not None
-                    gap = semantic_deltas[mask].mean() - reference_delta
-                    penalty = self._residual_gap_penalty(gap, (spec_idx, bin_idx))
-                else:
-                    gap = predictions[mask].mean() - target
-                    penalty = gap.square()
-                bin_weight = self._bin_weight(spec_idx, bin_idx, count)
-                total = total + float(bin_weight) * penalty
-                denom += float(bin_weight)
-        if denom <= 0.0:
-            return logits.new_zeros(())
-        return self.weight * total / denom
-
-    @staticmethod
-    def _gap_summary(gaps: list[float], counts: list[int]) -> dict[str, float | int]:
-        if not gaps:
-            return {
-                "n_bins": 0,
-                "median_n": float("nan"),
-                "min_n": 0,
-                "gap_mse": float("nan"),
-                "mean_abs_gap": float("nan"),
-                "max_abs_gap": float("nan"),
-            }
-        gap_array = np.asarray(gaps, dtype=np.float64)
-        return {
-            "n_bins": int(gap_array.size),
-            "median_n": float(np.median(counts)),
-            "min_n": int(min(counts)),
-            "gap_mse": float(np.mean(gap_array**2)),
-            "mean_abs_gap": float(np.mean(np.abs(gap_array))),
-            "max_abs_gap": float(np.max(np.abs(gap_array))),
-        }
-
-    def holdout_gap_metrics(
-        self,
-        scores: np.ndarray,
-        split: SplitData,
-        *,
-        build_vocab: tuple[str, ...],
-    ) -> dict[str, dict[str, float | int]] | None:
-        if self.holdout_mode == "none":
-            return None
-        if (
-            split.context_raw is None
-            or split.champion_id is None
-            or split.build_id is None
-        ):
-            return {
-                "trained": self._gap_summary([], []),
-                "heldout": self._gap_summary([], []),
-            }
-        lens = AuditLens(
-            champion_id=split.champion_id,
-            build_id=split.build_id,
-            context_raw=split.context_raw,
-            build_vocab=build_vocab,
-        )
-        predictions = _side_probabilities_np(scores)
-        gaps: dict[str, list[float]] = {"trained": [], "heldout": []}
-        counts: dict[str, list[int]] = {"trained": [], "heldout": []}
-        for spec_idx, spec in enumerate(self.specs):
-            if self.spec_components[spec_idx] != "group":
-                continue
-            bucket = "heldout" if self.spec_holdout[spec_idx] else "trained"
-            focus = lens.focus_mask(spec)
-            axis = lens.axis(spec.axis)
-            for bin_idx, bin_spec in enumerate(spec.bins):
-                reference_target = self.reference_targets.get((spec_idx, bin_idx))
-                if reference_target is None:
-                    continue
-                mask = focus & bin_spec.predicate(axis)
-                count = int(mask.sum())
-                if count <= 0:
-                    continue
-                gap = (
-                    float(np.mean(predictions[mask]))
-                    - float(reference_target.detach().cpu().item())
-                ) * 100.0
-                gaps[bucket].append(gap)
-                counts[bucket].append(count)
-        return {
-            "trained": self._gap_summary(gaps["trained"], counts["trained"]),
-            "heldout": self._gap_summary(gaps["heldout"], counts["heldout"]),
-        }
-
-
-def _semantic_reference_predictions(
-    model: HGNNWinModel,
-    raw: RawTensorSplit,
-    *,
-    strength: float,
-    device: str,
-    gatherer: EncoderSidecarLookup | None,
-    batch_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    was_training = model.training
-    model.eval()
-    probabilities: list[torch.Tensor] = []
-    semantic_deltas: list[torch.Tensor] = []
-    reference_device = raw.blue_win.device
-    with torch.no_grad():
-        for batch_idx in _batch_indices(
-            raw.blue_win.shape[0],
-            batch_size=batch_size,
-            shuffle=False,
-            rng=np.random.default_rng(0),
-        ):
-            rows = _raw_index_tensor(raw, batch_idx)
-            raw_batch = _raw_split_to_device(_raw_batch(raw, rows), device=device)
-            outputs = model(
-                **_hgnn_inputs_from_raw(
-                    raw_batch,
-                    strength=strength,
-                    device=device,
-                    gatherer=gatherer,
-                )
-            )
-            focus_logits = _focus_side_logits_from_outputs(outputs)
-            base_logits = _focus_side_logits_from_outputs(
-                outputs,
-                include_semantic_delta=False,
-            )
-            probabilities.append(
-                torch.sigmoid(focus_logits)
-                .detach()
-                .to(reference_device, non_blocking=True)
-            )
-            semantic_deltas.append(
-                (focus_logits - base_logits)
-                .detach()
-                .to(reference_device, non_blocking=True)
-            )
-    if was_training:
-        model.train()
-    return torch.cat(probabilities, dim=0), torch.cat(semantic_deltas, dim=0)
-
-
-def _swap_context_calibration_raw(raw: RawTensorSplit) -> RawTensorSplit:
-    def swap_slots(value: torch.Tensor | None) -> torch.Tensor | None:
-        if value is None:
-            return None
-        return torch.cat([value[:, 5:], value[:, :5]], dim=1)
-
-    def flip_signed(
-        value: torch.Tensor | None,
-        signed_indices: tuple[int, ...],
-    ) -> torch.Tensor | None:
-        if value is None:
-            return None
-        out = value.clone()
-        if signed_indices:
-            idx = torch.as_tensor(signed_indices, dtype=torch.long, device=value.device)
-            out.index_copy_(1, idx, -value.index_select(1, idx))
-        return out
-
-    return RawTensorSplit(
-        win_rate=raw.win_rate,
-        p1_cnt=raw.p1_cnt,
-        blue_win=raw.blue_win,
-        champion_id=swap_slots(raw.champion_id),
-        build_id=swap_slots(raw.build_id),
-        semantic_group_features=swap_slots(raw.semantic_group_features),
-        loadout_features=flip_signed(
-            raw.loadout_features,
-            LOADOUT_SIGNED_FEATURE_INDICES,
-        ),
-        patch_features=flip_signed(
-            raw.patch_features,
-            PATCH_SIGNED_FEATURE_INDICES,
-        ),
     )
 
 
@@ -2699,15 +1481,9 @@ def train(
         overrides=model_overrides,
     )
 
-    semantic_context_calibration_enabled = (
-        train_cfg.semantic_context_calibration_loss_weight > 0.0
-    )
     load_semantic_group_features = bool(
-        semantic_context_calibration_enabled
-        or (
-            model_config.use_learned_semantic_moe
-            and model_config.use_semantic_group_features
-        )
+        model_config.use_learned_semantic_moe
+        and model_config.use_semantic_group_features
     )
     loaded_splits = {
         name: _limit_split(split, dataset_cfg.max_games)
@@ -2729,11 +1505,7 @@ def train(
             dataset_cfg, meta, model_config, device=device
         )
     splits = {
-        name: _drop_unused_model_arrays(
-            split,
-            model_config,
-            keep_semantic_group_features=semantic_context_calibration_enabled,
-        )
+        name: _drop_unused_model_arrays(split, model_config)
         for name, split in loaded_splits.items()
     }
     _validate_split_targets(splits)
@@ -2764,53 +1536,20 @@ def train(
         weight_decay=train_cfg.weight_decay,
     )
     loss_fn = nn.BCEWithLogitsLoss()
-    context_calibration_loss = _SemanticContextCalibrationLoss(
-        build_vocab=tuple(model_config.build_vocab),
-        train_cfg=train_cfg,
-        device=device,
-    )
-    reference_predictions: torch.Tensor | None = None
-    reference_semantic_deltas: torch.Tensor | None = None
-    if context_calibration_loss.enabled and context_calibration_loss.residual_objective:
-        logger.info(
-            "Fitting residual semantic calibration teacher from warm-start outputs"
-        )
-        reference_predictions, reference_semantic_deltas = (
-            _semantic_reference_predictions(
-                model,
-                tensor_splits["train"],
-                strength=strength,
-                device=device,
-                gatherer=gatherer,
-                batch_size=train_batch_size,
-            )
-        )
-    context_calibration_loss.fit_reference(
-        tensor_splits["train"],
-        reference_predictions=reference_predictions,
-        reference_semantic_deltas=reference_semantic_deltas,
-    )
     rng = np.random.default_rng(train_cfg.seed)
     semantic_moe_enabled = bool(model_config.use_learned_semantic_moe)
-    semantic_gradient_params, group_relationship_gradient_params = (
-        _semantic_gradient_parameter_groups(model)
-    )
-    gradient_diagnostics_enabled = bool(
-        context_calibration_loss.enabled
-        and train_cfg.semantic_context_calibration_gradient_diagnostics_epochs > 0
-    )
     best_state = copy.deepcopy(model.state_dict())
     best_val_nll = math.inf
     best_checkpoint_val_nll = math.inf
     best_checkpoint_val_ece = math.inf
-    best_checkpoint_score = -math.inf
+    best_checkpoint_accuracy = -math.inf
     best_epoch = 0
     best_threshold = 0.5
     stale_epochs = 0
     history: list[dict[str, float | int]] = []
 
     logger.info(
-        "HGNN training device=%s raw_tensor_cache_device=%s batch_size=%s requested_batch_size=%s train_batch_cap=%s train_epoch_max_games=%s max_epochs=%s strength=%s checkpoint_metric=%s min_delta=%s",
+        "HGNN training device=%s raw_tensor_cache_device=%s batch_size=%s requested_batch_size=%s train_batch_cap=%s train_epoch_max_games=%s max_epochs=%s strength=%s checkpoint=val_accuracy",
         device,
         raw_cache_device,
         train_batch_size,
@@ -2819,8 +1558,6 @@ def train(
         train_epoch_max_games,
         train_cfg.max_epochs,
         strength,
-        train_cfg.checkpoint_metric,
-        train_cfg.checkpoint_min_delta,
     )
     if device == "cuda":
         logger.info("CUDA device: %s", torch.cuda.get_device_name(0))
@@ -2864,11 +1601,7 @@ def train(
         best_val_nll = float(val_metrics["nll"])
         best_checkpoint_val_nll = float(val_metrics["nll"])
         best_checkpoint_val_ece = float(val_metrics["ece"])
-        best_checkpoint_score = _checkpoint_score(
-            train_cfg.checkpoint_metric,
-            val_metrics=val_metrics,
-            val_threshold_accuracy=val_threshold_accuracy,
-        )
+        best_checkpoint_accuracy = float(val_metrics["accuracy"])
         best_epoch = 0
         best_threshold = val_threshold
         best_state = copy.deepcopy(model.state_dict())
@@ -2895,11 +1628,8 @@ def train(
         train_started = epoch_started
         model.train()
         train_loss_sum = 0.0
-        train_rank_loss_sum = 0.0
         train_semantic_moe_regularization_loss_sum = 0.0
-        train_context_calibration_loss_sum = 0.0
         train_seen = 0
-        epoch_gradient_diagnostics: dict[str, float] | None = None
         for batch_idx in _batch_indices(
             splits["train"].blue_win.size,
             batch_size=train_batch_size,
@@ -2923,90 +1653,30 @@ def train(
             optimizer.zero_grad(set_to_none=True)
             direct_outputs = model(**inputs)
             direct_loss = loss_fn(direct_outputs["final_logit"], labels)
-            direct_rank_loss = _auc_ranking_loss(
-                direct_outputs["final_logit"],
-                labels,
-                weight=train_cfg.auc_ranking_loss_weight,
-                max_pairs=train_cfg.auc_ranking_loss_pairs,
-            )
             direct_semantic_moe_regularization_loss = (
                 model.semantic_moe_regularization_loss(direct_outputs)
             )
-            direct_context_calibration_loss = context_calibration_loss(
-                direct_outputs,
-                labels,
-                raw_batch,
-            )
-            if (
-                gradient_diagnostics_enabled
-                and epoch
-                <= train_cfg.semantic_context_calibration_gradient_diagnostics_epochs
-                and epoch_gradient_diagnostics is None
-            ):
-                epoch_gradient_diagnostics = _semantic_calibration_gradient_diagnostics(
-                    bce_loss=direct_loss,
-                    context_loss=direct_context_calibration_loss,
-                    semantic_moe_params=semantic_gradient_params,
-                    group_relationship_params=group_relationship_gradient_params,
-                )
-            (
-                0.5
-                * (
-                    direct_loss
-                    + direct_rank_loss
-                    + direct_semantic_moe_regularization_loss
-                    + direct_context_calibration_loss
-                )
-            ).backward()
+            (0.5 * (direct_loss + direct_semantic_moe_regularization_loss)).backward()
             swapped_outputs = model(**swap_hgnn_inputs(inputs))
             swapped_loss = loss_fn(swapped_outputs["final_logit"], 1.0 - labels)
-            swapped_rank_loss = _auc_ranking_loss(
-                swapped_outputs["final_logit"],
-                1.0 - labels,
-                weight=train_cfg.auc_ranking_loss_weight,
-                max_pairs=train_cfg.auc_ranking_loss_pairs,
-            )
             swapped_semantic_moe_regularization_loss = (
                 model.semantic_moe_regularization_loss(swapped_outputs)
             )
-            swapped_context_calibration_loss = context_calibration_loss(
-                swapped_outputs,
-                1.0 - labels,
-                _swap_context_calibration_raw(raw_batch),
-            )
             (
-                0.5
-                * (
-                    swapped_loss
-                    + swapped_rank_loss
-                    + swapped_semantic_moe_regularization_loss
-                    + swapped_context_calibration_loss
-                )
+                0.5 * (swapped_loss + swapped_semantic_moe_regularization_loss)
             ).backward()
             loss = 0.5 * (direct_loss.detach() + swapped_loss.detach())
-            rank_loss = 0.5 * (direct_rank_loss.detach() + swapped_rank_loss.detach())
             semantic_moe_regularization_loss = 0.5 * (
                 direct_semantic_moe_regularization_loss.detach()
                 + swapped_semantic_moe_regularization_loss.detach()
-            )
-            context_calibration_loss_value = 0.5 * (
-                direct_context_calibration_loss.detach()
-                + swapped_context_calibration_loss.detach()
             )
             if train_cfg.max_grad_norm is not None and train_cfg.max_grad_norm > 0.0:
                 nn.utils.clip_grad_norm_(model.parameters(), train_cfg.max_grad_norm)
             optimizer.step()
             train_loss_sum += float(loss.cpu().item()) * labels.numel() * 2
-            train_rank_loss_sum += float(rank_loss.cpu().item()) * labels.numel() * 2
             if semantic_moe_enabled:
                 train_semantic_moe_regularization_loss_sum += (
                     float(semantic_moe_regularization_loss.cpu().item())
-                    * labels.numel()
-                    * 2
-                )
-            if context_calibration_loss.enabled:
-                train_context_calibration_loss_sum += (
-                    float(context_calibration_loss_value.cpu().item())
                     * labels.numel()
                     * 2
                 )
@@ -3027,12 +1697,8 @@ def train(
         val_logits = val_outputs["final_logit"]
         val_predictions = _sigmoid_np(val_logits)
         train_nll = train_loss_sum / max(train_seen, 1)
-        train_auc_ranking_loss = train_rank_loss_sum / max(train_seen, 1)
         train_semantic_moe_regularization_loss = (
             train_semantic_moe_regularization_loss_sum / max(train_seen, 1)
-        )
-        train_context_calibration_loss = train_context_calibration_loss_sum / max(
-            train_seen, 1
         )
         val_metrics = _evaluate_predictions(val_predictions, splits["val"])
         if load_semantic_group_features:
@@ -3051,19 +1717,6 @@ def train(
                     build_vocab=tuple(model_config.build_vocab),
                 )
             )
-        val_calibration_holdout_metrics = None
-        if (
-            context_calibration_loss.enabled
-            and load_semantic_group_features
-            and "focus_side_probability" in val_outputs
-        ):
-            val_calibration_holdout_metrics = (
-                context_calibration_loss.holdout_gap_metrics(
-                    val_outputs["focus_side_probability"],
-                    splits["val"],
-                    build_vocab=tuple(model_config.build_vocab),
-                )
-            )
         val_seconds = time.perf_counter() - val_started
         epoch_seconds = time.perf_counter() - epoch_started
         train_rows_per_second = (train_seen / 2.0) / max(train_seconds, EPS)
@@ -3074,11 +1727,7 @@ def train(
             val_predictions,
             splits["val"].blue_win,
         )
-        checkpoint_score = _checkpoint_score(
-            train_cfg.checkpoint_metric,
-            val_metrics=val_metrics,
-            val_threshold_accuracy=val_threshold_accuracy,
-        )
+        checkpoint_accuracy = float(val_metrics["accuracy"])
         history_row: dict[str, float | int] = {
             "epoch": epoch,
             "train_nll": train_nll,
@@ -3088,8 +1737,7 @@ def train(
             "val_ece": float(val_metrics["ece"]),
             "val_threshold": val_threshold,
             "val_threshold_accuracy": val_threshold_accuracy,
-            "checkpoint_score": checkpoint_score,
-            "train_auc_ranking_loss": train_auc_ranking_loss,
+            "checkpoint_accuracy": checkpoint_accuracy,
             "train_seconds": train_seconds,
             "val_seconds": val_seconds,
             "epoch_seconds": epoch_seconds,
@@ -3146,35 +1794,12 @@ def train(
             history_row["train_semantic_moe_regularization_loss"] = (
                 train_semantic_moe_regularization_loss
             )
-        if context_calibration_loss.enabled:
-            history_row["train_context_calibration_loss"] = (
-                train_context_calibration_loss
-            )
-        if val_calibration_holdout_metrics is not None:
-            for bucket, metrics in val_calibration_holdout_metrics.items():
-                history_row[f"val_calibration_holdout_{bucket}_gap_mse"] = float(
-                    metrics["gap_mse"]
-                )
-                history_row[f"val_calibration_holdout_{bucket}_mean_abs_gap"] = float(
-                    metrics["mean_abs_gap"]
-                )
-                history_row[f"val_calibration_holdout_{bucket}_n_bins"] = int(
-                    metrics["n_bins"]
-                )
-        if epoch_gradient_diagnostics is not None:
-            history_row.update(
-                {
-                    f"gradient_diag_{key}": float(value)
-                    for key, value in epoch_gradient_diagnostics.items()
-                }
-            )
         history.append(history_row)
         if semantic_moe_enabled:
             logger.info(
-                "epoch=%s train_nll=%.5f rank=%.5f semantic_moe_reg=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
+                "epoch=%s train_nll=%.5f semantic_moe_reg=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
                 epoch,
                 train_nll,
-                train_auc_ranking_loss,
                 train_semantic_moe_regularization_loss,
                 val_nll,
                 val_metrics["accuracy"],
@@ -3183,10 +1808,9 @@ def train(
             )
         else:
             logger.info(
-                "epoch=%s train_nll=%.5f rank=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
+                "epoch=%s train_nll=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
                 epoch,
                 train_nll,
-                train_auc_ranking_loss,
                 val_nll,
                 val_metrics["accuracy"],
                 val_threshold,
@@ -3194,9 +1818,8 @@ def train(
             )
         if "context_gap_mse" in val_metrics:
             logger.info(
-                "epoch=%s context_cal=%.6f val_context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f high_support_max_abs=%.3f high_support_bins=%s",
+                "epoch=%s val_context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f high_support_max_abs=%.3f high_support_bins=%s",
                 epoch,
-                train_context_calibration_loss,
                 val_metrics["context_gap_mse"],
                 val_metrics["context_mean_abs_gap"],
                 val_metrics["context_max_abs_gap"],
@@ -3212,30 +1835,6 @@ def train(
                 val_metrics["group_eb_mean_abs_gap"],
                 val_metrics["group_eb_max_abs_gap"],
             )
-        if val_calibration_holdout_metrics is not None:
-            trained = val_calibration_holdout_metrics["trained"]
-            heldout = val_calibration_holdout_metrics["heldout"]
-            logger.info(
-                "epoch=%s val_calibration_holdout trained_mse=%.4f trained_mean_abs=%.3f trained_bins=%s heldout_mse=%.4f heldout_mean_abs=%.3f heldout_bins=%s",
-                epoch,
-                trained["gap_mse"],
-                trained["mean_abs_gap"],
-                trained["n_bins"],
-                heldout["gap_mse"],
-                heldout["mean_abs_gap"],
-                heldout["n_bins"],
-            )
-        if epoch_gradient_diagnostics is not None:
-            logger.info(
-                "epoch=%s gradient_diagnostics semantic_moe_bce_grad_norm=%.6f semantic_moe_context_grad_norm=%.6f semantic_moe_grad_cosine=%.6f group_relationship_bce_grad_norm=%.6f group_relationship_context_grad_norm=%.6f group_relationship_grad_cosine=%.6f",
-                epoch,
-                epoch_gradient_diagnostics["semantic_moe_bce_grad_norm"],
-                epoch_gradient_diagnostics["semantic_moe_context_grad_norm"],
-                epoch_gradient_diagnostics["semantic_moe_grad_cosine"],
-                epoch_gradient_diagnostics["group_relationship_bce_grad_norm"],
-                epoch_gradient_diagnostics["group_relationship_context_grad_norm"],
-                epoch_gradient_diagnostics["group_relationship_grad_cosine"],
-            )
         logger.info(
             "epoch=%s timing train_seconds=%.2f val_seconds=%.2f epoch_seconds=%.2f train_games=%s train_rows_per_s=%.1f train_augmented_samples_per_s=%.1f batch_size=%s",
             epoch,
@@ -3249,8 +1848,8 @@ def train(
         )
         if val_nll < best_val_nll:
             best_val_nll = val_nll
-        if checkpoint_score > best_checkpoint_score + train_cfg.checkpoint_min_delta:
-            best_checkpoint_score = checkpoint_score
+        if checkpoint_accuracy > best_checkpoint_accuracy:
+            best_checkpoint_accuracy = checkpoint_accuracy
             best_checkpoint_val_nll = val_nll
             best_checkpoint_val_ece = float(val_metrics["ece"])
             best_epoch = epoch
@@ -3264,36 +1863,6 @@ def train(
 
     model.load_state_dict(best_state)
     save_hgnn_model(train_cfg.model_path, model, confidence_strength=strength)
-
-    if train_cfg.skip_final_evaluation:
-        metrics = {
-            "model_type": "hgnn",
-            "dataset_config": asdict(dataset_cfg),
-            "train_config": asdict(train_cfg),
-            "model_config": asdict(model_config),
-            "model_path": train_cfg.model_path,
-            "metrics_path": train_cfg.metrics_path,
-            "device": device,
-            "best_epoch": best_epoch,
-            "best_val_nll": best_val_nll,
-            "best_checkpoint_val_nll": best_checkpoint_val_nll,
-            "best_checkpoint_val_ece": best_checkpoint_val_ece,
-            "best_checkpoint_score": best_checkpoint_score,
-            "decision_threshold": best_threshold,
-            "elapsed_seconds": time.monotonic() - started,
-            "history": history,
-            "final_evaluation_skipped": True,
-        }
-        metrics["semantic_context_calibration_metadata"] = (
-            context_calibration_loss.metadata()
-        )
-        _write_metrics(train_cfg.metrics_path, metrics)
-        logger.info("Saved HGNN model: %s", _project_relative(train_cfg.model_path))
-        logger.info(
-            "Saved timing-only metrics: %s",
-            _project_relative(train_cfg.metrics_path),
-        )
-        return train_cfg.model_path
 
     tensor_splits["test"] = _cache_raw_tensor_split(
         "test", splits["test"], device=raw_cache_device
@@ -3309,23 +1878,6 @@ def train(
         )
         for split_name, tensor_split in tensor_splits.items()
     }
-    if train_cfg.audit_prediction_cache_path is not None:
-        audit_probabilities = np.concatenate(
-            [
-                prediction_outputs[split_name]["focus_side_probability"]
-                for split_name in ("train", "val", "test")
-            ],
-            axis=0,
-        ).astype(np.float32, copy=False)
-        train_cfg.audit_prediction_cache_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        np.save(train_cfg.audit_prediction_cache_path, audit_probabilities)
-        logger.info(
-            "Saved audit prediction cache: %s",
-            _project_relative(train_cfg.audit_prediction_cache_path),
-        )
     prediction_logits = {
         split_name: outputs["final_logit"]
         for split_name, outputs in prediction_outputs.items()
@@ -3360,16 +1912,6 @@ def train(
                     build_vocab=tuple(model_config.build_vocab),
                 )
             )
-            if context_calibration_loss.enabled:
-                calibration_holdout = context_calibration_loss.holdout_gap_metrics(
-                    prediction_outputs[split_name]["focus_side_probability"],
-                    splits[split_name],
-                    build_vocab=tuple(model_config.build_vocab),
-                )
-                if calibration_holdout is not None:
-                    split_metrics[split_name][
-                        "semantic_context_calibration_holdout"
-                    ] = calibration_holdout
     for split_name in ("train", "val", "test"):
         split_metrics[split_name]["threshold_accuracy"] = _threshold_accuracy(
             predictions[split_name],
@@ -3401,7 +1943,7 @@ def train(
         "best_val_nll": best_val_nll,
         "best_checkpoint_val_nll": best_checkpoint_val_nll,
         "best_checkpoint_val_ece": best_checkpoint_val_ece,
-        "best_checkpoint_score": best_checkpoint_score,
+        "best_checkpoint_accuracy": best_checkpoint_accuracy,
         "decision_threshold": best_threshold,
         "temperature_scaling": {
             "temperature": temperature,
@@ -3414,9 +1956,6 @@ def train(
         "val": split_metrics["val"],
         "test": split_metrics["test"],
     }
-    metrics["semantic_context_calibration_metadata"] = (
-        context_calibration_loss.metadata()
-    )
     _write_metrics(train_cfg.metrics_path, metrics)
 
     logger.info("Saved HGNN model: %s", _project_relative(train_cfg.model_path))
@@ -3482,25 +2021,9 @@ def train(
 
 def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     """HGNNConfig overrides exposed by the training CLI."""
-    use_all_sidecars = bool(args.use_all_identity_sidecars)
     return {
         "structural_antisymmetry": args.structural_antisymmetry,
         "structural_antisymmetry_scale": args.structural_antisymmetry_scale,
-        "use_identity_static_sidecar": bool(
-            args.use_identity_static_sidecar or use_all_sidecars
-        ),
-        "use_identity_full_game_sidecar": bool(
-            args.use_identity_full_game_sidecar or use_all_sidecars
-        ),
-        "use_identity_temporal_sidecar": bool(
-            args.use_identity_temporal_sidecar or use_all_sidecars
-        ),
-        "identity_encoder_sidecar_support_strength": args.identity_encoder_sidecar_support_strength,
-        "identity_encoder_sidecar_dropout": args.identity_encoder_sidecar_dropout,
-        "use_identity_semantic_context_head": args.use_identity_semantic_context_head,
-        "semantic_context_dim": args.semantic_context_dim,
-        "semantic_context_dropout": args.semantic_context_dropout,
-        "semantic_context_support_strength": args.semantic_context_support_strength,
         "use_learned_semantic_moe": args.use_learned_semantic_moe,
         "semantic_moe_num_experts": args.semantic_moe_num_experts,
         "semantic_moe_top_k": args.semantic_moe_top_k,
@@ -3552,15 +2075,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
     parser.add_argument("--model-path", type=Path, default=train_defaults.model_path)
     parser.add_argument(
         "--metrics-path", type=Path, default=train_defaults.metrics_path
-    )
-    parser.add_argument(
-        "--audit-prediction-cache-path",
-        type=Path,
-        default=train_defaults.audit_prediction_cache_path,
-        help=(
-            "Optional .npy path for train+val+test focus-side probabilities. "
-            "When set, context/group audits can reuse the final evaluation pass."
-        ),
     )
     parser.add_argument(
         "--warm-start-model-path",
@@ -3619,225 +2133,8 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
     parser.add_argument(
         "--max-grad-norm", type=float, default=train_defaults.max_grad_norm
     )
-    parser.add_argument("--checkpoint-metric", default=train_defaults.checkpoint_metric)
-    parser.add_argument(
-        "--checkpoint-min-delta",
-        type=float,
-        default=train_defaults.checkpoint_min_delta,
-    )
-    parser.add_argument(
-        "--skip-final-evaluation",
-        action="store_true",
-        default=train_defaults.skip_final_evaluation,
-        help=(
-            "Write epoch history/timing metrics and exit before the final "
-            "train/val/test prediction pass. Intended for throughput sweeps."
-        ),
-    )
-    parser.add_argument(
-        "--auc-ranking-loss-weight",
-        type=float,
-        default=train_defaults.auc_ranking_loss_weight,
-        help=(
-            "Experimental training-only weight for a sampled positive/negative "
-            "pairwise ranking loss that directly targets validation AUC."
-        ),
-    )
-    parser.add_argument(
-        "--auc-ranking-loss-pairs",
-        type=int,
-        default=train_defaults.auc_ranking_loss_pairs,
-        help="Maximum sampled positive/negative pairs per direct or swapped batch.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-loss-weight",
-        type=float,
-        default=train_defaults.semantic_context_calibration_loss_weight,
-        help=(
-            "Optional weight for matching predicted and empirical win rates inside "
-            "the shared HGNN semantic context audit bins."
-        ),
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-min-count",
-        type=int,
-        default=train_defaults.semantic_context_calibration_min_count,
-        help="Minimum side rows from a context bin required inside a batch loss term.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-tail-weight",
-        type=float,
-        default=train_defaults.semantic_context_calibration_tail_weight,
-        help="Multiplier for first/last audit bins in the semantic context loss.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-group-surface",
-        choices=("full", "train_core"),
-        default=train_defaults.semantic_context_calibration_group_surface,
-        help=(
-            "Group audit surface used only by the train-time calibration loss. "
-            "Reporting metrics always use the full expanded group audit."
-        ),
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-bin-weighting",
-        choices=("uniform", "support_family"),
-        default=train_defaults.semantic_context_calibration_bin_weighting,
-        help=(
-            "Per-bin calibration weighting. 'support_family' uses clipped train "
-            "support and divides duplicate focus-family rows."
-        ),
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-target",
-        choices=("champion_raw", "context_eb", "group_eb", "group_context_eb"),
-        default=train_defaults.semantic_context_calibration_target,
-        help=(
-            "Calibration target family. '*_eb' fits empirical-Bayes-shrunk "
-            "train targets. 'group_context_eb' combines large-n build/role "
-            "groups with champion/context audit bins."
-        ),
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-objective",
-        choices=("absolute", "residual"),
-        default=train_defaults.semantic_context_calibration_objective,
-        help=(
-            "'absolute' matches bin predictions to train targets. 'residual' "
-            "matches semantic MoE logit corrections to bounded train-only "
-            "residual deltas from the warm-start model."
-        ),
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-group-residual-shrink-strength",
-        type=float,
-        default=(
-            train_defaults.semantic_context_calibration_group_residual_shrink_strength
-        ),
-        help="Support shrink strength for group residual-teacher deltas.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-group-residual-clip",
-        type=float,
-        default=train_defaults.semantic_context_calibration_group_residual_clip,
-        help="Logit clip for group residual-teacher deltas.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-group-residual-scale",
-        type=float,
-        default=train_defaults.semantic_context_calibration_group_residual_scale,
-        help="Scale applied after clipping group residual-teacher deltas.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-context-residual-shrink-strength",
-        type=float,
-        default=(
-            train_defaults.semantic_context_calibration_context_residual_shrink_strength
-        ),
-        help="Support shrink strength for champion/context residual-teacher deltas.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-context-residual-clip",
-        type=float,
-        default=train_defaults.semantic_context_calibration_context_residual_clip,
-        help="Logit clip for champion/context residual-teacher deltas.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-context-residual-scale",
-        type=float,
-        default=train_defaults.semantic_context_calibration_context_residual_scale,
-        help="Scale applied after clipping champion/context residual-teacher deltas.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-residual-loss",
-        choices=("mse", "uncertainty_huber"),
-        default=train_defaults.semantic_context_calibration_residual_loss,
-        help=(
-            "Residual objective penalty. 'uncertainty_huber' ignores residual "
-            "gaps inside the EB uncertainty band and Hubers the excess."
-        ),
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-uncertainty-band-scale",
-        type=float,
-        default=train_defaults.semantic_context_calibration_uncertainty_band_scale,
-        help="Multiplier for the residual objective's EB uncertainty band.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-uncertainty-huber-delta",
-        type=float,
-        default=train_defaults.semantic_context_calibration_uncertainty_huber_delta,
-        help="Huber delta applied to residual excess outside the uncertainty band.",
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-holdout-mode",
-        choices=("none", "even_odd"),
-        default=train_defaults.semantic_context_calibration_holdout_mode,
-        help=(
-            "Optional group-spec holdout for train-target calibration reporting. "
-            "'even_odd' holds out one parity of group specs."
-        ),
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-holdout-fold",
-        type=int,
-        default=train_defaults.semantic_context_calibration_holdout_fold,
-        help="Held-out parity for --semantic-context-calibration-holdout-mode=even_odd.",
-    )
-    parser.add_argument(
-        "--semantic-context-metric-min-count",
-        type=int,
-        default=train_defaults.semantic_context_metric_min_count,
-        help=(
-            "Minimum side rows for high-support context-gap validation metrics "
-            "and context-tail checkpoint metrics."
-        ),
-    )
-    parser.add_argument(
-        "--semantic-context-calibration-gradient-diagnostics-epochs",
-        type=int,
-        default=(
-            train_defaults.semantic_context_calibration_gradient_diagnostics_epochs
-        ),
-        help=(
-            "Initial epochs that log BCE/context gradient norms and cosine "
-            "alignment on semantic MoE and group-relationship parameters."
-        ),
-    )
     parser.add_argument("--structural-antisymmetry", action="store_true")
     parser.add_argument("--structural-antisymmetry-scale", type=float, default=0.5)
-    parser.add_argument(
-        "--use-identity-static-sidecar",
-        action=argparse.BooleanOptionalAction,
-        default=bool(production_model_defaults["use_identity_static_sidecar"]),
-    )
-    parser.add_argument(
-        "--use-identity-full-game-sidecar",
-        action=argparse.BooleanOptionalAction,
-        default=bool(production_model_defaults["use_identity_full_game_sidecar"]),
-    )
-    parser.add_argument(
-        "--use-identity-temporal-sidecar",
-        action=argparse.BooleanOptionalAction,
-        default=bool(production_model_defaults["use_identity_temporal_sidecar"]),
-    )
-    parser.add_argument(
-        "--use-all-identity-sidecars",
-        action="store_true",
-        help="Enable static, full-game, and temporal frozen encoder sidecar blocks.",
-    )
-    parser.add_argument(
-        "--identity-encoder-sidecar-support-strength", type=float, default=30.0
-    )
-    parser.add_argument("--identity-encoder-sidecar-dropout", type=float, default=0.0)
-    parser.add_argument(
-        "--use-identity-semantic-context-head",
-        action="store_true",
-        help="Enable own/ally/enemy latent-context interaction over all three identity sidecars.",
-    )
-    parser.add_argument("--semantic-context-dim", type=int, default=96)
-    parser.add_argument("--semantic-context-dropout", type=float, default=0.0)
-    parser.add_argument("--semantic-context-support-strength", type=float, default=30.0)
     parser.add_argument(
         "--use-learned-semantic-moe",
         action=argparse.BooleanOptionalAction,
@@ -4026,7 +2323,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         TrainConfig(
             model_path=args.model_path,
             metrics_path=args.metrics_path,
-            audit_prediction_cache_path=args.audit_prediction_cache_path,
             warm_start_model_path=args.warm_start_model_path,
             freeze_warm_start_loaded_parameters=(
                 args.freeze_warm_start_loaded_parameters
@@ -4042,69 +2338,7 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
             raw_tensor_cache_device=args.raw_tensor_cache_device,
             seed=args.seed,
             max_grad_norm=args.max_grad_norm,
-            checkpoint_metric=args.checkpoint_metric,
-            checkpoint_min_delta=args.checkpoint_min_delta,
-            skip_final_evaluation=args.skip_final_evaluation,
-            auc_ranking_loss_weight=args.auc_ranking_loss_weight,
-            auc_ranking_loss_pairs=args.auc_ranking_loss_pairs,
-            semantic_context_calibration_loss_weight=(
-                args.semantic_context_calibration_loss_weight
-            ),
-            semantic_context_calibration_min_count=(
-                args.semantic_context_calibration_min_count
-            ),
-            semantic_context_calibration_tail_weight=(
-                args.semantic_context_calibration_tail_weight
-            ),
-            semantic_context_calibration_group_surface=(
-                args.semantic_context_calibration_group_surface
-            ),
-            semantic_context_calibration_bin_weighting=(
-                args.semantic_context_calibration_bin_weighting
-            ),
-            semantic_context_calibration_target=(
-                args.semantic_context_calibration_target
-            ),
-            semantic_context_calibration_objective=(
-                args.semantic_context_calibration_objective
-            ),
-            semantic_context_calibration_group_residual_shrink_strength=(
-                args.semantic_context_calibration_group_residual_shrink_strength
-            ),
-            semantic_context_calibration_group_residual_clip=(
-                args.semantic_context_calibration_group_residual_clip
-            ),
-            semantic_context_calibration_group_residual_scale=(
-                args.semantic_context_calibration_group_residual_scale
-            ),
-            semantic_context_calibration_context_residual_shrink_strength=(
-                args.semantic_context_calibration_context_residual_shrink_strength
-            ),
-            semantic_context_calibration_context_residual_clip=(
-                args.semantic_context_calibration_context_residual_clip
-            ),
-            semantic_context_calibration_context_residual_scale=(
-                args.semantic_context_calibration_context_residual_scale
-            ),
-            semantic_context_calibration_residual_loss=(
-                args.semantic_context_calibration_residual_loss
-            ),
-            semantic_context_calibration_uncertainty_band_scale=(
-                args.semantic_context_calibration_uncertainty_band_scale
-            ),
-            semantic_context_calibration_uncertainty_huber_delta=(
-                args.semantic_context_calibration_uncertainty_huber_delta
-            ),
-            semantic_context_calibration_holdout_mode=(
-                args.semantic_context_calibration_holdout_mode
-            ),
-            semantic_context_calibration_holdout_fold=(
-                args.semantic_context_calibration_holdout_fold
-            ),
             semantic_context_metric_min_count=args.semantic_context_metric_min_count,
-            semantic_context_calibration_gradient_diagnostics_epochs=(
-                args.semantic_context_calibration_gradient_diagnostics_epochs
-            ),
         ),
         _model_overrides_from_args(args),
     )

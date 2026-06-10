@@ -73,7 +73,6 @@ class DatasetConfig:
 class TrainConfig:
     model_path: Path = ML_DATA_DIR / "hgnn_production_model.pt"
     metrics_path: Path = ML_DATA_DIR / "metrics_latest.json"
-    audit_prediction_cache_path: Path | None = None
     warm_start_model_path: Path | None = None
     # When warm-starting a larger candidate model from production, optionally
     # keep loaded checkpoint parameters fixed and train only newly introduced
@@ -99,63 +98,7 @@ class TrainConfig:
     raw_tensor_cache_device: str = "model"
     seed: int = 0
     max_grad_norm: float | None = 1.0
-    # Supported values are defined in app.ml.train.CHECKPOINT_METRICS.
-    # Production promotion tracks the raw held-out accuracy gate directly.
-    checkpoint_metric: str = "val_accuracy"
-    # Minimum checkpoint-score improvement required to reset early stopping.
-    # The raw-accuracy confirmation path keeps exact best-epoch selection.
-    checkpoint_min_delta: float = 0.0
-    # Throughput sweeps only need the per-epoch validation/timing row. When set,
-    # skip the expensive final train/val/test prediction pass.
-    skip_final_evaluation: bool = False
-    # Experimental, training-only pairwise ranking objective. When >0, each
-    # batch samples positive/negative logit pairs and adds a soft AUC surrogate
-    # to BCE. This is opt-in research behaviour and does not affect inference.
-    auc_ranking_loss_weight: float = 0.0
-    auc_ranking_loss_pairs: int = 4096
-    # Optional semantic context-bin calibration objective. It matches the mean
-    # predicted side win rate to the empirical side win rate inside the shared
-    # HGNN context audit bins, giving rare semantic tails direct training signal.
-    semantic_context_calibration_loss_weight: float = 0.0
-    semantic_context_calibration_min_count: int = 8
-    semantic_context_calibration_tail_weight: float = 2.0
-    # Reporting keeps the full expanded group audit. Train-time calibration can
-    # optionally use a smaller core surface to avoid chasing duplicated/noisy
-    # group tails.
-    semantic_context_calibration_group_surface: str = "full"
-    semantic_context_calibration_bin_weighting: str = "uniform"
-    # Calibration target family. "champion_raw" matches each champion-specific audit
-    # bin's raw train win rate (high variance: median bin n~500, noise floor ~10.5
-    # pp^2, overfits when up-weighted). "*_eb" targets use empirical-Bayes-shrunk
-    # train rates. "group_eb" uses deterministic build/role group bins;
-    # "context_eb" uses champion/context audit bins; "group_context_eb" combines
-    # both families for a residual-calibration style objective.
-    semantic_context_calibration_target: str = "champion_raw"
-    # "absolute" matches current predictions directly to train EB/raw bin
-    # targets. "residual" instead teaches the semantic MoE to reproduce a
-    # bounded train-only logit correction relative to the warm-start model,
-    # mirroring the post-hoc semantic residual calibrator.
-    semantic_context_calibration_objective: str = "absolute"
-    semantic_context_calibration_group_residual_shrink_strength: float = 100000.0
-    semantic_context_calibration_group_residual_clip: float = 0.02
-    semantic_context_calibration_group_residual_scale: float = 1.0
-    semantic_context_calibration_context_residual_shrink_strength: float = 50000.0
-    semantic_context_calibration_context_residual_clip: float = 0.02
-    semantic_context_calibration_context_residual_scale: float = 1.0
-    # Residual-only alternative to squared error. The uncertainty-aware Huber
-    # variant ignores residual gaps inside the train EB target's logit-scale
-    # uncertainty band, then applies a Huber penalty to the excess.
-    semantic_context_calibration_residual_loss: str = "mse"
-    semantic_context_calibration_uncertainty_band_scale: float = 1.0
-    semantic_context_calibration_uncertainty_huber_delta: float = 0.01
-    # Optional group-spec holdout for calibration-target audits. "even_odd"
-    # trains on one parity of group specs and reports trained vs held-out bins.
-    semantic_context_calibration_holdout_mode: str = "none"
-    semantic_context_calibration_holdout_fold: int = 0
     # Validation/reporting lens for context-gap checkpoint metrics. This keeps
     # low-support champion slices visible in the raw audit while letting model
     # selection target bins with enough support to make a 2-3pp max meaningful.
     semantic_context_metric_min_count: int = 2048
-    # Number of initial epochs that log BCE/context-loss gradient alignment on
-    # semantic MoE and semantic group-relationship parameters.
-    semantic_context_calibration_gradient_diagnostics_epochs: int = 5
