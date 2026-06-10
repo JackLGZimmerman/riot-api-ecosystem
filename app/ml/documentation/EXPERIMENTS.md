@@ -589,8 +589,83 @@ Artifacts: `app/ml/data/experiments/rolled_split_production/player4_res/`
 (checkpoint, metrics, `player_eval.json` ablations; gitignored data dir).
 Note `eval_player.py`'s AUC column is unreliable — use the trainer's AUC.
 
-Next steps: nonlinear residual head (`--player-residual-hidden 32`) to test
-for confidence-gating headroom, seed-5 confirmation of the chosen recipe,
-then the one-time test confirmation; promotion additionally requires
-`predictor.py` to accept puuids and perform the dictionary lookups at serve
-time. Test remains untouched.
+Follow-ups resolved in the next round (below): seed-5 reproduced player4_res
+identically; the nonlinear residual head (`--player-residual-hidden 32`)
+overfit from epoch 1 (val NLL `0.67462` vs `0.66840`) and a lr-`1e-5` full
+unfreeze from player4_res was flat — the 9-param linear form on a frozen base
+is the right altitude. The one-time test confirmation is reported below.
+
+### Player Priors Round 2: Validation Gains Do Not Survive the Test Window (2026-06-10)
+
+This round pushed the player-prior lever further and then took the one-time
+test confirmations. The headline: every player-prior head — however
+regularized — improves validation and **hurts test**. The lever is blocked by
+aggregate staleness, not by modeling.
+
+**Role experience (v31, committed).** Probe: per-`(puuid, teamposition)` train
+game count `d_role_games` has `0.5481` solo AUC and was the only survivor of a
+recency/level screen (`d_level` `0.4907` dead; recency rates collinear or
+dead) — matchmaking balances skill but not champion/role experience. Data
+path: `player_role_1vx` aggregate (6032) + dictionary (7017), v31 cache array
+`player_role_cnt` (LOO-adjusted), `player_prior_feature_dim` config (8 = v30
+blocks, 11 adds role conf/log-count/missing) keeps old checkpoints loadable.
+Core v30 arrays stayed byte-identical. Trained the same frozen-base linear
+residual with dim 11 (seeds 4/5, identical): val `58.79-58.80%` / `0.66826` —
+a wash vs dim-8 player4_res (`58.86%` / `0.66851`). The probe's `+0.27pp` was
+measured with a val-fitted stack; under train-window fitting it washes out.
+
+**Window-adapted head (closed-form).** The residual head is linear over
+blue-minus-red team-mean features on a frozen base, so it can be fitted
+offline as ridge logistic regression with the warm4 logit as offset and
+patched into a checkpoint (reconstruction verified exact: the patched
+player4_role head reproduces the trainer's val `0.58788` / `0.66826` to 5
+decimals). Two findings from the (window, lambda) sweep on validation:
+
+- Unregularized fits lose to the SGD epoch-1 checkpoint at every window
+  (best `0.67227` NLL vs `0.66826`): train rows carry LOO features while val
+  rows use full priors, so the fit needs explicit ridge — early stopping was
+  supplying that regularization implicitly.
+- With ridge, late windows dominate full-train smoothly. Center-of-region
+  pick `dim11, last-15% of train by gamecreation, lambda 0.15` (standardized):
+  val `59.22%` / `0.66732`, ablation lift `+1.21pp` global / `+2.76pp`
+  central. Best NLL cell `0.66640` (dim8, last-10%, lambda 0.3).
+
+**One-time test confirmations (both fail).**
+
+| candidate | val acc / NLL | test acc / NLL | test ablation lift |
+| --- | --- | --- | --- |
+| player4_res (SGD, dim 8) | `58.86%` / `0.66851` | `57.52%` / `0.67646` | `-0.16pp` acc, `+0.0029` NLL |
+| late15_l015 (ridge, dim 11) | `59.22%` / `0.66732` | `57.54%` / `0.67771` | `-0.13pp` acc, `+0.0044` NLL |
+
+The player path is net negative on test for both the conservative and the
+window-adapted head. Cause: player aggregates are frozen at the train
+boundary; val sits directly after that boundary (~0-12 days stale) and test
+another window later (~12-24 days), and the prior-to-outcome relationship
+decays past sign-flip within that horizon. This is the same structural
+constraint round 2 of the rolled-split work isolated for the teacher: frozen
+data, not architecture, is binding.
+
+**Verdict.** No promotion. The player-prior lever carries real draft-safe
+signal (the val gains are causal per ablation and reproduce across seeds and
+fitting methods) but cannot clear a test gate while serve-time aggregates are
+frozen at a boundary weeks in the past. Production realization requires
+continuously refreshed player dictionaries (staleness of hours, not weeks) —
+the existing user-gated data-refresh decision. Within the frozen evaluation
+protocol, extrapolating the measured coefficient decay to the test lag
+predicts a head of ~zero, i.e. no test gain is available from this lever even
+in principle.
+
+**60% gate assessment.** With player priors excluded, the validated frontier
+is warm4 at `57.9%` val / `~57.7%` test. Every remaining input axis has been
+audited: context head saturated at the draft-time ceiling, relationship
+features removed as dead, recency/level dead, role experience marginal,
+player skill blocked by staleness. The `>=60%` val+test accuracy gate in
+HGNN_CURRENT.md is not reachable under the frozen split + frozen aggregates
+protocol; the two levers that move it (rolling split refresh, refreshed
+player aggregates) are both pipeline decisions outside model training.
+
+Artifacts (gitignored data dir):
+`rolled_split_production/{player4_role,player5_role,late15_l015}/`,
+`late_head_fit.py` + `late_head_fit_report.json` (sweep), patched-checkpoint
+candidate in `late15_l015/model.pt`. The `eval_player.py` no-player ablation
+now also zeroes `player_role_cnt` for dim-11 checkpoints.

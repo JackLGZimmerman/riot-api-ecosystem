@@ -87,6 +87,16 @@ does not meet that gate yet, but it is the strongest no-relationship checkpoint
 installed locally and the first production artifact to consume all three frozen
 identity encoders through the semantic MoE.
 
+Gate reachability (2026-06-10): every draft-safe input axis has now been
+audited — context head saturated at the draft-time ceiling, relationship
+features dead, recency/level dead, role experience marginal, and player-skill
+priors blocked by aggregate staleness (val gains flip negative on test; see
+Player Priors Round 2 in `EXPERIMENTS.md`). The gate is not reachable under
+the frozen split boundary + frozen aggregates protocol. The two levers that
+move it — rolling the split windows with refreshed data, and continuously
+refreshed player aggregate dictionaries — are pipeline decisions, both
+user-gated.
+
 Promoted checkpoint and metrics:
 `app/ml/data/hgnn_production_model.pt` and
 `app/ml/data/metrics_latest.json`.
@@ -113,14 +123,16 @@ warm start.
 Loadout uses train-only, leave-one-out-adjusted historical priors over
 summoner spell pairs, broad rune setup, full rune page, secondary rune pair, and
 stat shards. Rune rows are joined through `puuid` only to align the selected
-rune page; no player identity is emitted into `loadout_features.npy`. The v30
-cache separately records optional player-prior arrays, but `use_player_priors`
-remains disabled for promoted production serving until the runtime protocol
-passes player features. A frozen-base game-level player-prior residual
-candidate (`player_prior_mode="residual"`) has cleared validation at
-`58.86%` / NLL `0.66851` (see the player-priors round in `EXPERIMENTS.md`);
-promotion requires `predictor.py` puuid wiring plus the standard seed and
-one-time test confirmation. Patch Temporal is restricted to season/patch blue-side
+rune page; no player identity is emitted into `loadout_features.npy`. The v31
+cache separately records optional player-prior arrays (overall, per-champion,
+and per-role experience), but `use_player_priors` stays disabled for
+production serving: player-prior heads gain up to `+1.3pp` on validation and
+lose on test (`-0.13` to `-0.16pp` vs their no-player ablation) because the
+cached aggregates are frozen at the train boundary and their predictive value
+decays past sign-flip within the val-to-test horizon (see Player Priors
+Round 2 in `EXPERIMENTS.md`). Re-opening this lever requires continuously
+refreshed player dictionaries at serve and eval time — a pipeline decision,
+not a training change. Patch Temporal is restricted to season/patch blue-side
 drift only and does not include champion-role patch deltas.
 
 Historical comparison: the best prior full-split no-relationship residual check
