@@ -14,6 +14,11 @@ consumes all three sidecar blocks through
 MLPs remain disabled by default. See
 [HGNN_CURRENT.md](HGNN_CURRENT.md#identity-encoder-sidecars).
 
+Build-intent work is tracked separately in
+[HGNN_BUILD_INTENT.md](HGNN_BUILD_INTENT.md). That plan keeps observed final
+build labels as oracle diagnostics only and defines the accepted path as
+train-only historical build-profile prior marginalisation.
+
 ## Production Path
 
 ```text

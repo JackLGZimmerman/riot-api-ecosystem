@@ -16,7 +16,7 @@ CACHE_DIR = ML_DATA_DIR / "cache"
 DEFAULT_ENCODER_SIDECAR_PATH = (
     ML_DATA_DIR / "semantic_identity_sidecar_compact.npz"
 )
-DEFAULT_TRAIN_BATCH_CAP = 40960
+DEFAULT_TRAIN_BATCH_CAP = 16384
 
 PLAYER_PIVOT_TABLE = "game_data_filtered.ml_game_player_pivot"
 SOLO_PRIOR_TABLE = "game_data_filtered.synergy_1vx"
@@ -74,8 +74,9 @@ class TrainConfig:
     # keep loaded checkpoint parameters fixed and train only newly introduced
     # parameters that were missing from the checkpoint.
     freeze_warm_start_loaded_parameters: bool = False
-    batch_size: int = 32768
-    # Effective training batch safety cap for the team-swapped HGNN loop.
+    batch_size: int = DEFAULT_TRAIN_BATCH_CAP
+    # Effective training batch cap for the current production architecture.
+    # Retune with epoch samples/s whenever parameter count changes.
     # Set to 0 or None to disable for explicit throughput/allocator sweeps.
     train_batch_cap: int | None = DEFAULT_TRAIN_BATCH_CAP
     # Optional per-epoch row cap for candidate screens. Production defaults to

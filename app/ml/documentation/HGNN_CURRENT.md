@@ -22,6 +22,12 @@ current cache now contains `1,647,915` games through the ML-valid S16.11 window
 checkpoint and metrics below remain the previous production record until the
 rolled-split production recipe is retrained and evaluated.
 
+Rolled-split evaluation note, 2026-06-10: active-default production runs are
+being evaluated on the refreshed cache with `convex_encoder_mix` 128x32, batch
+`16384`, learning rate `3e-4`, and seeds `4` and `5`. Promotion remains gated by
+validation-first selection plus one-time test confirmation in
+[EXPERIMENTS.md](EXPERIMENTS.md#rolled-split-test-plan).
+
 ## Production Path
 
 Default training and serving use the 1vX player prior, champion/build identity
@@ -251,7 +257,7 @@ audit. The ablation runner used the config from `metrics_latest.json`
 (`learning_rate=1e-4`, `batch_size=32768`, `max_epochs=40`, `patience=5`,
 `checkpoint_metric=val_accuracy`, `semantic_context_calibration_target=group_eb`,
 `semantic_context_calibration_loss_weight=10.0`), which differs from the
-production defaults documented above (`3e-4`, `40960`).
+production defaults documented above (`3e-4`, `16384`).
 
 Primary context ranking was the mean of validation/test flagged
 support-weighted mean absolute gap from `HGNN_CONTEXT_EXAMPLES_AUDIT.md`; lower
@@ -366,26 +372,29 @@ flowchart TD
 
 ## Throughput Default
 
-Use `--batch-size 40960` for every HGNN experiment unless the experiment is
-explicitly a throughput/allocator sweep. The archived local RTX 5070 Ti sweep
-found batch `40960` as the peak stable point at `135,014`
-team-swap-augmented samples/s (`67,507` raw rows/s). Larger tested batches
-regressed:
+Use `--batch-size 16384` for the current `convex_encoder_mix` 128x32 HGNN
+recipe unless the experiment is explicitly a throughput/allocator sweep. Batch
+size is architecture-dependent: if parameter count or activation footprint
+increases, retune downward by measured samples/s; if it decreases, retune upward
+only after a fresh sweep. The 2026-06-10 local RTX 5070 Ti sweep on the refreshed
+S16.1-S16.11 cache found batch `16384` as the fastest stable point at `51,505`
+team-swap-augmented samples/s (`25,752` raw rows/s). Larger tested batches hit
+the allocator/throughput cliff:
 
 | Batch size | Augmented samples/s | Raw rows/s |
 | ---: | ---: | ---: |
-| `32768` | `120,960` | `60,480` |
-| `40960` | **`135,014`** | **`67,507`** |
-| `41984` | `102,908` | `51,454` |
-| `43008` | `97,181` | `48,590` |
-| `49152` | `62,598` | `31,299` |
+| `12288` | `49,182` | `24,591` |
+| `16384` | **`51,505`** | **`25,752`** |
+| `20480` | `16,020` | `8,010` |
+| `24576` | `5,126` | `2,563` |
+| `28672` | `4,708` | `2,354` |
 
 ## Active Defaults
 
 | Area | Default |
 | --- | --- |
 | Checkpoint metric | `val_accuracy` |
-| Training batch size / throughput | `40960`; `135,014` augmented samples/s on the local RTX 5070 Ti sweep. |
+| Training batch size / throughput | `16384`; `51,505` augmented samples/s on the 2026-06-10 local RTX 5070 Ti sweep for the current 128x32 recipe. |
 | Learning rate / patience / weight decay | `3e-4` / `5` / `0.0` |
 | Report-only temperature scaling | Fit on validation logits only; never changes served probabilities. |
 | Direct 1v1/2vX integrations | Removed from the model, cache, priors, and predictor. |

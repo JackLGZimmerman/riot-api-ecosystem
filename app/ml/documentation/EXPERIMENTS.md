@@ -348,6 +348,19 @@ metadata and split sizes.
 
 ### Rolled Split Test Plan
 
+Execution note, 2026-06-10: the rolled-split production recipe is being
+evaluated with the active defaults from `HGNN_CURRENT.md`: `convex_encoder_mix`
+128x32, compact sidecar, semantic group features, batch `16384`, learning rate
+`3e-4`, `max_epochs=40`, `patience=5`, `checkpoint_metric=val_accuracy`, and
+seeds `4` and `5`. Candidate artifacts are written under
+`app/ml/data/experiments/rolled_split_production/` until promotion gates are
+checked.
+
+Batch `16384` is the measured throughput setting for the current architecture
+(`51,505` team-swap-augmented samples/s on the local RTX 5070 Ti). If the MoE or
+other model capacity changes, batch size must be reselected by samples/s rather
+than carried over mechanically.
+
 1. Freeze this refreshed data state as the candidate rolled-boundary protocol.
    Record the split ranges above with every run so results are not compared
    against the older Apr-22/S16.8 boundary by accident.
