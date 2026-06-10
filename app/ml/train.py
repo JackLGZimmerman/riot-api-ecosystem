@@ -97,6 +97,10 @@ class RawTensorSplit:
     semantic_group_features: torch.Tensor | None = None
     loadout_features: torch.Tensor | None = None
     patch_features: torch.Tensor | None = None
+    player_rate: torch.Tensor | None = None
+    player_cnt: torch.Tensor | None = None
+    player_champ_rate: torch.Tensor | None = None
+    player_champ_cnt: torch.Tensor | None = None
 
 
 class _SidecarGatherer:
@@ -281,7 +285,19 @@ def _drop_unused_model_arrays(
         "semantic_group_features": not semantic_group_features_enabled,
         "loadout_features": int(config.loadout_feature_dim) <= 0,
         "patch_features": int(config.patch_feature_dim) <= 0,
+        "player_rate": not config.use_player_priors,
+        "player_cnt": not config.use_player_priors,
+        "player_champ_rate": not config.use_player_priors,
+        "player_champ_cnt": not config.use_player_priors,
     }
+    if config.use_player_priors:
+        for name in ("player_rate", "player_cnt", "player_champ_rate", "player_champ_cnt"):
+            value = getattr(split, name)
+            if value is None or value.ndim != 2 or value.shape[1] != 10:
+                raise ValueError(
+                    f"HGNN config enables player priors, but the cache is missing "
+                    f"{name} [games, 10]; rebuild the dataset cache (v30)."
+                )
     for name, dim in (
         ("loadout_features", int(config.loadout_feature_dim)),
         ("patch_features", int(config.patch_feature_dim)),
@@ -1204,6 +1220,10 @@ def _hgnn_inputs_from_raw(
         semantic_group_features=raw.semantic_group_features,
         loadout_features=raw.loadout_features,
         patch_features=raw.patch_features,
+        player_rate=raw.player_rate,
+        player_cnt=raw.player_cnt,
+        player_champ_rate=raw.player_champ_rate,
+        player_champ_cnt=raw.player_champ_cnt,
         device=device,
         **sidecar,
     )
@@ -3511,6 +3531,8 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "semantic_group_relationship_hidden": args.semantic_group_relationship_hidden,
         "semantic_group_relationship_dropout": args.semantic_group_relationship_dropout,
         "semantic_group_relationship_l2_weight": args.semantic_group_relationship_l2_weight,
+        "use_player_priors": args.use_player_priors,
+        "player_prior_hidden": args.player_prior_hidden,
     }
 
 
@@ -3973,6 +3995,22 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         "--semantic-group-relationship-l2-weight",
         type=float,
         default=model_defaults.semantic_group_relationship_l2_weight,
+    )
+    parser.add_argument(
+        "--use-player-priors",
+        action=argparse.BooleanOptionalAction,
+        default=model_defaults.use_player_priors,
+        help=(
+            "Feed draft-safe per-player priors (overall and per-champion "
+            "train-window record) through a zero-initialised node-feature "
+            "encoder. Requires a v30 cache."
+        ),
+    )
+    parser.add_argument(
+        "--player-prior-hidden",
+        type=_parse_int_tuple,
+        default=model_defaults.player_prior_hidden,
+        help="Comma-separated hidden sizes for the player prior encoder MLP.",
     )
     args = parser.parse_args()
     if args.use_semantic_group_features and not args.use_learned_semantic_moe:

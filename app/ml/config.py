@@ -21,6 +21,8 @@ DEFAULT_TRAIN_BATCH_CAP = 16384
 PLAYER_PIVOT_TABLE = "game_data_filtered.ml_game_player_pivot"
 SOLO_PRIOR_TABLE = "game_data_filtered.synergy_1vx"
 SOLO_PRIOR_DICT = "game_data_filtered.synergy_1vx_dict"
+PLAYER_PRIOR_DICT = "game_data_filtered.player_1vx_dict"
+PLAYER_CHAMP_PRIOR_DICT = "game_data_filtered.player_champ_1vx_dict"
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,9 @@ class DatasetConfig:
     player_pivot_table: str = PLAYER_PIVOT_TABLE
     solo_prior_table: str = SOLO_PRIOR_TABLE
     solo_prior_dict: str = SOLO_PRIOR_DICT
+    # Draft-safe per-player priors (train-window overall and per-champion).
+    player_prior_dict: str = PLAYER_PRIOR_DICT
+    player_champ_prior_dict: str = PLAYER_CHAMP_PRIOR_DICT
     val_fraction: float = 0.1
     test_fraction: float = 0.1
     smoothing_prior_mean: float = 0.5

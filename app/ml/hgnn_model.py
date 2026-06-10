@@ -93,6 +93,11 @@ class HGNNConfig:
     patch_residual_hidden: tuple[int, ...] = ()
     patch_residual_dropout: float = 0.0
     patch_residual_max_abs_logit: float = 0.15
+    # Draft-safe per-player priors (v30 cache): per-slot (mu, conf, log_count,
+    # missing) for the player's overall and per-champion train-window record,
+    # encoded by a zero-initialised MLP added to the 1vX phi node features.
+    use_player_priors: bool = False
+    player_prior_hidden: tuple[int, ...] = (32,)
 
 
 def resolve_device(device: str) -> str:
@@ -158,6 +163,10 @@ def build_hgnn_inputs(
     semantic_group_features: Any | None = None,
     loadout_features: Any | None = None,
     patch_features: Any | None = None,
+    player_rate: Any | None = None,
+    player_cnt: Any | None = None,
+    player_champ_rate: Any | None = None,
+    player_champ_cnt: Any | None = None,
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
     """Turn raw cache/prior arrays into the model's node/edge tensors.
@@ -195,6 +204,17 @@ def build_hgnn_inputs(
     ):
         if value is not None:
             inputs[name] = to_tensor(value)
+    if player_rate is not None and player_champ_rate is not None:
+        blocks = []
+        for rate, cnt in (
+            (player_rate, player_cnt),
+            (player_champ_rate, player_champ_cnt),
+        ):
+            count = to_tensor(cnt)
+            conf, log_count, missing = support_features(count, strength)
+            # mu stays in probability space; the model maps it to a clipped logit.
+            blocks.extend([to_tensor(rate), conf, log_count, missing])
+        inputs["player_prior_features"] = torch.stack(blocks, dim=-1)
     return inputs
 
 
@@ -233,6 +253,7 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
         "identity_temporal_sidecar",
         "identity_encoder_support",
         "semantic_group_features",
+        "player_prior_features",
     ):
         if key in inputs:
             swapped[key] = swap_halves(inputs[key], 5)
@@ -1507,6 +1528,16 @@ class HGNNWinModel(nn.Module):
             if c.use_learned_semantic_moe
             else None
         )
+        # Zero-initialised per-slot encoder over draft-safe player priors; its
+        # output adds to the 1vX phi node features, so it is a no-op at init
+        # and warm starts from player-blind checkpoints are exact.
+        self.player_prior_node = (
+            _mlp(8, c.player_prior_hidden, c.edge_hidden, dropout=c.dropout)
+            if c.use_player_priors
+            else None
+        )
+        if self.player_prior_node is not None:
+            _zero_last_linear(self.player_prior_node)
         # Node init fuses the multiplicative identity with the 1vX posterior (§3).
         self.node_init = _mlp(
             c.node_dim + c.edge_hidden, c.node_init_hidden, c.node_dim, dropout=c.dropout
@@ -1795,6 +1826,7 @@ class HGNNWinModel(nn.Module):
         semantic_group_features: torch.Tensor | None = None,
         loadout_features: torch.Tensor | None = None,
         patch_features: torch.Tensor | None = None,
+        player_prior_features: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         # Node init: multiplicative identity (§3) fused with the 1vX posterior.
         identity_components = self.identity.components(champion_id, build_id)
@@ -1814,6 +1846,22 @@ class HGNNWinModel(nn.Module):
             conf_1vx,
             log_count_1vx,
         )
+        if self.player_prior_node is not None:
+            if player_prior_features is None:
+                raise ValueError(
+                    "use_player_priors=True requires player_prior_features "
+                    "[batch, 10, 8]; rebuild the dataset cache (v30)."
+                )
+            feats = torch.cat(
+                [
+                    _logit(player_prior_features[..., 0:1], self.config.logit_clip),
+                    player_prior_features[..., 1:4],
+                    _logit(player_prior_features[..., 4:5], self.config.logit_clip),
+                    player_prior_features[..., 5:8],
+                ],
+                dim=-1,
+            )
+            phi_node = phi_node + self.player_prior_node(feats)
         h = self.node_norm(self.node_init(torch.cat([h0, phi_node], dim=-1)))
 
         a = self._readout(h[:, :5])
@@ -1893,6 +1941,7 @@ class HGNNWinModel(nn.Module):
         semantic_group_features: torch.Tensor | None = None,
         loadout_features: torch.Tensor | None = None,
         patch_features: torch.Tensor | None = None,
+        player_prior_features: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         inputs = {
             "champion_id": champion_id,
@@ -1910,6 +1959,7 @@ class HGNNWinModel(nn.Module):
             "semantic_group_features": semantic_group_features,
             "loadout_features": loadout_features,
             "patch_features": patch_features,
+            "player_prior_features": player_prior_features,
         }
         inputs.update(optional)
         filtered = {key: value for key, value in inputs.items() if value is not None}

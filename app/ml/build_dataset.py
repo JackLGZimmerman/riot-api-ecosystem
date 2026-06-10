@@ -37,29 +37,44 @@ setup_logging_config()
 logger = logging.getLogger(__name__)
 
 def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
-    """Subtract each train game's own outcome from its in-sample solo prior, in place.
+    """Subtract each train game's own outcome from its in-sample priors, in place.
 
     Own-outcome per slot is the focal side's win: blue 0-4 / red 5-9. Count-1
     cells collapse to count 0, so smoothing returns their composite prior.
+    Applies to the solo (champion/role/build) prior and both per-player priors.
     """
     blue_win = raw["blue_win"]
     red_win = 1.0 - blue_win
-    solo_own = np.concatenate(
+    own = np.concatenate(
         [np.broadcast_to(blue_win[:, None], (blue_win.size, 5)),
          np.broadcast_to(red_win[:, None], (blue_win.size, 5))], axis=1
     )
 
-    count = raw["p1_cnt"]
-    loo_count = count - 1.0
-    loo_wins = np.rint(raw["p1_raw"] * count) - solo_own
-    safe = loo_count > 0.0
-    raw["p1_raw"] = np.where(safe, loo_wins / np.where(safe, loo_count, 1.0), 0.5)
-    raw["p1_cnt"] = np.maximum(loo_count, 0.0)
+    for rate_key, cnt_key in (("p1_raw", "p1_cnt"), ("pl_raw", "pl_cnt"), ("plc_raw", "plc_cnt")):
+        count = raw[cnt_key]
+        loo_count = count - 1.0
+        loo_wins = np.rint(raw[rate_key] * count) - own
+        safe = loo_count > 0.0
+        raw[rate_key] = np.where(safe, loo_wins / np.where(safe, loo_count, 1.0), 0.5)
+        raw[cnt_key] = np.maximum(loo_count, 0.0)
 
 
 def _solo(attr: str, default: str) -> str:
     # The solo prior key is the player tuple (championid, teamposition, build) itself.
     return f"arrayMap(k -> dictGetOrDefault('{{solo_prior_dict}}', '{attr}', k, {default}), solo_keys)"
+
+
+def _player(attr: str, default: str) -> str:
+    # Per-player prior keyed by puuid alone.
+    return f"arrayMap(k -> dictGetOrDefault('{{player_prior_dict}}', '{attr}', tuple(k), {default}), player_keys)"
+
+
+def _player_champ(attr: str, default: str) -> str:
+    # Per-(player, champion) prior; champion comes from the matching solo key.
+    return (
+        f"arrayMap((k, s) -> dictGetOrDefault('{{player_champ_prior_dict}}', '{attr}', "
+        f"(k, toInt32(tupleElement(s, 1))), {default}), player_keys, solo_keys)"
+    )
 
 
 # Two-stage query: the subquery canonicalises the per-slot solo key once per game,
@@ -71,6 +86,10 @@ SELECT
     {_solo("matchups", "toUInt32(0)")} AS p1_cnt,
     arrayMap(k -> toInt16(k.1), solo_keys) AS champion_id,
     arrayMap(k -> toInt16(if(indexOf({{build_vocab}}, toString(k.3)) = 0, {{n_builds}}, indexOf({{build_vocab}}, toString(k.3)) - 1)), solo_keys) AS build_id,
+    {_player("win_rate", "toFloat32(0.5)")} AS pl_raw,
+    {_player("matchups", "toUInt32(0)")} AS pl_cnt,
+    {_player_champ("win_rate", "toFloat32(0.5)")} AS plc_raw,
+    {_player_champ("matchups", "toUInt32(0)")} AS plc_cnt,
     matchid
 FROM (
     SELECT
@@ -78,7 +97,8 @@ FROM (
         blue_win,
         arrayMap(p -> (tupleElement(p, 1), tupleElement(p, 2), {{key_build_expr}}), blue_players) AS blue_key_players,
         arrayMap(p -> (tupleElement(p, 1), tupleElement(p, 2), {{key_build_expr}}), red_players) AS red_key_players,
-        arrayConcat(blue_key_players, red_key_players) AS solo_keys
+        arrayConcat(blue_key_players, red_key_players) AS solo_keys,
+        arrayMap(p -> toString(tupleElement(p, 4)), arrayConcat(blue_players, red_players)) AS player_keys
     FROM {{table}}
     WHERE split = '{{split}}' AND matchid > '{{last_matchid}}'
     ORDER BY matchid
@@ -140,6 +160,7 @@ def _remove_stale_sidecar_arrays(cache_dir: Path) -> None:
 _RAW_COLUMNS = (
     "blue_win", "p1_raw", "p1_cnt",
     "champion_id", "build_id",
+    "pl_raw", "pl_cnt", "plc_raw", "plc_cnt",
 )
 
 _CHUNK_SIZE = 50_000
@@ -187,21 +208,32 @@ def _smoothed_features(
     raw: dict[str, np.ndarray],
     cfg: DatasetConfig,
 ) -> dict[str, np.ndarray]:
-    win_rate = smooth_rate_by_mode(
-        raw["p1_raw"],
-        raw["p1_cnt"],
-        prior_mean=cfg.smoothing_prior_mean,
-        prior_strength=cfg.smoothing_prior_strength,
-        amplification_threshold=cfg.amplification_threshold,
-        smoothing_mode=cfg.smoothing_mode,
-        confidence_threshold=cfg.prior_confidence_matchups,
-    )
+    def smooth(rate: np.ndarray, count: np.ndarray, prior_mean) -> np.ndarray:
+        return smooth_rate_by_mode(
+            rate,
+            count,
+            prior_mean=prior_mean,
+            prior_strength=cfg.smoothing_prior_strength,
+            amplification_threshold=cfg.amplification_threshold,
+            smoothing_mode=cfg.smoothing_mode,
+            confidence_threshold=cfg.prior_confidence_matchups,
+        )
+
+    win_rate = smooth(raw["p1_raw"], raw["p1_cnt"], cfg.smoothing_prior_mean)
+    player_rate = smooth(raw["pl_raw"], raw["pl_cnt"], cfg.smoothing_prior_mean)
+    # Nested EB: the per-(player, champion) rate shrinks toward the player's
+    # own smoothed overall rate, not the global mean.
+    player_champ_rate = smooth(raw["plc_raw"], raw["plc_cnt"], player_rate)
     return {
         "blue_win": raw["blue_win"],
         "win_rate": win_rate.astype(DISK_DTYPES["win_rate"], copy=False),
         "p1_cnt": raw["p1_cnt"].astype(DISK_DTYPES["p1_cnt"], copy=False),
         "champion_id": raw["champion_id"].astype(DISK_DTYPES["champion_id"], copy=False),
         "build_id": raw["build_id"].astype(DISK_DTYPES["build_id"], copy=False),
+        "player_rate": player_rate.astype(DISK_DTYPES["player_rate"], copy=False),
+        "player_cnt": raw["pl_cnt"].astype(DISK_DTYPES["player_cnt"], copy=False),
+        "player_champ_rate": player_champ_rate.astype(DISK_DTYPES["player_champ_rate"], copy=False),
+        "player_champ_cnt": raw["plc_cnt"].astype(DISK_DTYPES["player_champ_cnt"], copy=False),
     }
 
 
@@ -242,6 +274,8 @@ def _stream_split(
         query = _CHUNK_QUERY_TEMPLATE.format(
             table=cfg.player_pivot_table,
             solo_prior_dict=cfg.solo_prior_dict,
+            player_prior_dict=cfg.player_prior_dict,
+            player_champ_prior_dict=cfg.player_champ_prior_dict,
             split=split,
             last_matchid=last_matchid,
             chunk=chunk,
@@ -343,6 +377,8 @@ def _write_meta(
                     "player_pivot_table": cfg.player_pivot_table,
                     "solo_prior_table": cfg.solo_prior_table,
                     "solo_prior_dict": cfg.solo_prior_dict,
+                    "player_prior_dict": cfg.player_prior_dict,
+                    "player_champ_prior_dict": cfg.player_champ_prior_dict,
                 },
             },
             indent=2,
