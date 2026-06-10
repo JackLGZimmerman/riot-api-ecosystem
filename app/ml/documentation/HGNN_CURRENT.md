@@ -22,11 +22,20 @@ current cache now contains `1,647,915` games through the ML-valid S16.11 window
 checkpoint and metrics below remain the previous production record until the
 rolled-split production recipe is retrained and evaluated.
 
-Rolled-split evaluation note, 2026-06-10: active-default production runs are
-being evaluated on the refreshed cache with `convex_encoder_mix` 128x32, batch
-`16384`, learning rate `3e-4`, and seeds `4` and `5`. Promotion remains gated by
-validation-first selection plus one-time test confirmation in
-[EXPERIMENTS.md](EXPERIMENTS.md#rolled-split-test-plan).
+Rolled-split evaluation outcome, 2026-06-10: two candidate rounds were
+evaluated on the refreshed cache under validation-first selection (test never
+inspected). The from-scratch lr `3e-4` recipe was rejected on audit and
+accuracy guardrails. The warm-started lr `1e-4` fine-tune of the incumbent
+checkpoint beats the incumbent on every global validation metric
+(`57.94%` / `0.673202` / AUC `0.60786` on seed 4) with in-range audits, but
+the pre-registered `+0.003` central NLL validation gate failed
+(`0.0015`; the gate is structurally unreachable under the rolled protocol —
+the teacher ceiling itself bounds boundary-respecting candidates near
+`~0.0023`). No promotion this round; the production checkpoint below is
+unchanged, and the strongest rolled-validation checkpoint is retained at
+`app/ml/data/experiments/rolled_split_production/warm4/model.pt` pending a
+user decision on a separate data-refresh promotion gate. See
+[EXPERIMENTS.md](EXPERIMENTS.md#rolled-split-test-plan) rounds 1-2.
 
 ## Production Path
 

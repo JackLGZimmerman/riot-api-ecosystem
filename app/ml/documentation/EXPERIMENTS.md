@@ -444,3 +444,90 @@ signature is recipe-induced miscalibration, not rolled-data damage, and the
 incumbent's lineage is exactly this low-lr warm-start path; the fine-tune
 should keep the calibrated group geometry while collecting the same-patch
 freshness dividend measured by the time-local teacher ceiling.
+
+### Rolled Split Round 2: Warm-Start Fine-Tune, Gates Decide Rejection (2026-06-10)
+
+Round 2 warm-started from the incumbent production checkpoint
+(`app/ml/data/hgnn_production_model.pt`), fine-tuned on the rolled train
+window at lr `1e-4` (no parameter freeze, batch `16384`, val-accuracy
+checkpointing, seeds `4`/`5`; best epochs `2`/`1`, ~6 minutes each). All
+selection used validation only; test was never inspected.
+
+Global validation and audit guardrails (rolled val):
+
+| run | acc | NLL | AUC | high-support max gap | group EB MSE / max gap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| incumbent | `57.812%` | `0.673779` | `0.60608` | `3.94pp` | `1.28` / `3.74pp` |
+| warm seed 4 | `57.936%` | `0.673202` | `0.60786` | `3.53pp` | `1.39` / `4.58pp` |
+| warm seed 5 | `57.910%` | `0.673262` | `0.60696` | `3.87pp` | `1.62` / `3.88pp` |
+
+The fine-tune dominates the incumbent on every global validation metric and
+restores a faithful no-group base (`~57.5%` global no-group accuracy, band
+sizes within 4% of the incumbent's), unlike the round-1 from-scratch runs.
+
+Within-run no-group band lifts (validation):
+
+| run | central acc lift | central NLL lift | diagnostic acc lift | diagnostic NLL lift |
+| --- | ---: | ---: | ---: | ---: |
+| incumbent | `+0.711pp` | `0.001002` | `+1.029pp` | `0.000830` |
+| warm seed 4 | `+0.978pp` | `0.001535` | `+1.410pp` | `0.001268` |
+| warm seed 5 | `+0.991pp` | `0.001445` | `+1.525pp` | `0.001120` |
+
+Gate check: central accuracy lift passes (`+0.98pp`/`+0.99pp` vs `+0.50pp`);
+central NLL lift fails (`0.001535`/`0.001445` vs `0.003`). Audit metrics are
+mixed-in-range (context gaps better than incumbent, group EB slightly worse,
+both at the documented audit-floor noise scale).
+
+Cross-model comparison on the incumbent-fixed central band (the time-local
+teacher construction; band = incumbent `p_no_group in [0.45, 0.55]`,
+validation, covered = S16.9 rows with same-patch train history):
+
+| scope | n | warm4 NLL lift vs incumbent full | vs incumbent no-group | warm4 acc lift vs incumbent full |
+| --- | ---: | ---: | ---: | ---: |
+| central | 60,649 | `0.000530` | `0.001532` | `+0.228pp` |
+| central covered | 27,499 | `0.000704` | `0.001759` | `+0.462pp` |
+| central uncovered | 33,150 | `0.000386` | `0.001344` | `+0.033pp` |
+
+(Seed 5 is uniformly slightly lower: `0.000376` central vs incumbent full.)
+
+Findings:
+
+- The production-true rolled refresh delivers a real but small model-level
+  dividend (`~0.0005` central NLL, `~0.0006` global NLL, `+0.12pp` accuracy),
+  concentrated in the covered cohort, directionally matching the time-local
+  teacher ceiling at roughly half its size on covered rows
+  (`0.001759` vs `~0.0030-0.0034` teacher-level same-patch lift over the
+  no-group base).
+- The `+0.003` validation central NLL gate is structurally unreachable under
+  the rolled chronological protocol: the teacher ceiling itself is `~0.0030`
+  on the covered ~45% of the band and `~0.0018` on the uncovered remainder,
+  bounding any boundary-respecting candidate near `~0.0023` overall. The
+  rejection is a property of the protocol mix (held-out windows always
+  contain uncovered patches), not a near-miss of this candidate.
+- Same-patch history in train lifts the group path only mildly within-run
+  (covered `0.001728` vs uncovered `0.001375` central NLL lift for warm4):
+  the freshness dividend flows mostly through the non-group paths, consistent
+  with the teacher finding that the signal is era freshness, not the group
+  target surface.
+
+Decision: under the pre-registered step-5 validation gates the candidate is
+rejected; the one-time test confirmation was not run and test remains
+untouched for a future predeclared candidate. Per step 9, no semantic
+architecture sweep follows. The remaining levers are user-gated protocol and
+operations decisions, not model changes:
+
+1. Adopt a separate production-refresh promotion gate (global
+   validation NLL/accuracy/AUC improvement plus non-regressing audit), under
+   which warm seed 4 is promotable as a data refresh of the same
+   architecture.
+2. Keep the semantic-boundary `+0.003` gate for what it was designed for —
+   group-path architecture changes — and stop applying it to data refreshes.
+3. Operations: refresh cadence well inside a patch remains the documented
+   recommendation; the rolled fine-tune (~6 minutes) makes within-patch
+   refresh cheap.
+
+Round-2 artifacts: `app/ml/data/experiments/rolled_split_production/`
+(`warm4/`, `warm5/`, `existing/`, `no_group_bands.json`, `cohort_bands.json`,
+`cross_model_central.json`, `val_probabilities.npz`, plus the temporary
+runners `eval_no_group_bands.py`, `cohort_bands.py`,
+`cross_model_central.py`; the data directory is gitignored).
