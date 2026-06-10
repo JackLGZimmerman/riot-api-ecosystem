@@ -381,6 +381,12 @@ S16.1-S16.11 cache found batch `16384` as the fastest stable point at `51,505`
 team-swap-augmented samples/s (`25,752` raw rows/s). Larger tested batches hit
 the allocator/throughput cliff:
 
+Local experiment hardware is an NVIDIA GeForce RTX 5070 Ti with `16,303 MiB`
+VRAM. Production-scale runs should use `--raw-tensor-cache-device cpu` so the
+GPU holds the model and active minibatch rather than the full raw split cache.
+A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
+`67k-71k` team-swap-augmented samples/s before the run was stopped by request.
+
 | Batch size | Augmented samples/s | Raw rows/s |
 | ---: | ---: | ---: |
 | `12288` | `49,182` | `24,591` |
