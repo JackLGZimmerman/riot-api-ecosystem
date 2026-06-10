@@ -24,7 +24,13 @@ from torch import nn
 
 from app.core.config.settings import PROJECT_ROOT
 from app.core.logging.logger import setup_logging_config
-from app.ml.config import DEFAULT_TRAIN_BATCH_CAP, DatasetConfig, TrainConfig
+from app.ml.config import (
+    DEFAULT_PRODUCTION_METRICS_PATH,
+    DEFAULT_PRODUCTION_MODEL_PATH,
+    DEFAULT_TRAIN_BATCH_CAP,
+    DatasetConfig,
+    TrainConfig,
+)
 from app.ml.context_audit_lens import AuditLens
 from app.ml.context_audit_specs import (
     audit_specs,
@@ -38,6 +44,7 @@ from app.ml.hgnn_model import (
     HGNNConfig,
     HGNNWinModel,
     build_hgnn_inputs,
+    hgnn_config_payload,
     save_hgnn_model,
     swap_hgnn_inputs,
 )
@@ -162,7 +169,7 @@ def _build_sidecar_gatherer(
             raise ValueError(
                 "Model uses identity-encoder sidecars but the cache has no per-game "
                 "sidecar arrays and no encoder_sidecar_path. Pass --encoder-sidecar-path "
-                "or rebuild the cache (v28) with the artifact recorded in its meta."
+                "or rebuild the compact cache with the artifact recorded in its meta."
             )
         path = Path(recorded)
     tables = EncoderSidecarLookup.load(path).gather_tables(
@@ -223,8 +230,8 @@ def _drop_unused_model_arrays(
             "identity_encoder_support",
         )
         present = [name for name in sidecar_names if getattr(split, name) is not None]
-        # All absent => latents are gathered per batch from the frozen artifact
-        # (v28 cache). Partial presence means a corrupt or legacy cache: fail early.
+        # All absent => latents are gathered per batch from the frozen artifact.
+        # Partial presence means a corrupt or legacy cache: fail early.
         if present and len(present) < len(sidecar_names):
             missing = [name for name in sidecar_names if getattr(split, name) is None]
             raise ValueError(
@@ -309,8 +316,8 @@ def _drop_unused_model_arrays(
 
 
 def _validate_split_targets(splits: dict[str, SplitData]) -> None:
-    for split_name in ("train", "val", "test"):
-        labels = np.asarray(splits[split_name].blue_win)
+    for split_name, split in splits.items():
+        labels = np.asarray(split.blue_win)
         if labels.ndim != 1:
             raise ValueError(
                 f"{split_name} split blue_win labels must be one-dimensional; "
@@ -798,7 +805,6 @@ def _semantic_moe_diagnostics(
         "semantic_moe_view_entropy",
         "semantic_moe_view_balance_loss",
         "semantic_moe_view_entropy_loss",
-        "semantic_moe_view_top_k",
         "semantic_moe_convex_encoder_mix_enabled",
         "semantic_moe_full_game_slot_delta_mean_abs",
         "semantic_moe_temporal_slot_delta_mean_abs",
@@ -858,6 +864,28 @@ def _validate_train_config(train_cfg: TrainConfig) -> None:
         )
     if train_cfg.semantic_context_metric_min_count < 1:
         raise ValueError("semantic_context_metric_min_count must be >= 1")
+
+
+def _same_output_path(left: Path, right: Path) -> bool:
+    left_resolved = Path(left).expanduser().resolve(strict=False)
+    right_resolved = Path(right).expanduser().resolve(strict=False)
+    return left_resolved == right_resolved
+
+
+def _validate_train_output_paths(train_cfg: TrainConfig) -> None:
+    if train_cfg.allow_production_artifact_overwrite:
+        return
+    blocked: list[str] = []
+    if _same_output_path(train_cfg.model_path, DEFAULT_PRODUCTION_MODEL_PATH):
+        blocked.append(f"model_path={_project_relative(train_cfg.model_path)}")
+    if _same_output_path(train_cfg.metrics_path, DEFAULT_PRODUCTION_METRICS_PATH):
+        blocked.append(f"metrics_path={_project_relative(train_cfg.metrics_path)}")
+    if blocked:
+        raise ValueError(
+            "Training refuses to overwrite production artifacts by default "
+            f"({', '.join(blocked)}). Use experiment output paths or pass "
+            "--allow-production-artifact-overwrite for an explicit promotion run."
+        )
 
 
 def _parse_int_tuple(value: str) -> tuple[int, ...]:
@@ -926,9 +954,9 @@ def _hgnn_inputs_from_raw(
         raise ValueError(
             "HGNN inputs require champion_id/build_id; rebuild the cache (v17)."
         )
-    # v28 caches omit per-game sidecar arrays; gather them from the frozen table
-    # using the batch's identity ids. Legacy caches that still carry per-game
-    # arrays are used directly.
+    # Compact caches omit per-game sidecar arrays; gather from the frozen
+    # artifact using the batch's identity ids. Legacy caches that still carry
+    # per-game arrays are used directly.
     if gatherer is not None and raw.identity_static_sidecar is None:
         sidecar = gatherer.gather(raw.champion_id, raw.build_id)
     else:
@@ -1022,7 +1050,6 @@ def _predict_hgnn_outputs(
         "semantic_moe_view_entropy",
         "semantic_moe_view_balance_loss",
         "semantic_moe_view_entropy_loss",
-        "semantic_moe_view_top_k",
         "semantic_moe_convex_encoder_mix_enabled",
         "semantic_moe_full_game_slot_delta_mean_abs",
         "semantic_moe_temporal_slot_delta_mean_abs",
@@ -1454,6 +1481,7 @@ def train(
     dataset_cfg = dataset_cfg or DatasetConfig()
     train_cfg = train_cfg or TrainConfig()
     _validate_train_config(train_cfg)
+    _validate_train_output_paths(train_cfg)
     device = resolve_device(train_cfg.device)
     _seed_torch(train_cfg.seed, device=device)
     started = time.monotonic()
@@ -1485,17 +1513,20 @@ def train(
         model_config.use_learned_semantic_moe
         and model_config.use_semantic_group_features
     )
+    split_names = ("train", "val") + (("test",) if train_cfg.eval_test else ())
     loaded_splits = {
         name: _limit_split(split, dataset_cfg.max_games)
         for name, split in load_splits(
             dataset_cfg,
             require_counts=True,
             load_semantic_group_features=load_semantic_group_features,
+            allow_semantic_group_feature_materialization=train_cfg.eval_test,
             load_context_raw=load_semantic_group_features,
+            split_names=split_names,
         ).items()
     }
-    # v28 caches omit per-game sidecar arrays; build the on-device gather table
-    # from the frozen artifact when the model consumes identity latents.
+    # Compact caches omit per-game sidecar arrays; build the on-device gather
+    # table from the frozen artifact when the model consumes identity latents.
     gatherer = None
     if (
         _model_uses_sidecar(model_config)
@@ -1864,9 +1895,12 @@ def train(
     model.load_state_dict(best_state)
     save_hgnn_model(train_cfg.model_path, model, confidence_strength=strength)
 
-    tensor_splits["test"] = _cache_raw_tensor_split(
-        "test", splits["test"], device=raw_cache_device
-    )
+    prediction_split_names = split_names
+    prediction_tensor_splits = dict(tensor_splits)
+    if train_cfg.eval_test:
+        prediction_tensor_splits["test"] = _cache_raw_tensor_split(
+            "test", splits["test"], device=raw_cache_device
+        )
     prediction_outputs = {
         split_name: _predict_hgnn_outputs(
             model,
@@ -1876,7 +1910,7 @@ def train(
             device=device,
             gatherer=gatherer,
         )
-        for split_name, tensor_split in tensor_splits.items()
+        for split_name, tensor_split in prediction_tensor_splits.items()
     }
     prediction_logits = {
         split_name: outputs["final_logit"]
@@ -1893,10 +1927,10 @@ def train(
     }
     split_metrics = {
         split_name: _evaluate_predictions(predictions[split_name], splits[split_name])
-        for split_name in ("train", "val", "test")
+        for split_name in prediction_split_names
     }
     if load_semantic_group_features:
-        for split_name in ("train", "val", "test"):
+        for split_name in prediction_split_names:
             split_metrics[split_name].update(
                 _semantic_context_gap_metrics(
                     prediction_outputs[split_name]["focus_side_probability"],
@@ -1912,7 +1946,7 @@ def train(
                     build_vocab=tuple(model_config.build_vocab),
                 )
             )
-    for split_name in ("train", "val", "test"):
+    for split_name in prediction_split_names:
         split_metrics[split_name]["threshold_accuracy"] = _threshold_accuracy(
             predictions[split_name],
             splits[split_name].blue_win,
@@ -1935,7 +1969,7 @@ def train(
         "model_type": "hgnn",
         "dataset_config": asdict(dataset_cfg),
         "train_config": asdict(train_cfg),
-        "model_config": asdict(model_config),
+        "model_config": hgnn_config_payload(model_config),
         "model_path": train_cfg.model_path,
         "metrics_path": train_cfg.metrics_path,
         "device": device,
@@ -1952,15 +1986,17 @@ def train(
         },
         "elapsed_seconds": time.monotonic() - started,
         "history": history,
+        "evaluated_splits": list(prediction_split_names),
         "train": split_metrics["train"],
         "val": split_metrics["val"],
-        "test": split_metrics["test"],
     }
+    if train_cfg.eval_test:
+        metrics["test"] = split_metrics["test"]
     _write_metrics(train_cfg.metrics_path, metrics)
 
     logger.info("Saved HGNN model: %s", _project_relative(train_cfg.model_path))
     logger.info("Saved metrics: %s", _project_relative(train_cfg.metrics_path))
-    for split_name in ("train", "val", "test"):
+    for split_name in prediction_split_names:
         m = metrics[split_name]
         if isinstance(m, dict):
             logit_diagnostics = m.get("logit_diagnostics", {})
@@ -2035,7 +2071,6 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "semantic_moe_context_token_dropout": args.semantic_moe_context_token_dropout,
         "semantic_moe_architecture": args.semantic_moe_architecture,
         "semantic_moe_view_gate_hidden": args.semantic_moe_view_gate_hidden,
-        "semantic_moe_view_top_k": args.semantic_moe_view_top_k,
         "semantic_moe_view_router_noise": args.semantic_moe_view_router_noise,
         "semantic_moe_view_balance_weight": args.semantic_moe_view_balance_weight,
         "semantic_moe_view_entropy_weight": args.semantic_moe_view_entropy_weight,
@@ -2055,7 +2090,9 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "semantic_group_relationship_dropout": args.semantic_group_relationship_dropout,
         "semantic_group_relationship_l2_weight": args.semantic_group_relationship_l2_weight,
         "use_player_priors": args.use_player_priors,
+        "player_prior_mode": args.player_prior_mode,
         "player_prior_hidden": args.player_prior_hidden,
+        "player_residual_hidden": args.player_residual_hidden,
     }
 
 
@@ -2125,8 +2162,26 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         default=train_defaults.raw_tensor_cache_device,
         help=(
             "Where raw split tensors are cached before minibatch indexing. "
-            "'model' keeps historical behavior; 'cpu' moves only minibatches "
-            "to the model device."
+            "'cpu' moves only minibatches to the model device; 'model' keeps "
+            "the full raw cache on the model device for explicit sweeps."
+        ),
+    )
+    parser.add_argument(
+        "--eval-test",
+        action="store_true",
+        default=train_defaults.eval_test,
+        help=(
+            "Evaluate and write held-out test metrics. Use only after selecting "
+            "a final candidate from validation."
+        ),
+    )
+    parser.add_argument(
+        "--allow-production-artifact-overwrite",
+        action="store_true",
+        default=train_defaults.allow_production_artifact_overwrite,
+        help=(
+            "Allow training to overwrite the promoted production model or "
+            "metrics paths. Intended only for explicit promotion runs."
         ),
     )
     parser.add_argument("--seed", type=int, default=train_defaults.seed)
@@ -2195,11 +2250,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         type=_parse_int_tuple,
         default=model_defaults.semantic_moe_view_gate_hidden,
         help="Comma-separated hidden sizes for the encoder-view gate.",
-    )
-    parser.add_argument(
-        "--semantic-moe-view-top-k",
-        type=int,
-        default=model_defaults.semantic_moe_view_top_k,
     )
     parser.add_argument(
         "--semantic-moe-view-router-noise",
@@ -2299,8 +2349,8 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         default=model_defaults.use_player_priors,
         help=(
             "Feed draft-safe per-player priors (overall and per-champion "
-            "train-window record) through a zero-initialised node-feature "
-            "encoder. Requires a v30 cache."
+            "train-window record) through zero-initialised residual/node "
+            "paths. Requires a v30 cache."
         ),
     )
     parser.add_argument(
@@ -2308,6 +2358,21 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         type=_parse_int_tuple,
         default=model_defaults.player_prior_hidden,
         help="Comma-separated hidden sizes for the player prior encoder MLP.",
+    )
+    parser.add_argument(
+        "--player-prior-mode",
+        choices=("residual", "node", "both"),
+        default=model_defaults.player_prior_mode,
+        help=(
+            "residual: zero-init game-level head on blue-minus-red team means; "
+            "node: zero-init per-slot encoder into the phi node features; both."
+        ),
+    )
+    parser.add_argument(
+        "--player-residual-hidden",
+        type=_parse_int_tuple,
+        default=model_defaults.player_residual_hidden,
+        help="Comma-separated hidden sizes for the game-level player residual head.",
     )
     args = parser.parse_args()
     if args.use_semantic_group_features and not args.use_learned_semantic_moe:
@@ -2338,6 +2403,10 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
             raw_tensor_cache_device=args.raw_tensor_cache_device,
             seed=args.seed,
             max_grad_norm=args.max_grad_norm,
+            eval_test=args.eval_test,
+            allow_production_artifact_overwrite=(
+                args.allow_production_artifact_overwrite
+            ),
             semantic_context_metric_min_count=args.semantic_context_metric_min_count,
         ),
         _model_overrides_from_args(args),

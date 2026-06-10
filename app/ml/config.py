@@ -17,6 +17,8 @@ DEFAULT_ENCODER_SIDECAR_PATH = (
     ML_DATA_DIR / "semantic_identity_sidecar_compact.npz"
 )
 DEFAULT_TRAIN_BATCH_CAP = 16384
+DEFAULT_PRODUCTION_MODEL_PATH = ML_DATA_DIR / "hgnn_production_model.pt"
+DEFAULT_PRODUCTION_METRICS_PATH = ML_DATA_DIR / "metrics_latest.json"
 
 PLAYER_PIVOT_TABLE = "game_data_filtered.ml_game_player_pivot"
 SOLO_PRIOR_TABLE = "game_data_filtered.synergy_1vx"
@@ -63,16 +65,15 @@ class DatasetConfig:
     # build label and requires matching no-build aggregate priors to exist.
     use_final_build_labels: bool = True
     draft_unknown_build_label: str = "unknown"
-    # Optional frozen three-encoder sidecar artifact. When set during cache
-    # build, per-slot static/full-game/temporal latent arrays are materialised
-    # into the HGNN cache. Existing caches without these arrays still load.
+    # Optional frozen three-encoder sidecar artifact. Current caches record its
+    # metadata and gather latents from the compact artifact at tensor-build time.
     encoder_sidecar_path: Path | None = DEFAULT_ENCODER_SIDECAR_PATH
 
 
 @dataclass(frozen=True)
 class TrainConfig:
-    model_path: Path = ML_DATA_DIR / "hgnn_production_model.pt"
-    metrics_path: Path = ML_DATA_DIR / "metrics_latest.json"
+    model_path: Path = DEFAULT_PRODUCTION_MODEL_PATH
+    metrics_path: Path = DEFAULT_PRODUCTION_METRICS_PATH
     warm_start_model_path: Path | None = None
     # When warm-starting a larger candidate model from production, optionally
     # keep loaded checkpoint parameters fixed and train only newly introduced
@@ -92,12 +93,18 @@ class TrainConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 0.0
     device: str = "auto"
-    # Where to cache the raw train/val/test tensors before minibatch indexing.
-    # "model" preserves the historical behavior; "cpu" keeps the large raw
-    # cache off GPU and moves only each indexed minibatch to the model device.
-    raw_tensor_cache_device: str = "model"
+    # Where to cache raw split tensors before minibatch indexing. "cpu" keeps
+    # the large cache off GPU and moves only each indexed minibatch to the model
+    # device; "model" is kept for explicit throughput sweeps.
+    raw_tensor_cache_device: str = "cpu"
     seed: int = 0
     max_grad_norm: float | None = 1.0
+    # Routine candidate runs stay validation-only. Use eval_test only after a
+    # validation-selected final candidate is ready for the held-out test read.
+    eval_test: bool = False
+    # Production artifact paths are the load/serve defaults, not routine train
+    # outputs. Promotion runs must opt in before overwriting them.
+    allow_production_artifact_overwrite: bool = False
     # Validation/reporting lens for context-gap checkpoint metrics. This keeps
     # low-support champion slices visible in the raw audit while letting model
     # selection target bins with enough support to make a 2-3pp max meaningful.

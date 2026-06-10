@@ -47,7 +47,7 @@ not precise enough.
 A split-safe fixed-feature ceiling separated two competing root causes for the
 static-NLL plateau: "identity-derived surfaces have no further row-level
 signal" versus "the signal exists but does not transfer across the
-chronological patch boundary." The v29 cache makes the decomposition
+chronological patch boundary." The v30 cache makes the decomposition
 observable without new data: `patch_features[:, 1]` is `1.0` only for games
 whose patch has train coverage. Validation splits into `18,561` covered-patch
 and `35,420` uncovered-patch central-band games; test is 100% uncovered.
@@ -130,7 +130,7 @@ in cache row order and verified by exact `blue_win` equality on all 1,431,313
 rows. Artifact:
 `app/ml/data/experiments/semantic_boundary_timelocal_ceiling/row_time_meta.npz`.
 
-The era layout this exposed: the v29 splits are purely chronological and cut
+The era layout this exposed: the v30 splits are purely chronological and cut
 *inside* patches. Train spans 1601-1608 (ends 2026-04-22), validation is the
 1608 tail (48,908 rows, train-covered) plus the first 8.6 days of 1609
 (94,223 rows, uncovered); within the central band, test splits into 18,558
@@ -294,7 +294,7 @@ protocol itself, not to targets or architecture:
 - Roll the chronological windows forward: extend train through the freshest
   complete patch, assign new validation/test windows after the new boundary
   (`ml_game_split` reassignment), and rebuild the filtered tables, priors,
-  sidecar artifacts, and v29 cache on the rolled boundary.
+  sidecar artifacts, and v30 cache on the rolled boundary.
 - Retrain and evaluate the standard gates on the rolled held-out windows.
   This is the production-true protocol: deployment always has data up to the
   refresh point. Measured dividend at the teacher level, by cohort: the
@@ -319,11 +319,11 @@ The model-development data refresh completed through the documented ClickHouse
 path in `database/clickhouse/commands.md`: corrected participant rows, filter
 stages, `valid_game_ids`, filtered participant rows, item-value totals,
 `ml_game_split`, `ml_game_player_pivot`, active 6000/6020 priors, 7000
-dictionaries, compact encoder sidecar, and the v29 Python cache. The split and
+dictionaries, compact encoder sidecar, and the v30 Python cache. The split and
 cache counts below are the verification anchor for this refreshed state.
 
 Raw `game_data.info` currently contains season 16 through patch 24, but the
-current ML-valid pool after filtering reaches patch 11. The refreshed v29 cache
+current ML-valid pool after filtering reaches patch 11. The refreshed v30 cache
 contains `1,647,915` games:
 
 | Split | Games | Season | Patch range | Timestamp range |
@@ -348,13 +348,13 @@ metadata and split sizes.
 
 ### Rolled Split Test Plan
 
-Execution note, 2026-06-10: the rolled-split production recipe is being
-evaluated with the active defaults from `HGNN_CURRENT.md`: `convex_encoder_mix`
-128x32, compact sidecar, semantic group features, batch `16384`, learning rate
-`3e-4`, `max_epochs=40`, `patience=5`, validation-accuracy checkpoint
-selection, and seeds `4` and `5`. Candidate artifacts are written under
-`app/ml/data/experiments/rolled_split_production/` until promotion gates are
-checked.
+Execution note, 2026-06-10: the rolled-split production recipe was evaluated
+with the active defaults from `HGNN_CURRENT.md`: `convex_encoder_mix` 128x32,
+compact sidecar, semantic group features, batch `16384`, validation-accuracy
+checkpoint selection, and seeds `4` and `5`. The from-scratch round and
+warm-start round were both rejected for promotion under the pre-registered
+validation gates; retained candidate artifacts live under
+`app/ml/data/experiments/rolled_split_production/`.
 
 Batch `16384` is the measured throughput setting for the current architecture
 (`51,505` team-swap-augmented samples/s on the local RTX 5070 Ti). If the MoE or

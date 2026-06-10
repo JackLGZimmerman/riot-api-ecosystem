@@ -68,6 +68,8 @@ class HGNNConfig:
     semantic_moe_context_token_dropout: float = 0.05
     semantic_moe_architecture: str = "convex_encoder_mix"
     semantic_moe_view_gate_hidden: tuple[int, ...] = (64,)
+    # Deprecated checkpoint field. The production convex encoder mix uses dense
+    # softmax view weights, so this value is retained only for old model configs.
     semantic_moe_view_top_k: int = 2
     semantic_moe_view_router_noise: float = 0.01
     semantic_moe_view_balance_weight: float = 1.0e-2
@@ -94,10 +96,14 @@ class HGNNConfig:
     patch_residual_dropout: float = 0.0
     patch_residual_max_abs_logit: float = 0.15
     # Draft-safe per-player priors (v30 cache): per-slot (mu, conf, log_count,
-    # missing) for the player's overall and per-champion train-window record,
-    # encoded by a zero-initialised MLP added to the 1vX phi node features.
+    # missing) for the player's overall and per-champion train-window record.
+    # "residual" feeds blue-minus-red team means through a zero-initialised
+    # game-level head (the probe-validated form); "node" adds a zero-initialised
+    # per-slot encoder to the 1vX phi node features; "both" enables both.
     use_player_priors: bool = False
+    player_prior_mode: str = "residual"
     player_prior_hidden: tuple[int, ...] = (32,)
+    player_residual_hidden: tuple[int, ...] = ()
 
 
 def resolve_device(device: str) -> str:
@@ -594,10 +600,6 @@ class LearnedSemanticMoEHead(nn.Module):
         self.temperature = max(float(config.semantic_moe_temperature), 1.0e-6)
         self.support_strength = float(config.semantic_moe_support_strength)
         self.context_token_dropout = max(float(config.semantic_moe_context_token_dropout), 0.0)
-        self.view_top_k = min(
-            max(int(config.semantic_moe_view_top_k), 1),
-            len(self.view_names),
-        )
         self.view_router_noise = max(float(config.semantic_moe_view_router_noise), 0.0)
         self.view_balance_weight = float(config.semantic_moe_view_balance_weight)
         self.view_entropy_weight = float(config.semantic_moe_view_entropy_weight)
@@ -1139,10 +1141,9 @@ class LearnedSemanticMoEHead(nn.Module):
         if self.training and self.view_router_noise > 0.0:
             view_logits = view_logits + torch.randn_like(view_logits) * self.view_router_noise
         weights = torch.softmax(view_logits, dim=-1)
-        top_weights, top_indices = weights.topk(self.view_top_k, dim=-1)
 
         usage = weights.mean(dim=(0, 1))
-        selected_fraction = (weights > 0.0).to(dtype=weights.dtype).mean(dim=(0, 1))
+        selected_fraction = torch.ones_like(usage)
         target_usage = weights.new_full((len(self.view_names),), 1.0 / float(len(self.view_names)))
         balance_loss = (usage - target_usage).pow(2).mean()
         safe_weights = weights.clamp_min(1.0e-12)
@@ -1151,8 +1152,6 @@ class LearnedSemanticMoEHead(nn.Module):
         entropy_loss = (max_entropy - entropy).clamp_min(0.0).mean()
         return {
             "weights": weights,
-            "top_indices": top_indices,
-            "top_weights": top_weights,
             "usage": usage,
             "selected_fraction": selected_fraction,
             "entropy": entropy.mean(),
@@ -1248,7 +1247,6 @@ class LearnedSemanticMoEHead(nn.Module):
             "semantic_moe_view_entropy": gate["entropy"],
             "semantic_moe_view_balance_loss": gate["balance_loss"],
             "semantic_moe_view_entropy_loss": gate["entropy_loss"],
-            "semantic_moe_view_top_k": reference.new_tensor(float(self.view_top_k)),
             "semantic_moe_convex_encoder_mix_enabled": reference.new_tensor(
                 1.0 if self.architecture == "convex_encoder_mix" else 0.0
             ),
@@ -1528,16 +1526,30 @@ class HGNNWinModel(nn.Module):
             if c.use_learned_semantic_moe
             else None
         )
-        # Zero-initialised per-slot encoder over draft-safe player priors; its
-        # output adds to the 1vX phi node features, so it is a no-op at init
-        # and warm starts from player-blind checkpoints are exact.
+        # Zero-initialised paths over draft-safe player priors; both are no-ops
+        # at init, so warm starts from player-blind checkpoints are exact.
+        if c.use_player_priors and c.player_prior_mode not in {
+            "residual",
+            "node",
+            "both",
+        }:
+            raise ValueError(
+                "player_prior_mode must be 'residual', 'node', or 'both'"
+            )
         self.player_prior_node = (
             _mlp(8, c.player_prior_hidden, c.edge_hidden, dropout=c.dropout)
-            if c.use_player_priors
+            if c.use_player_priors and c.player_prior_mode in {"node", "both"}
             else None
         )
         if self.player_prior_node is not None:
             _zero_last_linear(self.player_prior_node)
+        self.player_residual = (
+            _mlp(8, c.player_residual_hidden, 1, dropout=0.0)
+            if c.use_player_priors and c.player_prior_mode in {"residual", "both"}
+            else None
+        )
+        if self.player_residual is not None:
+            _zero_last_linear(self.player_residual)
         # Node init fuses the multiplicative identity with the 1vX posterior (§3).
         self.node_init = _mlp(
             c.node_dim + c.edge_hidden, c.node_init_hidden, c.node_dim, dropout=c.dropout
@@ -1646,7 +1658,10 @@ class HGNNWinModel(nn.Module):
         if head is None or dim <= 0:
             return reference.new_zeros((batch_size,))
         if value is None:
-            return reference.new_zeros((batch_size,))
+            raise ValueError(
+                f"{name} is required when its residual head is configured; "
+                "rebuild the dataset cache or disable the head."
+            )
         features = self._game_feature_block(
             value,
             batch_size=batch_size,
@@ -1846,13 +1861,14 @@ class HGNNWinModel(nn.Module):
             conf_1vx,
             log_count_1vx,
         )
-        if self.player_prior_node is not None:
+        player_feats = None
+        if self.player_prior_node is not None or self.player_residual is not None:
             if player_prior_features is None:
                 raise ValueError(
                     "use_player_priors=True requires player_prior_features "
                     "[batch, 10, 8]; rebuild the dataset cache (v30)."
                 )
-            feats = torch.cat(
+            player_feats = torch.cat(
                 [
                     _logit(player_prior_features[..., 0:1], self.config.logit_clip),
                     player_prior_features[..., 1:4],
@@ -1861,7 +1877,9 @@ class HGNNWinModel(nn.Module):
                 ],
                 dim=-1,
             )
-            phi_node = phi_node + self.player_prior_node(feats)
+        if self.player_prior_node is not None:
+            assert player_feats is not None
+            phi_node = phi_node + self.player_prior_node(player_feats)
         h = self.node_norm(self.node_init(torch.cat([h0, phi_node], dim=-1)))
 
         a = self._readout(h[:, :5])
@@ -1886,7 +1904,15 @@ class HGNNWinModel(nn.Module):
             name="patch_features",
             max_abs_logit=float(self.config.patch_residual_max_abs_logit),
         )
-        feature_logit = loadout_logit + patch_logit
+        if self.player_residual is not None:
+            assert player_feats is not None
+            # Blue-minus-red team means: negates under team swap, matching the
+            # signed loadout/patch residual convention.
+            diff = player_feats[:, :5].mean(dim=1) - player_feats[:, 5:].mean(dim=1)
+            player_logit = self.player_residual(diff).squeeze(-1)
+        else:
+            player_logit = base_logit.new_zeros(base_logit.shape)
+        feature_logit = loadout_logit + patch_logit + player_logit
         context_logit = self._semantic_context_logit(
             identity_static_sidecar=identity_static_sidecar,
             identity_full_game_sidecar=identity_full_game_sidecar,
@@ -1912,6 +1938,7 @@ class HGNNWinModel(nn.Module):
                 "context_logit": context_logit,
                 "loadout_logit": loadout_logit,
                 "patch_logit": patch_logit,
+                "player_logit": player_logit,
                 "feature_logit": feature_logit,
                 "final_logit": final_logit,
                 **moe_outputs,
@@ -1921,6 +1948,7 @@ class HGNNWinModel(nn.Module):
             "context_logit": context_logit,
             "loadout_logit": loadout_logit,
             "patch_logit": patch_logit,
+            "player_logit": player_logit,
             "feature_logit": feature_logit,
             "final_logit": final_logit,
         }
@@ -1971,12 +1999,14 @@ class HGNNWinModel(nn.Module):
             context_logit = scale * (direct["context_logit"] - swapped["context_logit"])
             loadout_logit = scale * (direct["loadout_logit"] - swapped["loadout_logit"])
             patch_logit = scale * (direct["patch_logit"] - swapped["patch_logit"])
-            feature_logit = loadout_logit + patch_logit
+            player_logit = scale * (direct["player_logit"] - swapped["player_logit"])
+            feature_logit = loadout_logit + patch_logit + player_logit
             outputs = {
                 "base_logit": base_logit,
                 "context_logit": context_logit,
                 "loadout_logit": loadout_logit,
                 "patch_logit": patch_logit,
+                "player_logit": player_logit,
                 "feature_logit": feature_logit,
                 "final_logit": base_logit + context_logit + feature_logit,
             }
@@ -2006,7 +2036,6 @@ class HGNNWinModel(nn.Module):
                     "semantic_moe_view_entropy",
                     "semantic_moe_view_balance_loss",
                     "semantic_moe_view_entropy_loss",
-                    "semantic_moe_view_top_k",
                     "semantic_moe_convex_encoder_mix_enabled",
                 ):
                     if key in direct and key in swapped:
@@ -2067,10 +2096,18 @@ def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
         "semantic_group_relationship_hidden",
         "loadout_residual_hidden",
         "patch_residual_hidden",
+        "player_prior_hidden",
+        "player_residual_hidden",
     ):
         if key in config_dict:
             config_dict[key] = tuple(config_dict[key])
     return HGNNConfig(**config_dict)
+
+
+def hgnn_config_payload(config: HGNNConfig) -> dict[str, Any]:
+    payload = asdict(config)
+    payload.pop("semantic_moe_view_top_k", None)
+    return payload
 
 
 def save_hgnn_model(path: Path, model: HGNNWinModel, *, confidence_strength: float) -> None:
@@ -2078,7 +2115,7 @@ def save_hgnn_model(path: Path, model: HGNNWinModel, *, confidence_strength: flo
     torch.save(
         {
             "model_type": "hgnn",
-            "model_config": asdict(model.config),
+            "model_config": hgnn_config_payload(model.config),
             "confidence_strength": float(confidence_strength),
             "state_dict": model.state_dict(),
         },
@@ -2108,6 +2145,7 @@ __all__ = [
     "LearnedSemanticMoEHead",
     "TEAM_PAIRS",
     "build_hgnn_inputs",
+    "hgnn_config_payload",
     "load_hgnn_model",
     "posterior_mean_var",
     "resolve_device",

@@ -61,6 +61,31 @@ def _model_requires_encoder_sidecar(model: HGNNWinModel) -> bool:
     )
 
 
+def _unsupported_runtime_features(model: HGNNWinModel) -> list[str]:
+    config = model.config
+    missing: list[str] = []
+    if int(getattr(config, "loadout_feature_dim", 0)) > 0:
+        missing.append("loadout_features")
+    if int(getattr(config, "patch_feature_dim", 0)) > 0:
+        missing.append("patch_features")
+    if bool(getattr(config, "use_player_priors", False)):
+        missing.append("player_prior_features")
+    return missing
+
+
+def _validate_runtime_feature_contract(model: HGNNWinModel) -> None:
+    missing = _unsupported_runtime_features(model)
+    if not missing:
+        return
+    raise ValueError(
+        "HGNN checkpoint requires runtime inputs that app.rl.reward.Predictor "
+        "does not supply: "
+        + ", ".join(missing)
+        + ". Use a predictor protocol that passes those feature tensors, or "
+        "serve a checkpoint trained without those heads."
+    )
+
+
 class WinRatePredictor:
     """Satisfies app.rl.reward.Predictor using the production HGNN model."""
 
@@ -80,6 +105,7 @@ class WinRatePredictor:
         semantic_context_lookup: SemanticContextRawLookup | None,
         device: str,
     ) -> None:
+        _validate_runtime_feature_contract(model)
         self._model = model.to(device).eval()
         self._priors = priors
         self._semantic_context_lookup = semantic_context_lookup
@@ -229,6 +255,7 @@ def load_predictor(
     dataset_cfg = dataset_cfg or DatasetConfig()
     device = resolve_device(cfg.device)
     model, _, prior_strength = load_hgnn_model(cfg.model_path, device=device)
+    _validate_runtime_feature_contract(model)
     requires_semantic_context = bool(model.config.use_semantic_group_features)
     requires_encoder_sidecar = _model_requires_encoder_sidecar(model)
     if requires_encoder_sidecar and dataset_cfg.encoder_sidecar_path is None:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from app.ml.encoder_sidecar import save_encoder_sidecar
 from app.ml.config import (
     DEFAULT_ENCODER_SIDECAR_PATH,
+    DEFAULT_PRODUCTION_METRICS_PATH,
+    DEFAULT_PRODUCTION_MODEL_PATH,
     DEFAULT_TRAIN_BATCH_CAP,
     DatasetConfig,
     TrainConfig,
@@ -13,11 +16,13 @@ from app.ml.config import (
 from app.ml.semantic_group_features import (
     SEMANTIC_GROUP_FEATURE_DIM,
 )
+from app.ml.hgnn_model import HGNNConfig, hgnn_config_payload
 from app.ml.train import (
     PRODUCTION_SEMANTIC_MOE_ARCHITECTURE,
     _freeze_warm_start_loaded_parameters,
     _hgnn_config_from_meta,
     _batch_indices,
+    _validate_train_output_paths,
     _warm_start_hgnn_model,
     production_semantic_model_overrides,
 )
@@ -50,8 +55,12 @@ def test_production_defaults_use_all_identity_encoders() -> None:
     assert train_cfg.patience == 5
     assert train_cfg.freeze_warm_start_loaded_parameters is False
     assert train_cfg.train_batch_cap == DEFAULT_TRAIN_BATCH_CAP
-    assert train_cfg.raw_tensor_cache_device == "model"
+    assert train_cfg.raw_tensor_cache_device == "cpu"
     assert train_cfg.train_epoch_max_games is None
+    assert train_cfg.eval_test is False
+    assert train_cfg.allow_production_artifact_overwrite is False
+    assert train_cfg.model_path == DEFAULT_PRODUCTION_MODEL_PATH
+    assert train_cfg.metrics_path == DEFAULT_PRODUCTION_METRICS_PATH
     assert cfg.n_champions == 10
     assert cfg.n_builds == 3
     assert cfg.build_vocab == ("ability_power", "ar_tank", "mr_tank")
@@ -64,8 +73,25 @@ def test_production_defaults_use_all_identity_encoders() -> None:
     assert cfg.use_identity_temporal_sidecar is False
     assert cfg.use_learned_semantic_moe is True
     assert cfg.use_semantic_group_features is True
+    assert cfg.semantic_moe_num_experts == 128
+    assert cfg.semantic_moe_top_k == 32
     assert cfg.semantic_group_feature_dim == SEMANTIC_GROUP_FEATURE_DIM
     assert cfg.semantic_moe_architecture == PRODUCTION_SEMANTIC_MOE_ARCHITECTURE
+
+
+def test_training_refuses_production_artifact_paths_without_promotion_flag() -> None:
+    with pytest.raises(ValueError, match="overwrite production artifacts"):
+        _validate_train_output_paths(TrainConfig())
+
+    _validate_train_output_paths(
+        TrainConfig(allow_production_artifact_overwrite=True)
+    )
+
+
+def test_config_payload_omits_deprecated_view_top_k() -> None:
+    payload = hgnn_config_payload(HGNNConfig())
+
+    assert "semantic_moe_view_top_k" not in payload
 
 
 def test_batch_indices_can_cap_train_rows_per_epoch() -> None:

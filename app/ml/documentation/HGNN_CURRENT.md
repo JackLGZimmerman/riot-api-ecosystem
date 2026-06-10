@@ -16,7 +16,7 @@ boundary forward (see EXPERIMENTS.md "Next Data Direction"), not model
 wiring.
 
 Data refresh note, 2026-06-10: the ClickHouse ML path, compact encoder sidecar,
-and v29 cache were rebuilt after newer season 16 data became available. The
+and v30 cache were rebuilt after newer season 16 data became available. The
 current cache now contains `1,647,915` games through the ML-valid S16.11 window
 (`1,318,331` train / `164,792` validation / `164,792` test). The promoted
 checkpoint and metrics below remain the previous production record until the
@@ -39,7 +39,7 @@ user decision on a separate data-refresh promotion gate. See
 
 ## Production Path
 
-Default training and serving use the 1vX player prior, champion/build identity
+Default training and validation use the 1vX champion-role/build prior, champion/build identity
 embeddings, the production Loadout head, the production patch-only Temporal
 head, the promoted learned semantic MoE over all three frozen identity encoders
 (`static`, `full_game`, and `temporal`), and team-swap augmentation. Legacy
@@ -52,6 +52,12 @@ semantic group features. Production capacity is 128 experts with `top_k=32`.
 The older node-init sidecar MLP flags remain off by default so the production
 shape matches the tested architecture. See
 [Identity Encoder Sidecars](#identity-encoder-sidecars).
+
+Serving through `app.ml.predictor.load_predictor()` is intentionally narrower
+than the batch validation surface: the current `app.rl.reward.Predictor`
+protocol supplies champions, roles, and build ids, but not Loadout, patch, or
+player feature tensors. Checkpoints that require those residual heads now fail
+fast at load time instead of silently dropping trained production inputs.
 
 ```text
 cache 1vX priors + support
@@ -67,10 +73,10 @@ cache 1vX priors + support
 Direct 1v1/2vX champion matchup and synergy relationship integrations have been
 removed from the model contract, cache layout, priors, and predictor; they are
 no longer part of `build_hgnn_inputs()` or `HGNNWinModel.forward()`. Older local
-cache directories may still contain ignored relationship `.npy` files, but v29
+cache directories may still contain ignored relationship `.npy` files, but v30
 production loading does not declare or consume them. Loadout and patch-only
 Temporal are no longer tracked as ablation families in this document; they are
-part of the default production model when the v29 cache provides
+part of the default production model when the v30 cache provides
 `loadout_features.npy` and `patch_features.npy`.
 
 ## Production Status
@@ -90,7 +96,7 @@ available local 128x32 semantic MoE artifact. Its saved config has the temporary
 sparse-dispatch experiment key removed, and the maintained production runtime no
 longer exposes a dense/sparse dispatch flag.
 
-Setup: v29 production cache, compact identity encoder sidecar artifact,
+Setup: v30 production cache, compact identity encoder sidecar artifact,
 production loadout head, bounded patch-only temporal head, learned semantic MoE
 with `convex_encoder_mix`, `semantic_moe_num_experts=128`,
 `semantic_moe_top_k=32`, compact semantic group features, raw `val_accuracy`
@@ -107,9 +113,11 @@ warm start.
 Loadout uses train-only, leave-one-out-adjusted historical priors over
 summoner spell pairs, broad rune setup, full rune page, secondary rune pair, and
 stat shards. Rune rows are joined through `puuid` only to align the selected
-rune page; no player identity is emitted, cached, or modeled. Patch Temporal is
-restricted to season/patch blue-side drift only and does not include
-champion-role patch deltas.
+rune page; no player identity is emitted into `loadout_features.npy`. The v30
+cache separately records optional player-prior arrays, but `use_player_priors`
+remains disabled for promoted production serving until the runtime protocol
+passes player features. Patch Temporal is restricted to season/patch blue-side
+drift only and does not include champion-role patch deltas.
 
 Historical comparison: the best prior full-split no-relationship residual check
 was `L+S` at `57.6814%` validation / `57.0058%` test. The promoted production
@@ -129,7 +137,7 @@ labels/margins and are not accepted pregame validation results.
 
 ```mermaid
 flowchart TD
-    cache["v29 production cache"] --> ids["champion/build ids"]
+    cache["v30 production cache"] --> ids["champion/build ids"]
     cache --> prior["1vX prior + support"]
     cache --> loadout["Loadout features<br/>spells + rune page + stat shards"]
     cache --> patch["Patch-only Temporal<br/>season/patch blue-side drift"]
@@ -167,7 +175,7 @@ node-level sidecars in `HGNNWinModel`. The sidecar artifact is one row per
 joined/repeated onto those rows, while full-game and temporal latents are native
 to the full identity grain.
 
-The latents are **not** materialised per game-slot. The cache (`v29`) records the
+The latents are **not** materialised per game-slot. The cache (`v30`) records the
 artifact path/dims only; `app/ml/train.py` builds an on-device gather table
 (`EncoderSidecarLookup.gather_tables`) and gathers `(batch, 10, dim)` blocks per
 batch from `champion_id`/`build_id` — the static block is keyed by champion. This
@@ -406,13 +414,18 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 | Training batch size / throughput | `16384`; `51,505` augmented samples/s on the 2026-06-10 local RTX 5070 Ti sweep for the current 128x32 recipe. |
 | Learning rate / patience / weight decay | `3e-4` / `5` / `0.0` |
 | Report-only temperature scaling | Fit on validation logits only; never changes served probabilities. |
+| Raw tensor cache device | `cpu`; model-device caching is an explicit throughput sweep option. |
+| Test split reads | Off by default; `--eval-test` is required after validation selection. Current shared `.npy` files are opened as memmaps, but test rows are not sliced, label-validated, materialized into tensors, evaluated, or written to metrics. |
+| Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required for promotion. |
 | Direct 1v1/2vX integrations | Removed from the model, cache, priors, and predictor. |
-| Loadout head | Production-on with v29 cache metadata and `loadout_features.npy`. |
-| Patch-only Temporal head | Production-on with v29 cache metadata and `patch_features.npy`; season/patch blue-side drift only. |
+| Loadout head | Production validation-on with v30 cache metadata and `loadout_features.npy`; current RL serving bridge rejects checkpoints that require it. |
+| Patch-only Temporal head | Production validation-on with v30 cache metadata and `patch_features.npy`; season/patch blue-side drift only; current RL serving bridge rejects checkpoints that require it. |
+| Player-prior arrays | Present in v30 cache as an experimental training surface; disabled in promoted production and rejected by current RL serving when enabled. |
 | Identity-encoder node-init sidecar MLPs (static/full-game/temporal) | Disabled by default. |
 | Learned semantic MoE head over all three identity sidecars | Enabled by default with `convex_encoder_mix`. |
 | Semantic group features and relationship head | Enabled by default for the learned semantic MoE. |
 
 Invalid training config combinations fail early in `app/ml/train.py`. Test
 labels are not used for threshold selection, temperature fitting, checkpoint
-selection, or model selection.
+selection, or model selection, and routine training does not request or
+materialize the test split unless `--eval-test` is set.

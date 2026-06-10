@@ -1,5 +1,4 @@
-"""End-to-end check that training gathers sidecar latents from the frozen
-artifact (v28 cache) instead of per-game arrays."""
+"""End-to-end checks for compact sidecar artifact gathering."""
 
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ from app.ml.train import train
 SIDE_DIMS = {"static": 2, "full_game": 3, "temporal": 4}
 
 
-def _write_v28_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12, rng):
+def _write_compact_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12, rng):
     splits = {"train": 8, "val": 2, "test": 2}
     build_vocab = ["b0", "b1", "b2"]
     n_builds = len(build_vocab)
@@ -112,9 +111,9 @@ def test_train_gathers_sidecar_for_learned_moe_from_artifact_without_per_game_ar
     rng = np.random.default_rng(0)
     cache_dir = tmp_path / "cache"
     artifact_path = tmp_path / "sidecar.npz"
-    _write_v28_cache(cache_dir, artifact_path, rng=rng)
+    _write_compact_cache(cache_dir, artifact_path, rng=rng)
 
-    # No per-game sidecar arrays were written: the v28 gather path must supply them.
+    # No per-game sidecar arrays were written: compact artifact gather supplies them.
     assert not (cache_dir / "identity_full_game_sidecar.npy").exists()
 
     model_path = tmp_path / "model.pt"
@@ -153,7 +152,10 @@ def test_train_gathers_sidecar_for_learned_moe_from_artifact_without_per_game_ar
     assert model.learned_semantic_moe is not None
 
     metrics = json.loads(metrics_path.read_text())
-    for split_name in ("train", "val", "test"):
+    assert metrics["evaluated_splits"] == ["train", "val"]
+    assert "test" not in metrics
+    assert "semantic_moe_view_top_k" not in metrics["model_config"]
+    for split_name in ("train", "val"):
         logit_diagnostics = metrics[split_name]["logit_diagnostics"]
         assert set(logit_diagnostics) == {
             "base_logit_std",
@@ -167,13 +169,13 @@ def test_train_gathers_sidecar_for_learned_moe_from_artifact_without_per_game_ar
         assert "regularization_loss" in moe_diagnostics
 
 
-def test_train_gathers_sidecar_and_semantic_group_features_from_v28_cache(
+def test_train_gathers_sidecar_and_semantic_group_features_from_compact_cache(
     tmp_path,
 ) -> None:
     rng = np.random.default_rng(2)
     cache_dir = tmp_path / "cache"
     artifact_path = tmp_path / "sidecar.npz"
-    _write_v28_cache(cache_dir, artifact_path, rng=rng)
+    _write_compact_cache(cache_dir, artifact_path, rng=rng)
 
     assert not (cache_dir / "semantic_group_features.npy").exists()
 
@@ -187,6 +189,7 @@ def test_train_gathers_sidecar_and_semantic_group_features_from_v28_cache(
             max_epochs=1,
             patience=1,
             device="cpu",
+            eval_test=True,
         ),
         model_overrides={
             "use_learned_semantic_moe": True,

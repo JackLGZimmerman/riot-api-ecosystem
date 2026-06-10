@@ -294,6 +294,19 @@ def test_hgnn_missing_sidecar_matches_explicit_zero_sidecar() -> None:
         assert torch.allclose(model(**base)["final_logit"], model(**zeros)["final_logit"])
 
 
+def test_hgnn_requires_configured_residual_feature_inputs() -> None:
+    inputs = _semantic_hgnn_inputs(batch_size=2, seed=31)
+    model = HGNNWinModel(
+        _semantic_moe_config(loadout_feature_dim=10, patch_feature_dim=2)
+    ).eval()
+
+    with pytest.raises(ValueError, match="loadout_features is required"):
+        model(**inputs)
+
+    with pytest.raises(ValueError, match="patch_features is required"):
+        model(**{**inputs, "loadout_features": torch.zeros(2, 10)})
+
+
 def test_hgnn_semantic_context_head_returns_noop_decomposed_logits() -> None:
     inputs = _semantic_hgnn_inputs()
     model = HGNNWinModel(_semantic_context_config()).eval()
@@ -306,6 +319,7 @@ def test_hgnn_semantic_context_head_returns_noop_decomposed_logits() -> None:
         "context_logit",
         "loadout_logit",
         "patch_logit",
+        "player_logit",
         "feature_logit",
         "final_logit",
     }
@@ -357,6 +371,7 @@ def test_learned_semantic_moe_flag_disabled_preserves_old_outputs() -> None:
         "context_logit",
         "loadout_logit",
         "patch_logit",
+        "player_logit",
         "feature_logit",
         "final_logit",
     }
@@ -406,7 +421,6 @@ def test_learned_semantic_moe_convex_encoder_mix_preserves_slot_delta_and_view_s
     model = HGNNWinModel(
         _semantic_moe_config(
             semantic_moe_architecture="convex_encoder_mix",
-            semantic_moe_view_top_k=2,
         )
     ).eval()
 
@@ -422,7 +436,10 @@ def test_learned_semantic_moe_convex_encoder_mix_preserves_slot_delta_and_view_s
         torch.ones(()),
         atol=1.0e-6,
     )
-    assert outputs["semantic_moe_view_top_k"].item() == pytest.approx(2.0)
+    assert torch.allclose(
+        outputs["semantic_moe_view_selected_fraction"],
+        torch.ones(3),
+    )
     assert outputs["semantic_moe_convex_encoder_mix_enabled"].item() == pytest.approx(1.0)
 
 

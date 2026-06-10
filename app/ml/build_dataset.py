@@ -149,8 +149,8 @@ def _open_arrays(n_games: int, cache_dir: Path) -> dict[str, np.ndarray]:
 def _remove_stale_sidecar_arrays(cache_dir: Path) -> None:
     """Drop any per-game sidecar arrays left by an older (<=v27) cache build.
 
-    v28 gathers latents per batch from the frozen artifact, so stale per-game
-    arrays must not linger or the loader would silently prefer them.
+    Current compact caches gather latents per batch from the frozen artifact, so
+    stale per-game arrays must not linger or the loader would silently prefer them.
     """
     for path in sidecar_array_paths(cache_dir).values():
         path.unlink(missing_ok=True)
@@ -395,8 +395,8 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     n_games = sum(counts.values())
     n_champions, build_vocab = _identity_meta(cfg)
     # The frozen sidecar artifact is loaded only to validate it and record its
-    # path/dims in the cache meta; v28 gathers latents per batch from it instead
-    # of materialising one copy per game-slot (≈3000x smaller on disk).
+    # path/dims in the cache meta; training gathers latents per batch from it
+    # instead of materialising one copy per game-slot (≈3000x smaller on disk).
     sidecar_lookup = (
         EncoderSidecarLookup.load(cfg.encoder_sidecar_path)
         if cfg.encoder_sidecar_path is not None
@@ -468,7 +468,7 @@ def _parse_args() -> DatasetConfig:
         "--encoder-sidecar-path",
         type=Path,
         default=defaults.encoder_sidecar_path,
-        help="Frozen three-encoder sidecar artifact to record in the v28 cache meta.",
+        help="Frozen three-encoder sidecar artifact to record in cache metadata.",
     )
     args = parser.parse_args()
     return DatasetConfig(

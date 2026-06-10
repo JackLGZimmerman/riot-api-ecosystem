@@ -77,7 +77,7 @@ Current production state:
   `57.38%` test accuracy, `0.672978` validation NLL, and `0.675965` test NLL.
 - Direct 1v1/2vX relationship integrations are not part of the production model
   contract. Older local caches may contain ignored relationship arrays, but the
-  maintained v29 path does not consume them.
+  maintained v30 path does not consume them.
 
 The 2026-06-10 ceiling work settled the previous semantic-target question:
 identity-derived surfaces and classification sidecar information did not become
@@ -86,7 +86,9 @@ boundary. The remaining headroom is data freshness. Same-patch history carried
 gate-level signal, while one-patch-stale cohorts stayed near the historical
 `~0.0015` central NLL plateau.
 
-The next test is therefore the production-true rolled split protocol:
+The production-true rolled split protocol has now been run and rejected for
+promotion under the pre-registered validation gates. Keep the plan below as the
+historical execution recipe for future data-refresh work:
 
 1. Refresh ClickHouse filtered tables from the latest ingested season 16 data.
 2. Roll the chronological `ml_game_split` boundary forward so train contains
@@ -97,7 +99,7 @@ The next test is therefore the production-true rolled split protocol:
    checkpoint, teacher, cadence, or thresholds on test.
 4. Rebuild split-scoped artifacts: ML pivot, train-scoped priors/dictionaries,
    loadout/patch features, sidecar artifacts, semantic context tables, and the
-   v29 cache.
+   v30 cache.
 5. Retrain the production recipe on the rolled cache using at least seed `4`
    plus one additional seed before any promotion claim.
 6. Evaluate unchanged gates on the rolled validation/test windows.

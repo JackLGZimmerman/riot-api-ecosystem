@@ -167,12 +167,17 @@ state. Diversifies training data without changing the action space.
 ## Plugging in the Real ML Model
 
 ```python
+from pathlib import Path
+
+from app.ml.config import TrainConfig
 from app.ml.predictor import load_predictor
 from app.rl.env import DraftEnv, DraftEnvConfig
 from app.rl.pool import load_pool
 from app.rl.reward import make_pool_sampler
 
-predictor = load_predictor()         # one ClickHouse query, then pure numpy
+predictor = load_predictor(
+    cfg=TrainConfig(model_path=Path("app/ml/data/serving_compatible_model.pt"))
+)
 pool = load_pool()                   # reads app/rl/data/champion_pool.json
 sampler = make_pool_sampler(pool, top_k_build_configs=8)
 env = DraftEnv(
@@ -186,9 +191,12 @@ env = DraftEnv(
 ```
 
 `WinRatePredictor` (in `app/ml/predictor.py`) loads `(champ_id, position,
-build) -> win_rate` from `synergy_1vx` (train split only) at init, then
-maps every reward query to the 10-slot win-rate vector and runs the
-linear logistic model.
+build) -> win_rate` from `synergy_1vx` (train split only) at init, then maps
+every reward query to the 10-slot win-rate vector plus supported identity
+sidecar/group features. The current promoted validation checkpoint is not a
+serving-compatible RL artifact because it requires Loadout and patch tensors;
+`load_predictor()` rejects it until the predictor protocol carries those
+runtime features or a no-feature-head serving checkpoint is promoted.
 
 ## Training
 
