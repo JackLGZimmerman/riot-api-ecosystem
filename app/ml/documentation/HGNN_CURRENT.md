@@ -116,7 +116,11 @@ stat shards. Rune rows are joined through `puuid` only to align the selected
 rune page; no player identity is emitted into `loadout_features.npy`. The v30
 cache separately records optional player-prior arrays, but `use_player_priors`
 remains disabled for promoted production serving until the runtime protocol
-passes player features. Patch Temporal is restricted to season/patch blue-side
+passes player features. A frozen-base game-level player-prior residual
+candidate (`player_prior_mode="residual"`) has cleared validation at
+`58.86%` / NLL `0.66851` (see the player-priors round in `EXPERIMENTS.md`);
+promotion requires `predictor.py` puuid wiring plus the standard seed and
+one-time test confirmation. Patch Temporal is restricted to season/patch blue-side
 drift only and does not include champion-role patch deltas.
 
 Historical comparison: the best prior full-split no-relationship residual check

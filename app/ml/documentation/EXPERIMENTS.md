@@ -531,3 +531,66 @@ Round-2 artifacts: `app/ml/data/experiments/rolled_split_production/`
 `cross_model_central.json`, `val_probabilities.npz`, plus the temporary
 runners `eval_no_group_bands.py`, `cohort_bands.py`,
 `cross_model_central.py`; the data directory is gitignored).
+
+### Player Priors Round: First Gate-Scale Signal (2026-06-10)
+
+After round 2 closed the data-refresh question, the largest unused signal was
+identified by input audit rather than architecture search: every prior in the
+model is champion-identity-keyed, so the model carried zero player-skill
+signal even though `participant_stats` records `puuid`. This round added
+draft-safe per-player priors end-to-end and found the first direction that
+moves central NLL at gate scale.
+
+Probe evidence first (validation, train-window features only): the single
+feature "blue minus red mean per-player champion-experience games"
+(`d_pc_games`) alone reaches `0.5614` AUC / `54.7%` accuracy; coverage is
+`95.2%` of slots. A linear logistic stack of the warm4 logit plus four player
+team-diff features fit how the signal should enter: accuracy
+`58.24% -> 59.33%`, AUC `0.607 -> 0.625`, NLL `-0.0067` (in-sample on
+validation, so an upper bound).
+
+Data path (committed): `ml_game_player_pivot` tuples gained a `puuid` element;
+train-scoped `player_1vx` / `player_champ_1vx` aggregates (6030/6031) and
+COMPLEX_KEY_HASHED dictionaries (7015/7016); v30 cache adds four arrays
+(`player_rate/cnt`, `player_champ_rate/cnt`) with leave-one-out adjustment on
+train rows and nested EB smoothing (player-champ shrinks toward the player's
+smoothed overall rate). Core v29 arrays stayed byte-identical, so existing
+checkpoints and sidecar artifacts remain aligned. Model wiring: optional
+`use_player_priors` path with `player_prior_mode` `residual`/`node`/`both`,
+zero-init so warm starts are exact no-ops.
+
+Three trainings, all warm-started from warm4, selected on validation only:
+
+| run | recipe | val acc | val NLL | verdict |
+| --- | --- | ---: | ---: | --- |
+| warm4 (baseline) | no player path | `57.93%` | `0.67320` | incumbent |
+| player4 | full fine-tune, lr `1e-4` | `58.51%` | `0.68011` | rejected: calibration collapse (high-support gap `12.1pp`) |
+| player4_frozen | slot-level node head, frozen base, lr `1e-3` | `57.68%` | `0.68462` | killed at epoch 1: perturbing `phi_node` under a frozen readout miscalibrates immediately |
+| player4_res | game-level linear residual (9 params), frozen base, lr `1e-3` | **`58.86%`** | **`0.66851`** | accepted on validation |
+
+`player4_res` matches the probe's functional form exactly (logistic head on
+blue-minus-red team means) and reproduces its gains out-of-sample: `+0.93pp`
+accuracy, `-0.0047` NLL, AUC `0.6199` (`+0.0121`) vs warm4, with audit in
+range (high-support max gap `3.44pp`, group EB in the documented noise band).
+The no-player ablation attributes the lift causally: global `+0.92pp` /
+`0.00466` NLL, central band (`p_no_player in [0.45, 0.55]`) `+2.26pp` /
+`0.00437` NLL — the first candidate to exceed the `+0.003` central NLL scale
+that every semantic-target construction plateaued under. The epoch curve
+shows the head overshooting the validation optimum after epoch ~2 (train rows
+use LOO features from an earlier window, so the train-optimal coefficient is
+larger than the val-optimal one); val-accuracy checkpointing handles it.
+
+Lesson reinforced twice in one round: expressive player paths trained
+end-to-end with BCE wreck calibration (full fine-tune and slot-level node head
+both failed); the probe-validated low-capacity form on a frozen base captured
+the signal cleanly.
+
+Artifacts: `app/ml/data/experiments/rolled_split_production/player4_res/`
+(checkpoint, metrics, `player_eval.json` ablations; gitignored data dir).
+Note `eval_player.py`'s AUC column is unreliable — use the trainer's AUC.
+
+Next steps: nonlinear residual head (`--player-residual-hidden 32`) to test
+for confidence-gating headroom, seed-5 confirmation of the chosen recipe,
+then the one-time test confirmation; promotion additionally requires
+`predictor.py` to accept puuids and perform the dictionary lookups at serve
+time. Test remains untouched.

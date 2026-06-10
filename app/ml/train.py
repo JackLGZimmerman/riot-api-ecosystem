@@ -2406,7 +2406,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
             allow_production_artifact_overwrite=(
                 args.allow_production_artifact_overwrite
             ),
-            semantic_context_metric_min_count=args.semantic_context_metric_min_count,
         ),
         _model_overrides_from_args(args),
     )
