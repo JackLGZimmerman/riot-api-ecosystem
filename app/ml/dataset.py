@@ -29,6 +29,7 @@ LEGACY_CACHE_FORMATS = frozenset(
         "npy-memmap-v27",
         "npy-memmap-v28",
         "npy-memmap-v29",
+        "npy-memmap-v30",
     }
 )
 COUNT_ARRAY_NAMES = ("p1_cnt",)
@@ -48,11 +49,13 @@ class SplitData:
     loadout_features: np.ndarray | None = None
     patch_features: np.ndarray | None = None
     # Draft-safe per-player priors [games, 10]: train-window smoothed overall
-    # rate/count and nested per-champion rate/count. None for pre-v30 caches.
+    # rate/count, nested per-champion rate/count, and per-role experience
+    # count (v31). None for caches predating each array.
     player_rate: np.ndarray | None = None
     player_cnt: np.ndarray | None = None
     player_champ_rate: np.ndarray | None = None
     player_champ_cnt: np.ndarray | None = None
+    player_role_cnt: np.ndarray | None = None
     # Optional frozen three-encoder sidecar blocks; None for caches built
     # without an encoder_sidecar_path.
     identity_static_sidecar: np.ndarray | None = None
@@ -232,6 +235,7 @@ def load_splits(
         "player_cnt",
         "player_champ_rate",
         "player_champ_cnt",
+        "player_role_cnt",
     ):
         if paths[name].exists():
             arrays[name] = np.load(paths[name], mmap_mode="r")[:n]

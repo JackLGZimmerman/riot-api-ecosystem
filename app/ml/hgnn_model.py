@@ -104,6 +104,9 @@ class HGNNConfig:
     player_prior_mode: str = "residual"
     player_prior_hidden: tuple[int, ...] = (32,)
     player_residual_hidden: tuple[int, ...] = ()
+    # 8 = overall + per-champion (mu, conf, log_count, missing) blocks (v30);
+    # 11 adds the per-role experience (conf, log_count, missing) block (v31).
+    player_prior_feature_dim: int = 8
 
 
 def resolve_device(device: str) -> str:
@@ -173,6 +176,7 @@ def build_hgnn_inputs(
     player_cnt: Any | None = None,
     player_champ_rate: Any | None = None,
     player_champ_cnt: Any | None = None,
+    player_role_cnt: Any | None = None,
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
     """Turn raw cache/prior arrays into the model's node/edge tensors.
@@ -220,6 +224,9 @@ def build_hgnn_inputs(
             conf, log_count, missing = support_features(count, strength)
             # mu stays in probability space; the model maps it to a clipped logit.
             blocks.extend([to_tensor(rate), conf, log_count, missing])
+        if player_role_cnt is not None:
+            # Count-only role experience (v31): no rate column.
+            blocks.extend(support_features(to_tensor(player_role_cnt), strength))
         inputs["player_prior_features"] = torch.stack(blocks, dim=-1)
     return inputs
 
@@ -1537,14 +1544,14 @@ class HGNNWinModel(nn.Module):
                 "player_prior_mode must be 'residual', 'node', or 'both'"
             )
         self.player_prior_node = (
-            _mlp(8, c.player_prior_hidden, c.edge_hidden, dropout=c.dropout)
+            _mlp(c.player_prior_feature_dim, c.player_prior_hidden, c.edge_hidden, dropout=c.dropout)
             if c.use_player_priors and c.player_prior_mode in {"node", "both"}
             else None
         )
         if self.player_prior_node is not None:
             _zero_last_linear(self.player_prior_node)
         self.player_residual = (
-            _mlp(8, c.player_residual_hidden, 1, dropout=0.0)
+            _mlp(c.player_prior_feature_dim, c.player_residual_hidden, 1, dropout=0.0)
             if c.use_player_priors and c.player_prior_mode in {"residual", "both"}
             else None
         )
@@ -1863,17 +1870,21 @@ class HGNNWinModel(nn.Module):
         )
         player_feats = None
         if self.player_prior_node is not None or self.player_residual is not None:
-            if player_prior_features is None:
+            expected_dim = int(self.config.player_prior_feature_dim)
+            if (
+                player_prior_features is None
+                or int(player_prior_features.shape[-1]) != expected_dim
+            ):
                 raise ValueError(
                     "use_player_priors=True requires player_prior_features "
-                    "[batch, 10, 8]; rebuild the dataset cache (v30)."
+                    f"[batch, 10, {expected_dim}]; rebuild the dataset cache."
                 )
             player_feats = torch.cat(
                 [
                     _logit(player_prior_features[..., 0:1], self.config.logit_clip),
                     player_prior_features[..., 1:4],
                     _logit(player_prior_features[..., 4:5], self.config.logit_clip),
-                    player_prior_features[..., 5:8],
+                    player_prior_features[..., 5:],
                 ],
                 dim=-1,
             )

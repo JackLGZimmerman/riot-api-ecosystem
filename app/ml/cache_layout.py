@@ -4,10 +4,11 @@ from pathlib import Path
 
 import numpy as np
 
-# v30 adds draft-safe per-player priors: train-window overall and per-champion
-# (rate, count) pairs per slot, LOO-adjusted on train. The identity-encoder
-# latents still gather per batch from the small frozen artifact.
-CACHE_FORMAT = "npy-memmap-v30"
+# v30 added draft-safe per-player priors: train-window overall and per-champion
+# (rate, count) pairs per slot, LOO-adjusted on train. v31 adds the per-(player,
+# role) experience count. The identity-encoder latents still gather per batch
+# from the small frozen artifact.
+CACHE_FORMAT = "npy-memmap-v31"
 CACHE_META_FILE = "cache_meta.json"
 
 WIN_RATE_FILE = "win_rate.npy"
@@ -21,6 +22,7 @@ PLAYER_RATE_FILE = "player_rate.npy"
 PLAYER_CNT_FILE = "player_cnt.npy"
 PLAYER_CHAMP_RATE_FILE = "player_champ_rate.npy"
 PLAYER_CHAMP_CNT_FILE = "player_champ_cnt.npy"
+PLAYER_ROLE_CNT_FILE = "player_role_cnt.npy"
 IDENTITY_STATIC_SIDECAR_FILE = "identity_static_sidecar.npy"
 IDENTITY_FULL_GAME_SIDECAR_FILE = "identity_full_game_sidecar.npy"
 IDENTITY_TEMPORAL_SIDECAR_FILE = "identity_temporal_sidecar.npy"
@@ -39,6 +41,7 @@ ARRAY_FILES = {
     "player_cnt": PLAYER_CNT_FILE,
     "player_champ_rate": PLAYER_CHAMP_RATE_FILE,
     "player_champ_cnt": PLAYER_CHAMP_CNT_FILE,
+    "player_role_cnt": PLAYER_ROLE_CNT_FILE,
 }
 
 DISK_DTYPES = {
@@ -53,6 +56,7 @@ DISK_DTYPES = {
     "player_cnt": np.float32,
     "player_champ_rate": np.float32,
     "player_champ_cnt": np.float32,
+    "player_role_cnt": np.float32,
 }
 
 ARRAY_SHAPES = {
@@ -67,6 +71,7 @@ ARRAY_SHAPES = {
     "player_cnt": (N_PLAYERS_PER_GAME,),
     "player_champ_rate": (N_PLAYERS_PER_GAME,),
     "player_champ_cnt": (N_PLAYERS_PER_GAME,),
+    "player_role_cnt": (N_PLAYERS_PER_GAME,),
 }
 
 SIDECAR_ARRAY_FILES = {

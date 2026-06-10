@@ -57,6 +57,8 @@ def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
         safe = loo_count > 0.0
         raw[rate_key] = np.where(safe, loo_wins / np.where(safe, loo_count, 1.0), 0.5)
         raw[cnt_key] = np.maximum(loo_count, 0.0)
+    # Count-only role experience: each train game counts itself once.
+    raw["plr_cnt"] = np.maximum(raw["plr_cnt"] - 1.0, 0.0)
 
 
 def _solo(attr: str, default: str) -> str:
@@ -77,6 +79,14 @@ def _player_champ(attr: str, default: str) -> str:
     )
 
 
+def _player_role(attr: str, default: str) -> str:
+    # Per-(player, role) experience; role comes from the matching solo key.
+    return (
+        f"arrayMap((k, s) -> dictGetOrDefault('{{player_role_prior_dict}}', '{attr}', "
+        f"(k, toString(tupleElement(s, 2))), {default}), player_keys, solo_keys)"
+    )
+
+
 # Two-stage query: the subquery canonicalises the per-slot solo key once per game,
 # then the outer SELECT resolves each key to its (win_rate, matchups) prior pair.
 _CHUNK_QUERY_TEMPLATE = f"""
@@ -90,6 +100,7 @@ SELECT
     {_player("matchups", "toUInt32(0)")} AS pl_cnt,
     {_player_champ("win_rate", "toFloat32(0.5)")} AS plc_raw,
     {_player_champ("matchups", "toUInt32(0)")} AS plc_cnt,
+    {_player_role("matchups", "toUInt32(0)")} AS plr_cnt,
     matchid
 FROM (
     SELECT
@@ -160,7 +171,7 @@ def _remove_stale_sidecar_arrays(cache_dir: Path) -> None:
 _RAW_COLUMNS = (
     "blue_win", "p1_raw", "p1_cnt",
     "champion_id", "build_id",
-    "pl_raw", "pl_cnt", "plc_raw", "plc_cnt",
+    "pl_raw", "pl_cnt", "plc_raw", "plc_cnt", "plr_cnt",
 )
 
 _CHUNK_SIZE = 50_000
@@ -234,6 +245,7 @@ def _smoothed_features(
         "player_cnt": raw["pl_cnt"].astype(DISK_DTYPES["player_cnt"], copy=False),
         "player_champ_rate": player_champ_rate.astype(DISK_DTYPES["player_champ_rate"], copy=False),
         "player_champ_cnt": raw["plc_cnt"].astype(DISK_DTYPES["player_champ_cnt"], copy=False),
+        "player_role_cnt": raw["plr_cnt"].astype(DISK_DTYPES["player_role_cnt"], copy=False),
     }
 
 
@@ -276,6 +288,7 @@ def _stream_split(
             solo_prior_dict=cfg.solo_prior_dict,
             player_prior_dict=cfg.player_prior_dict,
             player_champ_prior_dict=cfg.player_champ_prior_dict,
+            player_role_prior_dict=cfg.player_role_prior_dict,
             split=split,
             last_matchid=last_matchid,
             chunk=chunk,
@@ -379,6 +392,7 @@ def _write_meta(
                     "solo_prior_dict": cfg.solo_prior_dict,
                     "player_prior_dict": cfg.player_prior_dict,
                     "player_champ_prior_dict": cfg.player_champ_prior_dict,
+                    "player_role_prior_dict": cfg.player_role_prior_dict,
                 },
             },
             indent=2,

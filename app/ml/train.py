@@ -93,6 +93,7 @@ class RawTensorSplit:
     player_cnt: torch.Tensor | None = None
     player_champ_rate: torch.Tensor | None = None
     player_champ_cnt: torch.Tensor | None = None
+    player_role_cnt: torch.Tensor | None = None
 
 
 class _SidecarGatherer:
@@ -274,14 +275,21 @@ def _drop_unused_model_arrays(
         "player_cnt": not config.use_player_priors,
         "player_champ_rate": not config.use_player_priors,
         "player_champ_cnt": not config.use_player_priors,
+        # The role block exists only for player_prior_feature_dim > 8 (v31).
+        "player_role_cnt": not (
+            config.use_player_priors and int(config.player_prior_feature_dim) > 8
+        ),
     }
     if config.use_player_priors:
-        for name in ("player_rate", "player_cnt", "player_champ_rate", "player_champ_cnt"):
+        required = ["player_rate", "player_cnt", "player_champ_rate", "player_champ_cnt"]
+        if int(config.player_prior_feature_dim) > 8:
+            required.append("player_role_cnt")
+        for name in required:
             value = getattr(split, name)
             if value is None or value.ndim != 2 or value.shape[1] != 10:
                 raise ValueError(
                     f"HGNN config enables player priors, but the cache is missing "
-                    f"{name} [games, 10]; rebuild the dataset cache (v30)."
+                    f"{name} [games, 10]; rebuild the dataset cache (v30+)."
                 )
     for name, dim in (
         ("loadout_features", int(config.loadout_feature_dim)),
@@ -979,6 +987,7 @@ def _hgnn_inputs_from_raw(
         player_cnt=raw.player_cnt,
         player_champ_rate=raw.player_champ_rate,
         player_champ_cnt=raw.player_champ_cnt,
+        player_role_cnt=raw.player_role_cnt,
         device=device,
         **sidecar,
     )
@@ -2092,6 +2101,7 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "player_prior_mode": args.player_prior_mode,
         "player_prior_hidden": args.player_prior_hidden,
         "player_residual_hidden": args.player_residual_hidden,
+        "player_prior_feature_dim": args.player_prior_feature_dim,
     }
 
 
@@ -2372,6 +2382,16 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         type=_parse_int_tuple,
         default=model_defaults.player_residual_hidden,
         help="Comma-separated hidden sizes for the game-level player residual head.",
+    )
+    parser.add_argument(
+        "--player-prior-feature-dim",
+        type=int,
+        choices=(8, 11),
+        default=model_defaults.player_prior_feature_dim,
+        help=(
+            "8: overall + per-champion blocks (v30); 11 adds the per-role "
+            "experience block (v31 cache)."
+        ),
     )
     args = parser.parse_args()
     if args.use_semantic_group_features and not args.use_learned_semantic_moe:

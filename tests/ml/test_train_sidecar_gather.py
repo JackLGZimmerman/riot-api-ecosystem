@@ -38,6 +38,7 @@ def _write_compact_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12
         "player_cnt": rng.uniform(0, 50, (n_games, 10)),
         "player_champ_rate": rng.uniform(0.4, 0.6, (n_games, 10)),
         "player_champ_cnt": rng.uniform(0, 20, (n_games, 10)),
+        "player_role_cnt": rng.uniform(0, 30, (n_games, 10)),
     }
     cache_dir.mkdir(parents=True, exist_ok=True)
     for name, filename in ARRAY_FILES.items():
