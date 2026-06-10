@@ -393,3 +393,54 @@ than carried over mechanically.
 9. If the refreshed protocol fails the NLL gates, reject another semantic
    architecture sweep until a cheaper fixed-feature ceiling on the refreshed
    split shows gate-level central NLL signal.
+
+### Rolled Split Round 1: From-Scratch Recipe Rejected (2026-06-10)
+
+The full production recipe (active defaults, lr `3e-4`, from scratch) was
+trained on the rolled split for seeds `4` and `5` and evaluated with the
+no-group band harness
+(`app/ml/data/experiments/rolled_split_production/eval_no_group_bands.py`,
+validation printed only; test written to JSON unread). The previous
+frozen-boundary production checkpoint was re-evaluated on the rolled windows
+as the incumbent anchor (`existing/`); the harness reproduced its recorded
+metrics (NLL to `4e-7`, accuracy within 8 of 164,792 rows from batch
+reduction-order noise).
+
+Validation results (rolled val, S16.9-16.10):
+
+| run | global acc | global NLL | central n | central acc lift | central NLL lift | high-support max gap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| incumbent (`existing/`) | `57.812%` | `0.673779` | 60,649 | `+0.711pp` | `0.001002` | `3.94pp` |
+| scratch seed 4 | `57.690%` | `0.673584` | 122,304 | `+2.325pp` | `0.007908` | `10.85pp` |
+| scratch seed 5 | `57.653%` | `0.674470` | 98,119 | `+2.573pp` | `0.006558` | `14.40pp` |
+
+Decision: reject the from-scratch candidate on validation; test was not
+inspected. Two gates fail:
+
+- Audit sanity: high-support context max-abs gap `10.85pp`/`14.40pp` vs the
+  `<= 3.0pp` target (incumbent: `3.94pp` on the same rolled val). Group EB gap
+  MSE regressed from `1.28` to `17.9`/`25.2`, and the per-epoch context gap
+  oscillated `38 -> 84 pp^2` between adjacent epochs at lr `3e-4`.
+- Global guardrail vs the incumbent: raw val accuracy `-0.12pp`/`-0.15pp`
+  (NLL/AUC marginally better on seed 4).
+
+The large no-group lifts are not gate evidence: zeroing
+`semantic_group_features` collapses the from-scratch models to `~55.9%`
+global no-group accuracy (incumbent: `57.5%`), so the central band widens to
+74%/60% of validation rows. From-scratch training co-adapts the main signal
+with the group path, which makes the no-group ablation an unfaithful baseline
+and inflates band lifts. Band lifts are only comparable across runs whose
+no-group base matches the incumbent's.
+
+Incumbent group-path lift on rolled validation (`+0.711pp` / `0.001002`
+central NLL) sits at the historical `~0.001` plateau, confirming the plateau
+carries over to the rolled windows for boundary-respecting checkpoints.
+
+Round 2 direction: warm-start from the incumbent checkpoint
+(`app/ml/data/hgnn_production_model.pt`) and fine-tune on the rolled train
+window at lr `1e-4` (no parameter freeze; same architecture), seeds `4` and
+`5`, batch `16384`, val-accuracy checkpointing. Rationale: the failure
+signature is recipe-induced miscalibration, not rolled-data damage, and the
+incumbent's lineage is exactly this low-lr warm-start path; the fine-tune
+should keep the calibrated group geometry while collecting the same-patch
+freshness dividend measured by the time-local teacher ceiling.
