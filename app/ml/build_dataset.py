@@ -370,7 +370,13 @@ def _stream_split(
             player_prior_dict=_sql_ident(cfg.player_prior_dict),
             player_champ_prior_dict=_sql_ident(cfg.player_champ_prior_dict),
             player_role_prior_dict=_sql_ident(cfg.player_role_prior_dict),
-            player_prior_selects=_player_prior_selects(cfg.include_player_priors),
+            player_prior_selects=_player_prior_selects(
+                cfg.include_player_priors
+            ).format(
+                player_prior_dict=_sql_ident(cfg.player_prior_dict),
+                player_champ_prior_dict=_sql_ident(cfg.player_champ_prior_dict),
+                player_role_prior_dict=_sql_ident(cfg.player_role_prior_dict),
+            ),
             split=_sql_str(split),
             last_matchid=_sql_str(last_matchid),
             chunk=chunk,
