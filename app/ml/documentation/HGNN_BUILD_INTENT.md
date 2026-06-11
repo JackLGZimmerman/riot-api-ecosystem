@@ -55,9 +55,10 @@ section as the contract with reality; re-verify anchors before editing.
   ([6900_ml_game_player_pivot_build.sql](../../../database/clickhouse/schema/6900_ml_game_player_pivot_build.sql))
   and the train-only prior
   ([6003_1vx_aggregations_build.sql](../../../database/clickhouse/schema/6003_1vx_aggregations_build.sql))
-  both join it. `synergy_1vx` is already `split = 'train'` only, and the
-  per-category value columns needed for secondary/margin profiles already
-  exist in `participant_item_value_totals`.
+  both join it. `synergy_1vx` is already `split = 'train'` only. A
+  time-capped label (Phase B) is derivable from
+  `game_data.tl_item_purchased` (926M rows) joined through
+  `item_value_map_dict` — verified working in the signal inventory below.
 - **Model vocab.** `HGNNConfig.n_builds` defaults to 11; `build_vocab` is the
   sorted distinct train labels recorded at cache build
   ([build_dataset.py](../build_dataset.py) `_identity_meta`). One reserve
@@ -106,34 +107,81 @@ section as the contract with reality; re-verify anchors before editing.
   `test_encoder_sidecar.py`, `tests/rl/test_reward.py` all exist and cover
   the touched surfaces.
 
+## Measured Signal Inventory (2026-06-11)
+
+Every claim in this section was measured against ClickHouse train-split data,
+not assumed. Method: within each conditioning cell, the games-weighted
+variance of sub-cell win rates is computed and the expected sampling-noise
+contribution `(B-1) * pbar * (1-pbar) / N` is subtracted ("debiased
+variance", reported in pp²; the same approach as the group audit in
+`EXPERIMENTS.md`). Sub-cells gated at `n >= 20`, cells at `n >= 500`–`1000`.
+Reproduction note: row-level scans of `participant_item_value_totals` joined
+to splits are cheap, but any aggregation over `tl_item_purchased` (926M rows)
+must run on a sampled, staged subset with `max_memory_usage` capped — an
+uncapped run OOM-kills the ClickHouse container.
+
+| Measurement (train split) | Value | Decision it drives |
+| --- | --- | --- |
+| `P(b\|champ,role)`: weighted top-1 share / effective builds | 0.783 / 1.95 | Marginalisation ≠ modal scoring: the modal *joint* world carries only ~9% mass (measured below). |
+| Labels with ≥5% share per champ-role (weighted) | ~2.1 | `K_slot=3` per-slot truncation is near-lossless. |
+| Debiased win-rate variance of the 11-label final build within (champ, role) | 4.78pp² (2.19pp RMS) | Large oracle signal by this project's standards — the conditional `P(win\|draft,build)` surface is worth building. |
+| Same signal at the 4-group `BUILD_GROUPS` grain | 3.30pp² | Groups keep only ~69% of it: keep the 11-label vocab; groups stay smoothing parents, not a replacement vocab. |
+| Secondary label (2nd-highest value column) within (champ, role, primary) | +6.99pp² raw association | Headroom past the primary label exists — but see the contamination split below before trusting it. |
+| Hybrid ratio `v2/v1` quartiles within (champ, role, primary) | +7.21pp² raw association | Same caveat: shape discriminates, causality unknown at this grain. |
+| Win/loss TV of the final label within (champ, role) | 0.0217 | An equivalent restatement of the 2.19pp RMS, not an independent check — see consequence 1. |
+| 15-min purchase-derived label: agreement with final label | 66.7% | The final label is a noisy proxy for intent. |
+| 15-min vs final label debiased variance, identical games | 3.06pp² vs 5.36pp² | ≥~43% of the final-label association is outcome-side inflation; ≤~57% is plausibly draft intent. |
+| 8-min label | unusable | ~17% coverage, selection-biased subsample (52.6% WR). |
+| Retained joint mass, real priors (mean over sampled drafts): `W=1` / `K=3,W=128` / `K=3,W=512` / `K=3,W=2048` | 0.09 / 0.66 / 0.75 / 0.78 | Sets the enumeration defaults below; a ≥0.95 joint-mass target is unreachable at any practical `W`. |
+| Deterministic per-(champ,role) features (averaged historical label, shape, or group) | 0 by construction | A feature that is a function of (champ, role) alone adds no draft-time information beyond the champion identity the model already has. Rejected. |
+
+Two analytical consequences:
+
+1. **Association measures cannot separate causation.** Within a cell, the
+   win/loss TV of the label distribution and the across-label win-rate
+   variance are the same association expressed in different units
+   (TV 0.0217 ↔ 2.19pp RMS here). A diagnostic comparing `P(b|champ,role)` to
+   `P(b|champ,role,win)` therefore cannot tell "build choice wins games" from
+   "winning shapes the final label". The only data-driven separator available
+   is the **time-capped label benchmark** (label recomputed from purchases in
+   the first 15 minutes via `tl_item_purchased` mapped through
+   `item_value_map_dict`), which replaces the TV diagnostic as the required
+   contamination measurement.
+2. **Pregame marginalisation adds no information beyond champion+role.**
+   `P(b | champ, role)` is a deterministic function of inputs the model
+   already sees, so accepted passive metrics can at best match a well-trained
+   no-build model. Phase A's value is honest evaluation (the recorded
+   production test metrics are oracle-conditioned) plus the conditional
+   surface RL/search needs — not headline-metric gain.
+
 ## Known Modelling Risk: Final Build Is Post-Treatment
 
 `highest_value_label` is computed from the *final* inventory, which is partly
 an outcome of the game: losing players finish fewer items, defensive pivots
-correlate with the game going badly. So `P_HGNN(win | draft, final_build=b)`
-conditions on an outcome-contaminated proxy for intent, and marginalising it
-against a pregame prior `P(b | champ, role)` evaluates the conditional under a
-different conditioning distribution than it was trained on. This is the single
-most likely reason safe marginalisation could *underperform* the implicit
-baseline, independent of any implementation bug.
+correlate with the game going badly. The signal inventory quantifies this:
+roughly 40–45% of the final label's win association evaporates when the label
+is frozen at 15 minutes, and the 15-min label itself still embeds in-game
+adaptation, so the true draft-intent share is at most ~57%. Marginalising the
+conditional against a pregame prior also evaluates it under a different
+conditioning distribution than it was trained on; expect accepted metrics to
+sit below the oracle-conditioned reference, by design.
 
 Required handling:
 
-1. **Quantify before building more.** Add a cheap ClickHouse diagnostic that
-   compares `P(b | champ, role)` against `P(b | champ, role, win)` per label.
-   Labels whose conditional mass shifts strongly with the outcome are the
-   contaminated ones; report the aggregate total-variation distance.
-2. **Treat the safe-ablation result as the verdict**, not a tuning failure. If
-   marginalisation loses NLL to the no-build baseline while the oracle ceiling
-   is clearly positive, contamination (not smoothing or pruning) is the prime
-   suspect.
-3. **Phase B option — intent-proxied label.** Redefine the label from
-   early/time-capped purchases (the time-bin machinery in
-   [8005_scaling_item_time_bins.sql](../../../database/clickhouse/schema/analytics_builds/8005_scaling_item_time_bins.sql)
-   already classifies completed items against the item-value map) so the label
-   is closer to draft intent. This changes the label definition end-to-end
-   (5132 → 6003 → 6900 → cache → sidecars → retrain) and is only justified by
-   the diagnostic above plus a positive oracle ceiling.
+1. **Treat the safe-ablation result as the verdict**, not a tuning failure.
+   If marginalisation loses NLL to the no-build baselines, contamination (not
+   smoothing or pruning) is the prime suspect — the measurements above say
+   the room for a passive-metric *gain* was never there.
+2. **Phase B's label is intent-proxied, not richer-final.** Enriching the
+   *final*-inventory label (secondary set, margin, shape) amplifies exactly
+   the contaminated component — those facets are even more exposed to
+   item-completion progress than the primary label. Any Phase B label
+   redefinition derives from time-capped purchases (15-minute cutoff over
+   `tl_item_purchased` + `item_value_map_dict`; the same item-classification
+   approach as
+   [8005_scaling_item_time_bins.sql](../../../database/clickhouse/schema/analytics_builds/8005_scaling_item_time_bins.sql)).
+   This changes the label definition end-to-end
+   (5132 → 6003 → 6900 → cache → sidecars → retrain).
 
 ## Phasing
 
@@ -157,16 +205,24 @@ serving/eval/RL change plus a small catalog module:
   runtime arm and the id-0 default.
 - Oracle ceiling and safe ablations (the decision data for Phase B).
 
-### Phase B — richer profiles (conditional, expensive)
+### Phase B — intent-proxied label (conditional, expensive)
 
-Only if Phase A's oracle ceiling shows material signal beyond the primary
-label (secondary set, margin, or shape), or the contamination diagnostic
-demands an intent-proxied label: extend the label definition in SQL, bump the
-cache format (v33), regenerate the sidecar and semantic-context artifacts at
-the new identity grain, retrain 3 seeds, re-promote via `promote.py`, and
-re-run `verify_equivalence.py`-style no-regression checks. Do not start Phase
-B work, including contract fields it would need, until the Phase A evidence is
-recorded in `EXPERIMENTS.md`.
+The measured evidence has already shaped Phase B: the headroom past the
+primary label is real (secondary +6.99pp², shape +7.21pp² raw association)
+but those facets of the *final* inventory are the most outcome-inflated, so
+"richer final profiles" is rejected as the Phase B direction. Phase B, if
+taken, redefines the label from 15-minute time-capped purchases (primary
+label first; optionally a time-capped secondary), then: extend the label
+definition in SQL, bump the cache format (v33), regenerate the sidecar and
+semantic-context artifacts at the new identity grain, retrain 3 seeds,
+re-promote via `promote.py`, and re-run `verify_equivalence.py`-style
+no-regression checks.
+
+Go/no-go inputs, all recorded in `EXPERIMENTS.md` first: Phase A's accepted
+marginal metrics and oracle references, plus a train-side check that a model
+conditioned on the time-capped label retains its oracle separation (the
+aggregate-level expectation is ~3.06pp² vs the final label's 5.36pp²). Do not
+start Phase B work, including contract fields it would need, before that.
 
 ## Core Data Contracts
 
@@ -186,9 +242,10 @@ Required fields (Phase A):
 - `support_count`, `support_share`, `support_tier`
 - `catalog_version`
 
-Phase B adds `secondary_label_set`, `shape_bucket`, optional `margin_bucket`.
-Secondary labels only make sense relative to a primary profile; there is no
-standalone "observed secondary only" feature or ablation.
+Phase B replaces `primary_label`'s source with the 15-minute time-capped
+label (and may add a time-capped `secondary_label`). Final-inventory
+`secondary_label_set` / `shape_bucket` / `margin_bucket` fields are rejected
+— see the signal inventory: those facets are the most outcome-inflated.
 
 ### BuildPriorVector
 
@@ -253,7 +310,11 @@ For one draft (10 `(champion, role)` slots):
 2. Enumerate joint assignments in descending product mass with a best-first
    heap over the 10 independent per-slot distributions (exact lazy top-W
    enumeration — no need to materialise `K_slot^10` candidates). Default world
-   cap `W=128`; stop early once cumulative retained joint mass ≥ 0.95.
+   cap `W=512`; stop early once cumulative retained joint mass ≥ 0.90 (rare).
+   Measured against real priors: mean retained joint mass is ~0.09 at `W=1`,
+   ~0.66 at `K=3, W=128`, ~0.75 at `K=3, W=512`, plateauing near the per-slot
+   truncation ceiling (~0.78 for `K=3`) — a ≥0.95 target is unreachable at
+   any practical `W`, so completeness is reported, not chased.
 3. Score all retained worlds in **one batched forward pass**. Only
    build-dependent inputs vary per world; precompute per `(slot, candidate)`
    once and assemble world tensors by indexing:
@@ -267,8 +328,9 @@ For one draft (10 `(champion, role)` slots):
    weights divided by retained mass, and report `retained_joint_mass` and
    tail mass rather than hiding pruned probability behind silent
    renormalisation.
-5. If retained joint mass is below a floor (default 0.5), emit a
-   low-confidence diagnostic on the result payload.
+5. If retained joint mass is below a floor (default 0.35 — calibrated so the
+   p10 draft at `K=3, W=512` passes; 0.5 would flag roughly a third of
+   normal drafts), emit a low-confidence diagnostic on the result payload.
 6. Calibrate the marginal probability with a fresh affine logit calibration
    fit on the **train split scored by the same marginalisation procedure**
    (source label `pregame_marginal_build`). Do not reuse the production
@@ -285,21 +347,27 @@ candidates, and reuses `build_hgnn_inputs` plus the on-device sidecar gather
 from `train.py`. This keeps loadout/patch heads served exactly as trained and
 avoids the runtime fail-fast.
 
-Cost envelope: 329,586 test games × 128 worlds ≈ 42M forward rows — tens of
-minutes of forward-only GPU time at current throughput. Expose `--worlds` and
+Cost envelope: 329,586 test games × 512 worlds ≈ 169M forward rows — on the
+order of an hour of forward-only GPU time at current throughput (`W=128` ≈
+42M rows stays the cheap iteration setting). Expose `--worlds` and
 `--mass-floor`; report the retained-mass distribution alongside metrics.
 
 ### Baseline definition
 
 The "safe no-build baseline" for promotion is **not** the dead unknown-build
-arm (untrained embedding, empty priors). Use two reference points:
+arm (untrained embedding, empty priors). Use three reference points:
 
 1. The marginalisation itself with `W=1` (modal build per slot) — isolates the
-   value of spreading mass over alternatives.
-2. The recorded production observed-build test metrics
+   value of spreading mass over alternatives (the modal world carries only
+   ~9% joint mass, so a real difference is expected).
+2. A **retrained no-build ensemble** (builds collapsed to a single label,
+   3 seeds, same recipe) — the information-equivalent comparator, since the
+   prior is deterministic given (champ, role). If marginalisation cannot beat
+   it, serve the no-build model for passive prediction and keep the
+   build-conditioned model solely as the RL/search counterfactual engine.
+3. The recorded production observed-build test metrics
    (0.58260 / 0.67105) — an *oracle-conditioned* reference, expected to be
-   better; the gap is the price of removing the leak, and the goal is to
-   minimise it.
+   better; the gap is the price of removing the leak, reported but not gated.
 
 ## Experiment Plan
 
@@ -313,20 +381,23 @@ build shape. Phase A variants (runnable against the existing checkpoint):
 2. observed primary with the marginal calibration applied (isolates
    calibration from information)
 
-Phase B-deciding variants (require scoring richer profiles, so they run as
-fixed-feature residual probes in the established `EXPERIMENTS.md` harness
-style rather than through the HGNN): observed secondary set, margin, full
-profile. Report all oracle results separately, labelled
-`oracle_observed_build`.
+The aggregate-level Phase B-deciding numbers are already measured (signal
+inventory: secondary +6.99pp², shape +7.21pp², 15-min label 3.06pp² vs final
+5.36pp² on identical games). The remaining Phase B-deciding work is
+model-level: a train-side check that conditioning on the 15-min time-capped
+label retains its separation through the HGNN, not just in aggregates.
+Report all oracle results separately, labelled `oracle_observed_build`.
 
 ### Pregame-Safe Ablations (accepted)
 
 1. modal-build baseline (`W=1`)
-2. primary-prior marginalisation, default pruning/smoothing
-3. support-gated variant (stricter `profile_min_*`)
-4. calibrated marginalisation (step 6 above)
-5. sensitivity sweep over `K_slot ∈ {2,3,5}`, `W ∈ {32,128,512}` on train-only
-   scoring before touching test
+2. retrained no-build ensemble (baseline 2 above)
+3. primary-prior marginalisation, default pruning/smoothing
+4. support-gated variant (stricter `profile_min_*`)
+5. calibrated marginalisation (step 6 above)
+6. sensitivity sweep over `K_slot ∈ {2,3,5}`, `W ∈ {128,512,2048}` on
+   train-only scoring before touching test (measured retained-mass means:
+   ~0.66 / ~0.75 / ~0.78 at `K=3`; `K=2` plateaus at ~0.5)
 
 Promotion priority: NLL first, then accuracy, Brier, corrected reliability/ECE,
 and per-patch stratified transfer. Every accepted result reports support tier
@@ -373,7 +444,7 @@ model-metric risk, leakage risk, and runtime risk.
 | --- | --- | --- |
 | Orchestrator | Context packets, disjoint ownership, integration. | No overlapping edits without an explicit handoff. |
 | Build Contract Agent | `BuildProfile`, `BuildPriorVector`, source labels, serialization, validation. | Canonical ids stable; JSON round trip; `oracle_observed_build` rejected by the accepted-mode validator; vocab identity asserted against a checkpoint config. |
-| Train-Only Catalog Agent | Catalog + smoothed priors from `synergy_1vx` train rows; contamination diagnostic. | Synthetic split tests prove non-train rows never contribute; fallback chain covered; no new CH tables in Phase A. |
+| Train-Only Catalog Agent | Catalog + smoothed priors from `synergy_1vx` train rows. | Synthetic split tests prove non-train rows never contribute; fallback chain covered; no new CH tables in Phase A; catalog stats match the signal-inventory concentration numbers. |
 | Dataset And Cache Safety Agent | Split-scoped guards; delete the dead unknown-build arm and id-0 default. | Accepted eval cannot read test-side `build_id`; train path byte-identical (no cache rebuild); removal verified by tests, not comments. |
 | Passive Predictor Agent | Batched marginalisation: heap enumeration, per-slot precompute, single forward, marginal calibration. | Probability-space averaging; retained mass reported; `W=1` reduces exactly to modal scoring; runtime predictor path and cache-side harness share the assembly code. |
 | Oracle Ablation Agent | Oracle matrix. | Outputs labelled `oracle_observed_build`, kept out of accepted reports. |
@@ -388,12 +459,13 @@ to protect model performance and code performance, not to add features.
 ## Implementation Order (Phase A)
 
 1. Land contracts, source labels, and validation (incl. vocab assertion).
-2. Catalog + smoothed priors from `synergy_1vx`; contamination diagnostic.
+2. Catalog + smoothed priors from `synergy_1vx`.
 3. Split-scoped guards; delete the dead unknown-build runtime arm and the
    id-0 default.
 4. Cache-side marginalised eval harness; batched marginal path in the
    predictor sharing its assembly code.
-5. Marginal calibration fit on train; safe ablations; oracle references.
+5. Marginal calibration fit on train; safe ablations (incl. the retrained
+   no-build ensemble); oracle references.
 6. RL pool regeneration from the catalog; retained-mass surfacing; support
    penalties.
 7. Performance pass (enumeration, per-slot precompute reuse, lookup caching).
@@ -424,6 +496,10 @@ Metric promotion gates:
 - Accepted marginalisation improves or preserves test NLL versus the modal
   (`W=1`) baseline, without reliability collapse; the gap to the
   oracle-conditioned production reference is reported, not gated.
+- Serving decision: if marginalisation does not beat the retrained no-build
+  ensemble on test NLL, the no-build model becomes the passive serving path
+  and the conditional model is RL/search-only. Either outcome is a valid
+  Phase A result.
 - Brier and corrected ECE do not materially regress.
 - Retained mass, support tier, fallback source, and build source are emitted
   in every accepted report.
@@ -444,5 +520,12 @@ Metric promotion gates:
 - Do not allow RL/search to choose build shapes outside the train catalog.
 - Do not promote an accuracy gain that comes with material NLL or calibration
   regression.
-- Do not start Phase B (richer profiles, label redefinition, cache v33,
-  retrain) before the Phase A oracle and contamination evidence is recorded.
+- Do not enrich the *final*-inventory label (secondary set, margin, shape) —
+  measured as the most outcome-inflated facets; Phase B enrichment is
+  time-capped purchase labels only.
+- Do not add deterministic per-(champ, role) build features (averaged
+  historical labels, group shares, mean shape vectors): they carry zero
+  draft-time information beyond the champion identity the model already has.
+- Do not start Phase B (label redefinition, cache v33, retrain) before the
+  Phase A accepted metrics and the model-level time-capped check are
+  recorded in `EXPERIMENTS.md`.
