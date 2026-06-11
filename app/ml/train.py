@@ -474,13 +474,6 @@ def _validate_train_config(train_cfg: TrainConfig) -> None:
         raise ValueError("train_epoch_max_games must be >= 0")
     if train_cfg.raw_tensor_cache_device not in {"model", "cpu"}:
         raise ValueError("raw_tensor_cache_device must be 'model' or 'cpu'")
-    if (
-        train_cfg.freeze_warm_start_loaded_parameters
-        and train_cfg.warm_start_model_path is None
-    ):
-        raise ValueError(
-            "freeze_warm_start_loaded_parameters requires warm_start_model_path"
-        )
 
 
 def _same_output_path(left: Path, right: Path) -> bool:
@@ -656,78 +649,6 @@ def _predict_hgnn_logits(
     return np.concatenate(logits).astype(np.float64, copy=False)
 
 
-def _warm_start_hgnn_model(
-    model: HGNNWinModel,
-    path: Path,
-    *,
-    device: str,
-) -> tuple[str, ...]:
-    if not path.exists():
-        raise FileNotFoundError(f"warm-start HGNN checkpoint does not exist: {path}")
-    payload = torch.load(path, map_location=device, weights_only=True)
-    if not isinstance(payload, dict) or "state_dict" not in payload:
-        raise ValueError(f"warm-start HGNN checkpoint is invalid: {path}")
-    checkpoint_state = payload["state_dict"]
-    if not isinstance(checkpoint_state, dict):
-        raise ValueError(f"warm-start HGNN checkpoint state_dict is invalid: {path}")
-    model_state = model.state_dict()
-    compatible_state: dict[str, torch.Tensor] = {}
-    skipped_shape_mismatches: list[str] = []
-    for key, value in checkpoint_state.items():
-        target = model_state.get(key)
-        if target is not None and value.shape != target.shape:
-            skipped_shape_mismatches.append(
-                f"{key}: checkpoint={tuple(value.shape)} model={tuple(target.shape)}"
-            )
-            continue
-        compatible_state[key] = value
-    if skipped_shape_mismatches:
-        logger.warning(
-            "Skipped %s warm-start tensors with incompatible shapes from %s: %s",
-            len(skipped_shape_mismatches),
-            _project_relative(path),
-            "; ".join(skipped_shape_mismatches[:8]),
-        )
-    incompatible = model.load_state_dict(compatible_state, strict=False)
-    logger.info(
-        "Warm-started HGNN model from %s missing=%s unexpected=%s",
-        _project_relative(path),
-        len(incompatible.missing_keys),
-        len(incompatible.unexpected_keys),
-    )
-    return tuple(str(key) for key in incompatible.missing_keys)
-
-
-def _freeze_warm_start_loaded_parameters(
-    model: HGNNWinModel,
-    *,
-    missing_keys: tuple[str, ...],
-) -> None:
-    missing = set(missing_keys)
-    frozen = 0
-    trainable = 0
-    trainable_names: list[str] = []
-    for name, parameter in model.named_parameters():
-        is_new = name in missing
-        parameter.requires_grad_(is_new)
-        if is_new:
-            trainable += parameter.numel()
-            trainable_names.append(name)
-        else:
-            frozen += parameter.numel()
-    if trainable <= 0:
-        raise ValueError(
-            "freeze_warm_start_loaded_parameters left no trainable parameters; "
-            "the warm-start checkpoint appears to match the model shape."
-        )
-    logger.info(
-        "Froze %s warm-start-loaded parameters; training %s new parameters (%s)",
-        frozen,
-        trainable,
-        ", ".join(trainable_names[:12]) + ("..." if len(trainable_names) > 12 else ""),
-    )
-
-
 def train(
     dataset_cfg: DatasetConfig | None = None,
     train_cfg: TrainConfig | None = None,
@@ -799,20 +720,8 @@ def train(
     }
 
     model = HGNNWinModel(model_config).to(device)
-    warm_start_missing_keys: tuple[str, ...] = ()
-    if train_cfg.warm_start_model_path is not None:
-        warm_start_missing_keys = _warm_start_hgnn_model(
-            model,
-            train_cfg.warm_start_model_path,
-            device=device,
-        )
-    if train_cfg.freeze_warm_start_loaded_parameters:
-        _freeze_warm_start_loaded_parameters(
-            model,
-            missing_keys=warm_start_missing_keys,
-        )
     optimizer = torch.optim.AdamW(
-        (parameter for parameter in model.parameters() if parameter.requires_grad),
+        model.parameters(),
         lr=train_cfg.learning_rate,
         weight_decay=train_cfg.weight_decay,
     )
@@ -844,28 +753,6 @@ def train(
     def synchronize_training_device() -> None:
         if str(device).startswith("cuda"):
             torch.cuda.synchronize()
-
-    if train_cfg.warm_start_model_path is not None:
-        test_logits = _predict_hgnn_logits(
-            model,
-            tensor_splits["test"],
-            batch_size=train_cfg.batch_size,
-            strength=strength,
-            device=device,
-            gatherer=gatherer,
-        )
-        test_predictions = _sigmoid_np(test_logits)
-        test_metrics = _evaluate_predictions(test_predictions, splits["test"])
-        best_test_nll = float(test_metrics["nll"])
-        best_checkpoint_test_nll = float(test_metrics["nll"])
-        best_checkpoint_accuracy = float(test_metrics["accuracy"])
-        best_epoch = 0
-        best_state = copy.deepcopy(model.state_dict())
-        logger.info(
-            "epoch=0 warm_start test_nll=%.5f test_acc=%.4f",
-            test_metrics["nll"],
-            test_metrics["accuracy"],
-        )
 
     for epoch in range(1, train_cfg.max_epochs + 1):
         synchronize_training_device()
@@ -1114,21 +1001,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
     parser.add_argument(
         "--metrics-path", type=Path, default=train_defaults.metrics_path
     )
-    parser.add_argument(
-        "--warm-start-model-path",
-        type=Path,
-        default=train_defaults.warm_start_model_path,
-        help="Optional HGNN checkpoint to load before training/fine-tuning.",
-    )
-    parser.add_argument(
-        "--freeze-warm-start-loaded-parameters",
-        action="store_true",
-        default=train_defaults.freeze_warm_start_loaded_parameters,
-        help=(
-            "After warm-starting, freeze parameters loaded from the checkpoint "
-            "and train only parameters missing from that checkpoint."
-        ),
-    )
     parser.add_argument("--batch-size", type=int, default=train_defaults.batch_size)
     parser.add_argument(
         "--train-batch-cap",
@@ -1341,10 +1213,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         TrainConfig(
             model_path=args.model_path,
             metrics_path=args.metrics_path,
-            warm_start_model_path=args.warm_start_model_path,
-            freeze_warm_start_loaded_parameters=(
-                args.freeze_warm_start_loaded_parameters
-            ),
             batch_size=args.batch_size,
             train_batch_cap=args.train_batch_cap,
             train_epoch_max_games=args.train_epoch_max_games,

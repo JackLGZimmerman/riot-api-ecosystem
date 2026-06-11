@@ -67,11 +67,6 @@ class DatasetConfig:
 class TrainConfig:
     model_path: Path = DEFAULT_PRODUCTION_MODEL_PATH
     metrics_path: Path = DEFAULT_PRODUCTION_METRICS_PATH
-    warm_start_model_path: Path | None = None
-    # When warm-starting a larger candidate model from production, optionally
-    # keep loaded checkpoint parameters fixed and train only newly introduced
-    # parameters that were missing from the checkpoint.
-    freeze_warm_start_loaded_parameters: bool = False
     batch_size: int = DEFAULT_TRAIN_BATCH_CAP
     # Effective training batch cap for the current production architecture.
     # Retune with epoch samples/s whenever parameter count changes.

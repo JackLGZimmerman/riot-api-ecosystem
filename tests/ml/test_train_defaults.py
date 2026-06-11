@@ -23,12 +23,10 @@ from app.ml.hgnn_model import (
     load_hgnn_model,
 )
 from app.ml.train import (
-    _freeze_warm_start_loaded_parameters,
     _hgnn_config_from_meta,
     _batch_indices,
     _validate_serving_artifact_contract,
     _validate_train_output_paths,
-    _warm_start_hgnn_model,
     production_semantic_model_overrides,
 )
 
@@ -58,7 +56,7 @@ def test_production_defaults_use_all_identity_encoders() -> None:
     assert train_cfg.learning_rate == 3e-4
     assert train_cfg.weight_decay == 0.0
     assert train_cfg.patience == 5
-    assert train_cfg.freeze_warm_start_loaded_parameters is False
+    assert not hasattr(train_cfg, "warm_start_model_path")
     assert train_cfg.train_batch_cap == DEFAULT_TRAIN_BATCH_CAP
     assert train_cfg.raw_tensor_cache_device == "cpu"
     assert train_cfg.train_epoch_max_games is None
@@ -211,40 +209,6 @@ def test_sidecar_dims_fall_back_to_encoder_sidecar_path_when_cache_meta_is_empty
     assert cfg.identity_full_game_sidecar_dim == 3
     assert cfg.identity_temporal_sidecar_dim == 4
 
-
-class _TinyWarmStartModel(torch.nn.Module):
-    def __init__(self, *, expanded: bool = False) -> None:
-        super().__init__()
-        self.shared = torch.nn.Linear(2, 2)
-        self.changed = torch.nn.Linear(2, 3 if expanded else 1)
-
-
-def test_warm_start_skips_shape_mismatches_and_freezes_loaded_parameters(
-    tmp_path,
-) -> None:
-    source = _TinyWarmStartModel()
-    with torch.no_grad():
-        source.shared.weight.fill_(0.25)
-        source.shared.bias.fill_(0.5)
-        source.changed.weight.fill_(0.75)
-        source.changed.bias.fill_(1.0)
-    checkpoint_path = tmp_path / "warm.pt"
-    torch.save({"state_dict": source.state_dict()}, checkpoint_path)
-
-    target = _TinyWarmStartModel(expanded=True)
-    missing = _warm_start_hgnn_model(target, checkpoint_path, device="cpu")
-
-    assert "changed.weight" in missing
-    assert "changed.bias" in missing
-    assert torch.allclose(target.shared.weight, source.shared.weight)
-    assert torch.allclose(target.shared.bias, source.shared.bias)
-
-    _freeze_warm_start_loaded_parameters(target, missing_keys=missing)
-
-    assert target.shared.weight.requires_grad is False
-    assert target.shared.bias.requires_grad is False
-    assert target.changed.weight.requires_grad is True
-    assert target.changed.bias.requires_grad is True
 
 
 def test_auto_hgnn_override_rejects_removed_dimension_resolution() -> None:

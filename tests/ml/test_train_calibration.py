@@ -83,8 +83,3 @@ def test_training_target_validation_catches_degenerate_cache_split() -> None:
 
     with pytest.raises(ValueError, match="test split has degenerate blue_win labels"):
         _validate_split_targets(splits)
-
-
-def test_freeze_loaded_parameters_requires_warm_start() -> None:
-    with pytest.raises(ValueError, match="warm_start_model_path"):
-        _validate_train_config(TrainConfig(freeze_warm_start_loaded_parameters=True))
