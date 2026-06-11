@@ -13,6 +13,23 @@ rebuilt. This
 implements the rolled-boundary lever by making same-patch history available to
 train-side priors and features before each patch's scored tail.
 
+Per-patch protocol validated, 2026-06-11: the ClickHouse split, pivot, and
+split-scoped aggregates were rebuilt (`1,318,329` train / `329,586` test, 11
+patches all at 80/20) along with the v32 cache, and three default-recipe seeds
+were trained. Test accuracy is `0.5784`–`0.5792` (mean `0.5788`, stdev
+`0.0004`) with test NLL `0.6719`–`0.6727` — recovering the old protocol's
+validation level (`0.5789` acc, `0.6730` NLL) and beating its frozen-tail test
+(`0.5738` acc, `0.6760` NLL) by `+0.50pp` accuracy and `-0.0037` NLL. The old
+val-over-test gap was therefore freshness, and the per-patch split removes it:
+per-patch test accuracy spans only `0.5742`–`0.5819` (stdev `0.0025`, at the
+binomial sampling floor for `~25k`–`39k` games per patch), and accuracy across
+chronological quartiles of each patch's 20% test tail is flat (`0.5775`,
+`0.5819`, `0.5782`, `0.5791`), so no measurable within-patch freshness decay
+remains. Remaining headroom is model/feature, not split mechanics;
+cross-patch train weighting is still an open, untested lever. Candidate
+artifacts and the per-patch runner live at
+`app/ml/data/experiments/split_v32/` (untracked).
+
 Experiment guidance and the latest semantic-boundary findings are in
 [EXPERIMENTS.md](EXPERIMENTS.md). In short: semantic group examples remain
 critical evaluation fixtures, but the current grouped residual targets did not
@@ -27,9 +44,10 @@ boundary forward (see EXPERIMENTS.md "Next Data Direction"), not model
 wiring.
 
 Data refresh note, 2026-06-10: the ClickHouse ML path, compact encoder sidecar,
-and v30 cache were rebuilt after newer season 16 data became available. The
-current cache now contains `1,647,915` games through the ML-valid S16.11 window
-(`1,318,331` train / `164,792` validation / `164,792` test). The promoted
+and v30 cache were rebuilt after newer season 16 data became available,
+covering `1,647,915` games through the ML-valid S16.11 window (then split
+80/10/10 as `1,318,331` train / `164,792` validation / `164,792` test; the
+same game pool now carries the per-patch v32 labels above). The promoted
 checkpoint and metrics below remain the previous production record until the
 rolled-split production recipe is retrained and evaluated.
 
