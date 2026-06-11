@@ -56,7 +56,7 @@ _MATCHUP_STAGE = f"{DB}.classification_context_matchup_stage"
 _STAT_STAGE = f"{DB}.temporal_stat_stage"
 _EV_STAGE = f"{DB}.temporal_ev_stage"
 
-SPLITS: tuple[str, ...] = ("train", "validation", "test")
+SPLITS: tuple[str, ...] = ("train", "test")
 K_SHARDS = 8  # match-hash shards for the heavy tl_participant_stats / team scans
 
 # Participant-stats metrics whose raw SUM is materialised (rate + largest-avg use

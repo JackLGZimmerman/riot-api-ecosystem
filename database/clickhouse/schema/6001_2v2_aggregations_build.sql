@@ -6,7 +6,7 @@
 -- Built from ml_game_player_pivot so participant/item labels are joined and
 -- role-pivoted once for all matchup aggregate builders.
 -- Leakage-safe training prior: only train games contribute outcome counts.
--- Validation/test rows should join against split = 'train'; train feature rows
+-- Test rows should join against split = 'train'; train feature rows
 -- must subtract their current match contribution at feature-build time.
 
 TRUNCATE TABLE game_data_filtered.matchup_2v2;
