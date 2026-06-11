@@ -85,7 +85,7 @@ SKIRMISH_CHAMPIONS = frozenset(
 SELECTED_ENCHANTERS = frozenset({37, 43, 117, 26})  # Sona, Karma, Lulu, Zilean.
 SELECTED_ENCHANTER_BUILDS = ("utility_enchanter", "utility_protection")
 
-# Thresholds promoted verbatim from context_examples_audit.py. Static stat
+# Thresholds promoted verbatim from the retired context-examples audit. Static stat
 # source-order provenance: attackRange_flat is index 10; health_flat and
 # health_perLevel are indices 24 and 25 in champion_basic_stats_flat.jsonl.
 BURST_DAMAGE_THRESHOLD = 0.952
@@ -127,41 +127,6 @@ SEMANTIC_GROUP_FEATURE_DIM = len(SEMANTIC_GROUP_FEATURE_NAMES)
 SEMANTIC_GROUP_FEATURE_INDEX = {
     name: idx for idx, name in enumerate(SEMANTIC_GROUP_FEATURE_NAMES)
 }
-
-AUDIT_AXIS_FEATURES: dict[str, tuple[str, ...]] = {
-    "enemy_burst_count": ("burst",),
-    "enemy_hard_cc_count": ("hard_cc",),
-    "enemy_frontline_count": ("frontline",),
-    "enemy_heavy_taken_count": ("heavy_taken",),
-    "enemy_high_hp_count": ("high_hp",),
-    "enemy_ranged_count": ("ranged",),
-    "same_role_range": ("same_role_range",),
-    "ally_skirmish_count": ("skirmish",),
-}
-
-AUDIT_FOCUS_FEATURES: dict[str, tuple[str, ...]] = {
-    "low_own_damage": ("damage",),
-    "focus_hp_low": ("high_hp",),
-    "focus_hp_high": ("high_hp",),
-    "selected_enchanter": ("selected_enchanter",),
-}
-
-
-def audit_axis_is_covered(axis: str) -> bool:
-    """Whether the compact feature schema includes the semantic source of an audit axis."""
-
-    if axis in AUDIT_AXIS_FEATURES:
-        return True
-    if axis.startswith(("enemy_", "ally_")):
-        return axis.split("_", 1)[1] in CONTEXT_AXIS_INDEX
-    return axis in CONTEXT_AXIS_INDEX
-
-
-def audit_focus_condition_is_covered(focus_condition: str | None) -> bool:
-    if focus_condition is None:
-        return True
-    return focus_condition in AUDIT_FOCUS_FEATURES
-
 
 def semantic_group_feature_metadata(build_vocab: Sequence[str]) -> dict[str, Any]:
     """Metadata that makes compact feature caches schema-validatable."""
@@ -617,8 +582,6 @@ def _hash_strings(values: Sequence[str]) -> str:
 
 
 __all__ = [
-    "AUDIT_AXIS_FEATURES",
-    "AUDIT_FOCUS_FEATURES",
     "BURST_DAMAGE_THRESHOLD",
     "CONTEXT_AXIS_INDEX",
     "CONTEXT_BIN_EDGES",
@@ -639,8 +602,6 @@ __all__ = [
     "SEMANTIC_GROUP_FEATURE_SCHEMA_VERSION",
     "SKIRMISH_CHAMPIONS",
     "TANK_BUILD_LABELS",
-    "audit_axis_is_covered",
-    "audit_focus_condition_is_covered",
     "build_identity_context_raw_from_metrics",
     "build_semantic_group_features",
     "materialize_semantic_group_feature_cache",

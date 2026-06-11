@@ -39,9 +39,6 @@ class SplitData:
     # Optional compact semantic audit-group features [games, 10, G]. Loaded only
     # when the learned semantic MoE group-feature flag is enabled.
     semantic_group_features: np.ndarray | None = None
-    # Raw identity/context audit axes [games, 10, C]. Loaded only when train-time
-    # audit metrics need to match the markdown/group audit hard-bin lens.
-    context_raw: np.ndarray | None = None
 
 
 def _slice(arrays: dict[str, np.ndarray], lo: int, hi: int) -> SplitData:
@@ -167,7 +164,6 @@ def load_splits(
     require_counts: bool = False,
     load_semantic_group_features: bool = False,
     semantic_group_feature_dim: int | None = None,
-    load_context_raw: bool = False,
 ) -> dict[str, SplitData]:
     meta = json.loads((cfg.cache_dir / CACHE_META_FILE).read_text())
     cache_format = meta.get("format")
@@ -259,18 +255,5 @@ def load_splits(
                     f"model; expected [games, 10, {expected_dim}]."
                 ) from exc
             arrays["semantic_group_features"] = features
-    if load_context_raw:
-        context_path = cfg.cache_dir / "identity_context_raw.npy"
-        if not context_path.exists():
-            raise ValueError(
-                "Dataset cache is missing identity_context_raw.npy; rebuild the cache."
-            )
-        context_raw = np.load(context_path, mmap_mode="r")[:n]
-        if context_raw.ndim != 3 or context_raw.shape[1] != 10:
-            raise ValueError(
-                "identity_context_raw.npy must have shape [games, 10, context_dim]; "
-                "rebuild the cache."
-            )
-        arrays["context_raw"] = context_raw
     _validate_blue_win(arrays["blue_win"])
     return {name: _slice(arrays, *split_ranges[name]) for name in SPLIT_ORDER}

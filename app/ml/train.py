@@ -773,7 +773,6 @@ def train(
             dataset_cfg,
             require_counts=True,
             load_semantic_group_features=load_semantic_group_features,
-            load_context_raw=False,
         ).items()
     }
     # Compact caches omit per-game sidecar arrays; build the on-device gather

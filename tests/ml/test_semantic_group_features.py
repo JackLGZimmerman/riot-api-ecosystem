@@ -5,8 +5,6 @@ import json
 import numpy as np
 import pytest
 
-from app.ml.context_audit_specs import group_audit_specs, training_group_audit_specs
-from app.ml.context_examples_audit import audit_specs
 from app.ml.semantic_group_features import (
     BURST_DAMAGE_THRESHOLD,
     CONTEXT_AXIS_INDEX,
@@ -19,64 +17,16 @@ from app.ml.semantic_group_features import (
     SEMANTIC_GROUP_FEATURE_DIM,
     SEMANTIC_GROUP_FEATURE_INDEX,
     SEMANTIC_GROUP_FEATURE_NAMES,
-    audit_axis_is_covered,
-    audit_focus_condition_is_covered,
     build_identity_context_raw_from_metrics,
     build_semantic_group_features,
     materialize_semantic_group_feature_cache,
 )
 
 
-def test_semantic_group_schema_covers_context_examples_audit_axes() -> None:
-    specs = audit_specs()
-
+def test_semantic_group_schema_covers_context_axes() -> None:
     assert SEMANTIC_GROUP_FEATURE_DIM == len(SEMANTIC_GROUP_FEATURE_NAMES)
     for axis in CONTEXT_AXIS_INDEX:
         assert axis in SEMANTIC_GROUP_FEATURE_NAMES
-    for spec in specs:
-        assert audit_axis_is_covered(spec.axis), spec.axis
-        assert audit_focus_condition_is_covered(spec.focus_condition), (
-            spec.focus_condition
-        )
-
-
-def test_group_audit_specs_cover_context_examples_audit_lens() -> None:
-    example_specs = audit_specs()
-    group_specs = group_audit_specs()
-
-    assert {spec.axis for spec in example_specs} <= {spec.axis for spec in group_specs}
-    assert {
-        spec.focus_condition for spec in example_specs if spec.focus_condition is not None
-    } <= {
-        spec.focus_condition for spec in group_specs if spec.focus_condition is not None
-    }
-
-
-def test_training_group_audit_specs_keep_full_reporting_surface_separate() -> None:
-    full_titles = [spec.title for spec in group_audit_specs()]
-    train_core_titles = [spec.title for spec in training_group_audit_specs()]
-
-    assert [spec.title for spec in training_group_audit_specs("full")] == full_titles
-    assert len(train_core_titles) < len(full_titles)
-    assert set(train_core_titles) < set(full_titles)
-    assert "Selected enchanters UTILITY with skirmish allies" not in train_core_titles
-    assert "On-hit junglers vs enemy hard CC" not in train_core_titles
-    assert "On-hit marksmen BOTTOM vs heavy damage-taken count" not in train_core_titles
-
-
-def test_training_group_audit_specs_do_not_add_outcome_or_prior_axes() -> None:
-    leaky_terms = ("win", "prior", "synergy", "matchup")
-
-    for spec in training_group_audit_specs():
-        searchable = " ".join(
-            (
-                spec.axis,
-                spec.focus_condition or "",
-                " ".join(spec.builds),
-                " ".join(spec.positions),
-            )
-        ).lower()
-        assert not any(term in searchable for term in leaky_terms), spec.title
 
 
 def test_build_semantic_group_features_matches_promoted_audit_definitions() -> None:
