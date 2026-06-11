@@ -669,3 +669,64 @@ Artifacts (gitignored data dir):
 `late_head_fit.py` + `late_head_fit_report.json` (sweep), patched-checkpoint
 candidate in `late15_l015/model.pt`. The `eval_player.py` no-player ablation
 now also zeroes `player_role_cnt` for dim-11 checkpoints.
+
+### Champion Strength / Meta Drift: Oracle Ceiling Is Empty (2026-06-11)
+
+Direction shift away from player-skill features: treat champion strength as a
+patch/meta freshness problem. Unlike player dictionaries, rolling champion
+aggregates stay draft-safe and fresh into val/test (strictly-before-match
+windows over public champion winrates), so a val gain here would be expected
+to transfer to test. The audit and a future-knowledge oracle bound show the
+axis carries no exploitable signal on top of the current base.
+
+**Existing coverage.** The model's champion-strength inputs are the frozen
+train-window `(championid, teamposition, build)` winrate prior (`synergy_1vx`)
+plus champion identity embeddings and the context atlas — no time or patch
+dimension. `game_data.info` has a `patch` column; train spans patches 1-9
+(Jan 8 - May 5), val is patch-9 tail + patch 10, test is patch-10 tail +
+patch 11. Patches 10/11 are absent from train entirely, so if meta drift
+mattered, this split layout would surface it maximally.
+
+**Drift is small.** Champion(x role) winrate drift beyond sampling noise,
+train-pooled vs eval windows: `~0.7-0.8pp` RMS per cell (champ-role cells
+with support; corr `~0.72`), `~0.5pp` champion-level; biggest champion-level
+movers `+/-1.5-2.8pp`. No new or low-support champions (all 172 have
+`>=1000` train games). Riot balancing keeps the drift an order of magnitude
+below per-player skill spread (5-10pp), and blue-minus-red team-mean
+aggregation shrinks it by another `sqrt(2/5)`.
+
+**Oracle ceiling probe (`champ_oracle_probe.py`).** Deliberately leaky upper
+bound: give the frozen warm4 base a blue-minus-red feature built from the val
+window's own champion(x role[, patch]) winrates (EB-shrunk toward train,
+delta in logit space) and fit the 1-D head on val itself. Any honest rolling
+or patch-bounded feature is strictly dominated by this oracle. On val
+(base `57.936%` / `0.673202`):
+
+| oracle variant | acc lift | NLL lift |
+| --- | --- | --- |
+| champion-level, s50/s200 | `+0.005pp` | `-0.00001` |
+| champ-role, naive s50 | `+0.42pp` | `-0.0021` (leakage, see below) |
+| champ-role LOO, s50/s200 | `+0.003-0.005pp` | `-0.00001` |
+| champ-role-patch LOO (current-meta), s50/s200 | `+0.003-0.005pp` | `-0.00001` |
+
+The naive champ-role s50 number is pure self-inclusion leakage: each match
+sits inside its own cell's winrate, and with weak shrinkage the small
+off-role cells leak the match's own outcome back into the feature (fitted
+`w=4.6` on a `0.029`-std feature). Removing the match from its cell
+(leave-one-match-out) collapses the lift to `+0.003-0.005pp` with `w~0.03`,
+and conditioning cells on the match's own patch (the strongest "current
+meta" variant) changes nothing.
+
+**Verdict.** Axis closed without building the rolling pipeline: even perfect
+future knowledge of champion-role-patch winrates, leakage-free, moves val by
+`<=0.005pp` acc / `~0.00001` NLL. The base model (identity embeddings +
+context atlas + frozen 1vX prior) already absorbs champion strength to the
+point where its residuals do not correlate with true meta drift, and the
+drift itself is too small and too team-averaged to matter. This also
+explains the historical wash of champion-role patch deltas in the old broad
+`T+L` temporal head. No candidate was formed, so no test read was taken or
+needed — the bound is on val and dominates any implementation. The 60% gate
+assessment from Player Priors Round 2 stands unchanged.
+
+Artifacts (gitignored data dir): `rolled_split_production/champ_oracle_probe.py`
++ `champ_oracle_report.json`.
