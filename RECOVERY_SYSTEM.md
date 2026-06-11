@@ -8,13 +8,21 @@ Recovery in this pipeline is now intentionally basic:
 - `match_ids`: single-pass crawl + timestamp anchor, with rollback of run rows if save fails.
 - `match_data`: durable queue using `game_data.matchdata_matchids` (row exists = pending; completed rows are deleted).
 
-Prefect deployment concurrency is set to `1`, so only one full pipeline run should execute at a time.
+Prefect deployment concurrency is set to `1`, so only one pipeline run should execute at a time.
+
+## Flow Modes
+
+- Full mode runs `players` -> `match_ids` -> `match_data`; this is the default for `./restart.sh`.
+- Matchdata-only mode runs only `match_data`; use `./restart.sh --matchdata-only` when the existing latest matchids run has enough regional coverage and the goal is to drain/fill match payloads.
+- `./restart.sh --fresh --matchdata-only` is invalid because `--fresh` removes Docker volumes, including the ClickHouse data matchdata-only mode depends on.
+- Matchdata-only restarts pause and do not resume `AUTOMATION_NAME`; a normal automation follow-up would use default flow parameters and collect matchids again unless separately configured for `matchdata_only=true`.
+- If `AUTOMATION_NAME` is unset, pause any external full-pipeline automation before a matchdata-only restart.
 
 ## Active Recovery Components
 
 | File | Responsibility |
 |---|---|
-| `app/worker/pipelines/prefect_flow.py` | Runs `players` -> `match_ids` -> `match_data` sequentially per flow run. |
+| `app/worker/pipelines/prefect_flow.py` | Runs full or matchdata-only flow steps based on the Prefect `matchdata_only` parameter. |
 | `app/worker/pipelines/players_orchestrator.py` | Deletes partial player rows on save failure, then writes/rotates players snapshot timestamp on success. |
 | `app/worker/pipelines/matchids_orchestrator.py` | Writes `matchids` + successful player keys + timestamp; on failure deletes run rows and failed timestamp. |
 | `app/worker/pipelines/matchdata_orchestrator.py` | Claims queue rows, writes match payloads, removes successful queue rows, keeps failed rows for retry. |

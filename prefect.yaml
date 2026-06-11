@@ -20,7 +20,8 @@ deployments:
       limit: 1
       collision_strategy: CANCEL_NEW
     entrypoint: app/worker/pipelines/prefect_flow.py:riot_pipeline
-    parameters: {}
+    parameters:
+      matchdata_only: false
     enforce_parameter_schema: true
     work_pool:
       name: docker-pool

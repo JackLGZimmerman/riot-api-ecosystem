@@ -45,7 +45,12 @@ class PipelineStep:
     run: Callable[[], Awaitable[None]]
 
 
-def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
+def _build_steps(
+    riot_api: RiotAPI, *, matchdata_only: bool = False
+) -> Sequence[PipelineStep]:
+    if matchdata_only:
+        return (_build_match_data_step(riot_api),)
+
     players = PlayersOrchestrator(
         pipeline="players",
         loader=PlayerLoader(),
@@ -58,6 +63,15 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
         collector=MatchIDCollector(riot_api=riot_api),
         saver=MatchIDSaver(),
     )
+
+    return (
+        PipelineStep("players", players.run),
+        PipelineStep("match_ids", match_ids.run),
+        _build_match_data_step(riot_api),
+    )
+
+
+def _build_match_data_step(riot_api: RiotAPI) -> PipelineStep:
     match_data = MatchDataOrchestrator(
         pipeline="match_data",
         loader=MatchDataLoader(),
@@ -74,12 +88,7 @@ def _build_steps(riot_api: RiotAPI) -> Sequence[PipelineStep]:
             timeline_parser=MatchDataTimelineParsingOrchestrator(),
         ),
     )
-
-    return (
-        PipelineStep("players", players.run),
-        PipelineStep("match_ids", match_ids.run),
-        PipelineStep("match_data", match_data.run),
-    )
+    return PipelineStep("match_data", match_data.run)
 
 
 async def _run_cycle(steps: Sequence[PipelineStep]) -> None:
@@ -92,16 +101,17 @@ async def _run_cycle(steps: Sequence[PipelineStep]) -> None:
 
 
 @flow(name="riot-pipeline")
-async def riot_pipeline() -> None:
+async def riot_pipeline(matchdata_only: bool = False) -> None:
     """
     One Prefect flow run = one full pipeline cycle.
+    matchdata_only skips upstream collection and drains the matchdata queue.
     Repetition is handled by Prefect Automation (run again on completion).
     """
-    logger.info("Pipeline run start")
+    logger.info("Pipeline run start matchdata_only=%s", matchdata_only)
     start = time.monotonic()
 
     async with get_riot_api() as riot_api:
-        steps = _build_steps(riot_api)
+        steps = _build_steps(riot_api, matchdata_only=matchdata_only)
         await _run_cycle(steps)
 
     logger.info("Pipeline run success (%.2fs)", time.monotonic() - start)
