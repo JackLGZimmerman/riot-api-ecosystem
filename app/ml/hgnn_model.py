@@ -8,6 +8,7 @@ residual heads. Runtime serving must provide any configured feature tensors.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, cast
@@ -1718,6 +1719,40 @@ def hgnn_config_payload(config: HGNNConfig) -> dict[str, Any]:
     return asdict(config)
 
 
+class HGNNEnsemble(nn.Module):
+    """Logit-mean ensemble of HGNN seeds with a train-fitted affine calibration.
+
+    ``scale * mean_logit + bias`` is fit post-hoc on train ensemble logits; the
+    bias restores the blue-side prior that team-swap augmentation suppresses
+    during training (every game is seen mirrored, so an in-model side bias
+    would train to zero).
+    """
+
+    def __init__(
+        self,
+        members: Sequence[HGNNWinModel],
+        *,
+        logit_scale: float = 1.0,
+        logit_bias: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if not members:
+            raise ValueError("HGNN ensemble needs at least one member")
+        self.members = nn.ModuleList(members)
+        self.logit_scale = float(logit_scale)
+        self.logit_bias = float(logit_bias)
+
+    @property
+    def config(self) -> HGNNConfig:
+        return cast(HGNNWinModel, self.members[0]).config
+
+    def forward(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        mean_logit = torch.stack(
+            [member(**inputs)["final_logit"] for member in self.members]
+        ).mean(dim=0)
+        return {"final_logit": self.logit_scale * mean_logit + self.logit_bias}
+
+
 def save_hgnn_model(
     path: Path, model: HGNNWinModel, *, confidence_strength: float
 ) -> None:
@@ -1733,24 +1768,40 @@ def save_hgnn_model(
     )
 
 
-def load_hgnn_model(
-    path: Path, *, device: str = "cpu"
-) -> tuple[HGNNWinModel, HGNNConfig, float]:
-    payload = cast(
-        dict[str, Any], torch.load(path, map_location=device, weights_only=True)
+def save_hgnn_ensemble(
+    path: Path,
+    models: Sequence[HGNNWinModel],
+    *,
+    confidence_strength: float,
+    logit_scale: float,
+    logit_bias: float,
+    metrics: dict[str, float] | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_type": "hgnn_ensemble",
+            "model_config": hgnn_config_payload(models[0].config),
+            "confidence_strength": float(confidence_strength),
+            "state_dicts": [model.state_dict() for model in models],
+            "logit_scale": float(logit_scale),
+            "logit_bias": float(logit_bias),
+            "metrics": dict(metrics or {}),
+        },
+        path,
     )
-    if payload.get("model_type") != "hgnn":
-        raise ValueError(f"checkpoint is not an HGNN artifact: {path}")
-    if "state_dict" not in payload:
-        raise ValueError(f"HGNN checkpoint is missing state_dict: {path}")
-    config = _config_from_payload(payload)
+
+
+def _load_member(
+    config: HGNNConfig, state_dict: dict[str, torch.Tensor], device: str
+) -> HGNNWinModel:
     model = HGNNWinModel(config).to(device)
-    state_dict = {
+    filtered = {
         key: value
-        for key, value in cast(dict[str, torch.Tensor], payload["state_dict"]).items()
+        for key, value in state_dict.items()
         if not key.startswith(_LEGACY_STATE_PREFIXES)
     }
-    result = model.load_state_dict(state_dict, strict=False)
+    result = model.load_state_dict(filtered, strict=False)
     if result.missing_keys or result.unexpected_keys:
         details = []
         if result.missing_keys:
@@ -1761,12 +1812,43 @@ def load_hgnn_model(
             f"HGNN checkpoint state_dict is incompatible: {'; '.join(details)}"
         )
     model.eval()
+    return model
+
+
+def load_hgnn_model(
+    path: Path, *, device: str = "cpu"
+) -> tuple[HGNNWinModel | HGNNEnsemble, HGNNConfig, float]:
+    payload = cast(
+        dict[str, Any], torch.load(path, map_location=device, weights_only=True)
+    )
+    model_type = payload.get("model_type")
+    config = _config_from_payload(payload)
     strength = float(payload.get("confidence_strength", 30.0))
+    if model_type == "hgnn_ensemble":
+        members = [
+            _load_member(config, cast(dict[str, torch.Tensor], state), device)
+            for state in payload["state_dicts"]
+        ]
+        ensemble = HGNNEnsemble(
+            members,
+            logit_scale=float(payload.get("logit_scale", 1.0)),
+            logit_bias=float(payload.get("logit_bias", 0.0)),
+        ).to(device)
+        ensemble.eval()
+        return ensemble, config, strength
+    if model_type != "hgnn":
+        raise ValueError(f"checkpoint is not an HGNN artifact: {path}")
+    if "state_dict" not in payload:
+        raise ValueError(f"HGNN checkpoint is missing state_dict: {path}")
+    model = _load_member(
+        config, cast(dict[str, torch.Tensor], payload["state_dict"]), device
+    )
     return model, config, strength
 
 
 __all__ = [
     "HGNNConfig",
+    "HGNNEnsemble",
     "HGNNWinModel",
     "IdentityEncoder",
     "LearnedSemanticMoEHead",
@@ -1780,6 +1862,7 @@ __all__ = [
     "posterior_mean_var",
     "resolve_device",
     "runtime_unsupported_inputs",
+    "save_hgnn_ensemble",
     "save_hgnn_model",
     "support_features",
     "swap_hgnn_inputs",
