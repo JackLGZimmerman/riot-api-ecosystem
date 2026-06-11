@@ -213,6 +213,7 @@ class ObjectivesParser:
                 continue
 
             for objectiveType in (
+                "atakhan",
                 "baron",
                 "champion",
                 "dragon",
@@ -398,22 +399,6 @@ class TabulatedParticipantStats(MatchIdRow):
 
 class ParticipantStatsParser:
     _UINT8_CLAMP_FIELDS = {
-        "visionScore",
-        "wardsPlaced",
-        "wardsKilled",
-        "allInPings",
-        "assistMePings",
-        "basicPings",
-        "commandPings",
-        "dangerPings",
-        "enemyMissingPings",
-        "enemyVisionPings",
-        "getBackPings",
-        "holdPings",
-        "needVisionPings",
-        "onMyWayPings",
-        "pushPings",
-        "retreatPings",
         "unrealKills",
     }
 
