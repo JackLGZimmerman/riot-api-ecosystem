@@ -2,77 +2,43 @@
 
 Last updated: 2026-06-11.
 
-Split-protocol change, 2026-06-11: `ml_game_split` labels are now per-patch
-chronological 80/20 train/test — games are partitioned by `(season, patch)`,
-ordered by game start, and each patch's first 80% goes to train with the
-remainder to test. There is no validation split anymore; the test split is the
-model-selection split for checkpoint selection and accuracy/NLL reporting, not
-a final untouched holdout. The cache format bumped to `npy-memmap-v32`; older
-validation-bearing caches (including the v30 counts referenced below) must be
-rebuilt. This
-implements the rolled-boundary lever by making same-patch history available to
-train-side priors and features before each patch's scored tail.
+The model is draft-generic by hard constraint: no player information of any
+kind (no puuids, no player priors, no rank). The admissible surface is
+champions, positions, runes, summoners, bans, patch, and
+(champion, role, build)-keyed historical profiles via the encoder sidecars.
 
-Per-patch protocol validated, 2026-06-11: the ClickHouse split, pivot, and
+## Split Protocol (v32)
+
+`ml_game_split` labels are per-patch chronological 80/20 train/test — games
+are partitioned by `(season, patch)`, ordered by game start, and each patch's
+first 80% goes to train with the remainder to test. There is no validation
+split; test is the model-selection split for checkpoint selection and
+accuracy/NLL reporting, not a final untouched holdout. The cache format is
+`npy-memmap-v32`; older validation-bearing caches must be rebuilt. This makes
+same-patch history available to train-side priors and features before each
+patch's scored tail.
+
+Protocol validation (2026-06-11): the ClickHouse split, pivot, and
 split-scoped aggregates were rebuilt (`1,318,329` train / `329,586` test, 11
 patches all at 80/20) along with the v32 cache, and three default-recipe seeds
-were trained. Test accuracy is `0.5784`–`0.5792` (mean `0.5788`, stdev
-`0.0004`) with test NLL `0.6719`–`0.6727` — recovering the old protocol's
-validation level (`0.5789` acc, `0.6730` NLL) and beating its frozen-tail test
-(`0.5738` acc, `0.6760` NLL) by `+0.50pp` accuracy and `-0.0037` NLL. The old
-val-over-test gap was therefore freshness, and the per-patch split removes it:
-per-patch test accuracy spans only `0.5742`–`0.5819` (stdev `0.0025`, at the
-binomial sampling floor for `~25k`–`39k` games per patch), and accuracy across
-chronological quartiles of each patch's 20% test tail is flat (`0.5775`,
-`0.5819`, `0.5782`, `0.5791`), so no measurable within-patch freshness decay
-remains. Remaining headroom is model/feature, not split mechanics;
-cross-patch train weighting is still an open, untested lever. Candidate
-artifacts and the per-patch runner live at
-`app/ml/data/experiments/split_v32/` (untracked). Follow-up draft-only
-residual probes (see EXPERIMENTS.md, 2026-06-11) found two bankable levers —
-a 3-seed ensemble (`+0.26pp` acc, `-0.0011` NLL over a refit single seed) and
-a side-prior intercept the swap-augmented model cannot express (`+0.11pp`
-global, `+0.31pp` central band) — and otherwise no linear or
-shallow-nonlinear residual in bans, loadout, encoder latents, or role-aligned
-lane diffs; the stable hard core is well-covered balanced drafts, not a data
-blind spot. The model is draft-generic by constraint: no player information
-of any kind.
+were trained. Single-seed test accuracy is `0.5784`–`0.5792` (mean `0.5788`,
+stdev `0.0004`) with test NLL `0.6719`–`0.6727` — recovering the old
+protocol's validation level and beating its frozen-tail test by `+0.50pp`
+accuracy and `-0.0037` NLL. The old val-over-test gap was freshness, and the
+per-patch split removes it: per-patch test accuracy spans only
+`0.5742`–`0.5819` (at the binomial sampling floor per patch), and accuracy
+across chronological quartiles of each patch's test tail is flat, so no
+measurable within-patch freshness decay remains. Remaining headroom is
+model/feature, not split mechanics; cross-patch train weighting is still an
+open, untested lever.
 
-Experiment guidance and the latest semantic-boundary findings are in
-[EXPERIMENTS.md](EXPERIMENTS.md). In short: semantic group examples remain
-critical evaluation fixtures, but the current grouped residual targets did not
-extract stable enough row-level boundary direction to move held-out NLL. The
-2026-06-10 time-local teacher ceiling localized the remaining headroom to data
-freshness: the pre-registered train+val refresh teacher cleared the test NLL
-gate on all three seeds (central mean `+0.0022`, `+1.3pp` central accuracy;
-the uniform variant averaged `+0.0026` with high seed variance) while every
-train-boundary-respecting construction stayed at or below the `~0.0015`
-plateau, so the next production lever is rolling the chronological split
-boundary forward (see EXPERIMENTS.md "Next Data Direction"), not model
-wiring.
-
-Data refresh note, 2026-06-10: the ClickHouse ML path, compact encoder sidecar,
-and v30 cache were rebuilt after newer season 16 data became available,
-covering `1,647,915` games through the ML-valid S16.11 window (then split
-80/10/10 as `1,318,331` train / `164,792` validation / `164,792` test; the
-same game pool now carries the per-patch v32 labels above). The promoted
-checkpoint and metrics below remain the previous production record until the
-rolled-split production recipe is retrained and evaluated.
-
-Rolled-split evaluation outcome, 2026-06-10: two candidate rounds were
-evaluated on the refreshed cache under validation-first selection (test never
-inspected). The from-scratch lr `3e-4` recipe was rejected on audit and
-accuracy guardrails. The warm-started lr `1e-4` fine-tune of the incumbent
-checkpoint beats the incumbent on every global validation metric
-(`57.94%` / `0.673202` / AUC `0.60786` on seed 4) with in-range audits, but
-the pre-registered `+0.003` central NLL validation gate failed
-(`0.0015`; the gate is structurally unreachable under the rolled protocol —
-the teacher ceiling itself bounds boundary-respecting candidates near
-`~0.0023`). No promotion this round; the production checkpoint below is
-unchanged, and the strongest rolled-validation checkpoint is retained at
-`app/ml/data/experiments/rolled_split_production/warm4/model.pt` pending a
-user decision on a separate data-refresh promotion gate. See
-[EXPERIMENTS.md](EXPERIMENTS.md#rolled-split-test-plan) rounds 1-2.
+Follow-up draft-only residual probes (see EXPERIMENTS.md, 2026-06-11) found
+two bankable levers — a 3-seed ensemble (`+0.26pp` acc, `-0.0011` NLL over a
+refit single seed) and a train-fitted side intercept the swap-augmented model
+cannot express — and otherwise no linear or shallow-nonlinear residual in
+bans, loadout, encoder latents, or role-aligned lane diffs; the stable hard
+core is well-covered balanced drafts, not a data blind spot. Both levers are
+now promoted (see Production Status).
 
 ## Production Path
 
@@ -90,9 +56,9 @@ capacity is 128 experts with `top_k=32`. See
 
 Serving through `app.ml.predictor.load_predictor()` is intentionally narrower
 than the batch validation surface: the current `app.rl.reward.Predictor`
-protocol supplies champions, roles, and build ids, but not Loadout, patch, or
-player feature tensors. Checkpoints that require those residual heads now fail
-fast at load time instead of silently dropping trained production inputs.
+protocol supplies champions, roles, and build ids, but not Loadout or patch
+feature tensors. Checkpoints that require those residual heads fail fast at
+load time instead of silently dropping trained production inputs.
 
 ```text
 cache 1vX priors + support
@@ -101,92 +67,61 @@ cache 1vX priors + support
 -> production Loadout head + patch-only Temporal head
 -> frozen static/full-game/temporal sidecars into learned semantic MoE
 -> blue/red team readout
--> final logit
+-> per-seed final logit, mean over 3 seeds
+-> affine calibration (scale, bias)
 -> sigmoid = P(blue wins)
 ```
 
-Direct 1v1/2vX champion matchup and synergy relationship integrations have been
-removed from the model contract, cache layout, priors, and predictor; they are
-no longer part of `build_hgnn_inputs()` or `HGNNWinModel.forward()`. Older local
-cache directories may still contain ignored relationship `.npy` files, but v32
-production loading does not declare or consume them. Loadout and patch-only
-Temporal are no longer tracked as ablation families in this document; they are
+Direct 1v1/2vX champion matchup and synergy relationship integrations, and the
+experimental player-prior arrays, have been removed from the model contract,
+cache layout, priors, and predictor. Older local cache directories may still
+contain ignored relationship or player `.npy` files, but v32 production
+loading does not declare or consume them. Loadout and patch-only Temporal are
 part of the default production model when the v32 cache provides
 `loadout_features.npy` and `patch_features.npy`.
 
 ## Production Status
 
 Hard acceptance remains overall raw test accuracy `>=60%` on the per-patch
-test split. The current promoted production model
-does not meet that gate yet, but it is the strongest no-relationship checkpoint
-installed locally and the first production artifact to consume all three frozen
-identity encoders through the semantic MoE.
+test split. The current promoted production artifact does not meet that gate
+yet, but it banks every validated draft-only lever.
+
+Promoted artifact: `app/ml/data/hgnn_production_model.pt` — a calibrated
+3-seed ensemble written by `app/ml/promote.py`. Each member is a
+default-recipe v32 checkpoint (seeds 4/5/6: lr `3e-4`, batch `16384`,
+`max_epochs=40`, `patience=5`, raw test-accuracy checkpointing). Promotion
+averages the per-seed logits and fits an affine logit calibration on the train
+split; the bias restores the blue-side prior that team-swap augmentation
+suppresses (model mean `p≈0.493` vs true blue winrate `0.482`).
+
+| Promoted ensemble | Test accuracy | Test NLL | logit scale | logit bias |
+| --- | ---: | ---: | ---: | ---: |
+| 3-seed logit-mean + affine calibration | **58.2601%** | **0.671053** | `1.1686` | `-0.0432` |
+| Single-seed reference (mean of seeds 4/5/6) | `57.88%` | `0.6723` | — | — |
 
 Gate reachability (2026-06-10, reaffirmed 2026-06-11): every draft-safe input
-axis has now been audited — context head saturated at the draft-time ceiling,
+axis has been audited — context head saturated at the draft-time ceiling,
 relationship features dead, recency/level dead, role experience marginal,
-player-skill priors blocked by aggregate staleness (val gains flip negative on
-test; see Player Priors Round 2 in `EXPERIMENTS.md`), champion-strength /
-meta-drift features bounded out by a leakage-free future-knowledge oracle
-(`<=0.005pp` val ceiling; see Champion Strength / Meta Drift in
-`EXPERIMENTS.md`), and `(champion, position)` semantic identity profiles shown
-fully redundant with champion identity by shuffled-profile and one-hot
-controls (see Semantic Identity Profiles in `EXPERIMENTS.md`). The gate is not
-reachable under the frozen split boundary +
-frozen aggregates protocol. The two levers that move it — rolling the split
-windows with refreshed data, and continuously refreshed player aggregate
-dictionaries — are pipeline decisions, both user-gated.
-
-Promoted checkpoint and metrics:
-`app/ml/data/hgnn_production_model.pt` and
-`app/ml/data/metrics_latest.json`.
-
-Production artifact note: the installed checkpoint was promoted from the only
-available local 128x32 semantic MoE artifact. Its saved config has the temporary
-sparse-dispatch experiment key removed, and the maintained production runtime no
-longer exposes a dense/sparse dispatch flag.
-
-Setup: v30 production cache, compact identity encoder sidecar artifact,
-production loadout head, bounded patch-only temporal head, learned semantic MoE
-with `semantic_moe_num_experts=128`, `semantic_moe_top_k=32`, compact semantic
-group features, raw `val_accuracy` checkpointing, `batch_size=16384`,
-`max_epochs=40`, `patience=5`, learning rate `1e-4`, seed `4`, and frozen loaded
-parameters from the previous production warm start.
-
-| Production model | Raw validation accuracy | Raw test accuracy | Validation NLL | Test NLL |
-| --- | ---: | ---: | ---: | ---: |
-| 1vX + champion/build + Loadout + patch Temporal + all-encoder semantic MoE (128x32) | **57.8854%** | **57.3796%** | **0.672978** | **0.675965** |
-| Previous semantic production: same path with 8x2 MoE | `57.8896%` | `57.2993%` | `0.673184` | `0.676212` |
-| Previous production baseline: 1vX + champion/build + Loadout + patch-only Temporal | `57.6828%` | `57.0163%` | `n/a` | `n/a` |
+player-skill priors blocked by aggregate staleness and now excluded outright
+by the draft-generic constraint, champion-strength / meta-drift features
+bounded out by a leakage-free future-knowledge oracle (`<=0.005pp` ceiling),
+and `(champion, position)` semantic identity profiles shown fully redundant
+with champion identity by shuffled-profile and one-hot controls (see
+`EXPERIMENTS.md` for each record). Remaining headroom most plausibly requires
+new draft-generic information rather than residual heads on current features.
 
 Loadout uses train-only, leave-one-out-adjusted historical priors over
 summoner spell pairs, broad rune setup, full rune page, secondary rune pair, and
 stat shards. Rune rows are joined through `puuid` only to align the selected
-rune page; no player identity is emitted into `loadout_features.npy`. The v31
-cache separately records optional player-prior arrays (overall, per-champion,
-and per-role experience), but `use_player_priors` stays disabled for
-production serving: player-prior heads gain up to `+1.3pp` on validation and
-lose on test (`-0.13` to `-0.16pp` vs their no-player ablation) because the
-cached aggregates are frozen at the train boundary and their predictive value
-decays past sign-flip within the val-to-test horizon (see Player Priors
-Round 2 in `EXPERIMENTS.md`). Re-opening this lever requires continuously
-refreshed player dictionaries at serve and eval time — a pipeline decision,
-not a training change. Patch Temporal is restricted to season/patch blue-side
-drift only and does not include champion-role patch deltas.
-
-Historical comparison: the best prior full-split no-relationship residual check
-was `L+S` at `57.6814%` validation / `57.0058%` test. The promoted production
-checkpoint narrowly exceeds that reference without adding relationship or
-matchup priors. The older broad `T+L` diagnostic washed out loadout because it
-combined champion-role patch deltas with the patch blue-side intercept in one
-shared residual head; production keeps only the bounded patch blue-side drift in
-a separate head.
+rune page; no player identity is emitted into `loadout_features.npy`. Patch
+Temporal is restricted to season/patch blue-side drift only and does not
+include champion-role patch deltas; the older broad `T+L` diagnostic washed
+out loadout because it combined champion-role patch deltas with the patch
+blue-side intercept in one shared residual head.
 
 Under the current leakage policy, observed final build-value/profile residuals
-remain diagnostic only unless a draft-safe source or RL search supplies the build
-intent. The old build-intent probe artifacts were removed from the maintained
-production workspace because they read completed-game build-profile
-labels/margins and are not accepted pregame validation results.
+remain diagnostic only unless a draft-safe source or RL search supplies the
+build intent (see `HGNN_BUILD_INTENT.md`).
 
 ## Architecture
 
@@ -215,7 +150,8 @@ flowchart TD
     context_logit --> final
     loadout_logit --> final
     patch_logit --> final
-    final --> prob["sigmoid = P(blue wins)"]
+    final --> ensemble["mean over 3 seed members<br/>scale * logit + bias"]
+    ensemble --> prob["sigmoid = P(blue wins)"]
     prob --> metrics["accuracy / NLL metrics"]
 ```
 
@@ -241,17 +177,9 @@ per-game sidecar arrays continue to load and are used directly.
 | Full-game | [classification/full_game_encoder.py](../../classification/full_game_encoder.py) | Learned semantic MoE |
 | Temporal | [classification/temporal_autoencoder.py](../../classification/temporal_autoencoder.py) | Learned semantic MoE |
 
-The old node-init sidecar MLP flags and separate identity semantic context head
-were removed from the maintained HGNN surface. Checkpoint loading filters those
-legacy state keys so current artifacts can migrate onto the leaner model.
-
-Production testing now treats semantic gap checks as diagnostics rather than
-training objectives. The retired ranking and calibration-loss runners are not
-part of the maintained `train.py` surface.
-
 `HGNNConfig.use_learned_semantic_moe=True` enables the learned mixture-of-experts
 context path over the same required sidecar inputs plus the champion, role,
-build, and fused identity embeddings. This is now the only maintained semantic
+build, and fused identity embeddings. This is the only maintained semantic
 sidecar architecture. It builds support/log-support sidecar tokens, derives own /
 ally / enemy / extremity factors, routes each slot through top-k experts
 (production default 32 of 128), support-gates
@@ -266,56 +194,31 @@ including mean, sum, max, ally-vs-enemy differences, and own-by-team interaction
 blocks. A zero-initialised MLP turns those relationship blocks into support-gated
 slot deltas, so the production prior is unchanged at init while identities can
 slowly learn how their own semantic groups react to every allied and enemy group
-composition. Diagnostics expose the relationship logit, slot-delta norm,
-coefficient norm, context norm, and optional L2 penalty.
+composition.
 
 Serving rebuilds the same compact group tensor from smoothed train identity
 metrics plus static champion HP/range lookups, so melee/ranged and natural
-tankiness remain available without reading the large per-game
-`identity_context_raw.npy` cache.
+tankiness remain available without a large per-game cache array.
 
-Since the context audit is slot-specific, checkpoints with MoE slot deltas are
-now audited with focus-side probabilities rather than one repeated match-level
-probability. Blue slots are scored in the blue frame; red slots are scored in the
-mirrored red frame. These audits are validation diagnostics for the promoted
-production checkpoint at `app/ml/data/hgnn_production_model.pt`, copied from the
-seed-4 128x32 learned semantic MoE run. On the checked-in focus-slot context
-audit it reports validation Gap MSE `5.39 pp^2`, mean absolute gap `1.69 pp`,
-and max absolute gap `10.12 pp`; the lower-variance group EB audit is the
-semantic promotion selector.
+### Retired Surfaces
 
-### Semantic MoE Contract
-
-The production semantic MoE path is no longer configurable by architecture name.
-Rejected architecture ablations are not part of the maintained production
-surface. A production-aligned seed-trio rerun on 2026-06-06 found no replacement
-that improved both held-out accuracy and context calibration strongly enough to
-promote, so the service path remains the compact sidecar plus learned MoE recipe
-documented above.
+The old node-init sidecar MLP flags, the separate identity semantic context
+head, the dense/sparse MoE dispatch flag, the warm-start/freeze fine-tune
+machinery, the player-prior cache arrays and model paths, and the
+context-examples / group-EB audit tooling were all removed from the maintained
+workspace after their conclusions were recorded (the closed-lever findings
+live in `EXPERIMENTS.md`; the MoE capacity decision is below). Checkpoint
+loading filters removed legacy config/state keys so current artifacts load on
+the leaner model.
 
 ### Retired Expert-Grid Ablation Outcomes
 
-Temporary MoE expert-count / `top_k` runners, report helpers, generated
-checkpoints, and parser tests were removed from the maintained workspace on
-2026-06-07 after their outcomes were captured here. These runs were research
-ablations only; after review, the production recipe was fixed at 128 experts and
-`top_k=32`.
-
-The seed-4 sweeps varied only `semantic_moe_num_experts` and
-`semantic_moe_top_k`, using the compact identity sidecar, frozen production warm
-start, semantic group features, focus-side context examples audit, and group EB
-audit. The ablation runner used the config from `metrics_latest.json`
-(`learning_rate=1e-4`, `batch_size=32768`, `max_epochs=40`, `patience=5`,
-validation-accuracy checkpoint selection), which differs from the production
-defaults documented above (`3e-4`, `16384`).
-
-Primary context ranking was the mean of validation/test flagged
-support-weighted mean absolute gap from `HGNN_CONTEXT_EXAMPLES_AUDIT.md`; lower
-is better.
-
-After review, `128x32` was selected as the production capacity. The table below
-is retained as the decision record; the generated ablation runners, reports, and
-run directories were removed from the maintained workspace.
+Temporary MoE expert-count / `top_k` runners were removed on 2026-06-07 after
+their outcomes were captured here; the production recipe was fixed at 128
+experts and `top_k=32`. The seed-4 sweeps varied only
+`semantic_moe_num_experts` and `semantic_moe_top_k` on the old 80/10/10
+protocol; primary context ranking was the flagged support-weighted mean
+absolute gap from the (since retired) context-examples audit; lower is better.
 
 | Variant | Experts | `top_k` | Active fraction | Flagged MAE | Flagged MSE | Validation accuracy | Test accuracy | Validation NLL | Test NLL |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -331,33 +234,10 @@ run directories were removed from the maintained workspace.
 | `8x2` control | 8 | 2 | 0.250 | 1.9989 pp | 6.2255 pp^2 | 57.8575% | 57.3489% | 0.6730 | 0.6760 |
 
 Against the `8x2` in-sweep control, `128x32` reduced flagged context MAE by
-0.2961 pp (14.8%) and flagged context MSE by 1.4054 pp^2 (22.6%). Accuracy was
-effectively flat (`-0.000028` validation, `-0.000056` test), while NLL improved
-slightly on both validation and test. Against the cheaper `16x8` candidate,
-`128x32` still reduced flagged context MAE by 0.0863 pp (4.8%) and flagged MSE
-by 0.2115 pp^2 (4.2%), but test accuracy was lower by 0.000279.
-
-The larger-capacity signal was promising but not monotonic: `64x*`
-underperformed the best `32x*` and `128x32`, while `128x16` underperformed
-`128x32`. The interrupted `128x64` run was stopped before metrics/audits
-completed and is not a result.
-
-### Pruned Sparse Follow-Up
-
-A temporary sparse-capacity follow-up completed the available 128x32 checkpoint
-now installed as production and started `256x64`, which was interrupted after
-epoch 5 because it was slower than 128x32 and did not beat the sparse-compatible
-128x32 control on validation accuracy. The completed 128x32 follow-up reported
-validation/test accuracy `57.8854%` / `57.3796%`, validation/test NLL
-`0.672978` / `0.675965`, validation/test context mean absolute gap `1.78 pp` /
-`1.72 pp`, and validation/test context Gap MSE `5.97 pp^2` / `5.40 pp^2`.
-The six flagged audit examples averaged flagged support-weighted MAE
-`2.1713 pp` and flagged support-weighted MSE `6.3010 pp^2` across
-validation/test.
-
-That sparse-dispatch implementation, its CLI flag, runner/report helpers,
-tests, and generated experiment outputs have been removed. Production retains
-the standard dense MoE execution path with 128 experts and `top_k=32`.
+14.8% and flagged context MSE by 22.6% with effectively flat accuracy and
+slightly better NLL. The larger-capacity signal was promising but not
+monotonic (`64x*` and `128x16` underperformed); a `256x64` follow-up was
+slower without beating `128x32` and was abandoned.
 
 ### Semantic MoE Plan
 
@@ -380,20 +260,19 @@ flowchart TD
 
     production["production logit<br/>base + loadout + patch"] --> final["final_logit = production_logit + context_logit"]
     context --> final
-
-    final --> audit["HGNN_CONTEXT_EXAMPLES_AUDIT<br/>empirical WR vs predicted WR by threshold"]
 ```
 
 ## Maintained Surfaces
 
 | File | Purpose |
 | --- | --- |
-| [../hgnn_model.py](../hgnn_model.py) | HGNN model, input builder, swap invariants, and maintained residual/semantic MoE heads. |
+| [../hgnn_model.py](../hgnn_model.py) | HGNN model, ensemble wrapper, input builder, swap invariants, and maintained residual/semantic MoE heads. |
 | [../encoder_sidecar.py](../encoder_sidecar.py) | Identity-encoder latent loading, per-game lookup, and dedup gather tables. |
 | [../loadout_patch_features.py](../loadout_patch_features.py) | Production train-only loadout priors and patch-only temporal feature extraction. |
 | [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and sidecar metadata. |
 | [../dataset.py](../dataset.py) | Cache loader and split dataclass. |
 | [../train.py](../train.py) | Production training, test-split selection, and accuracy/NLL metrics. |
+| [../promote.py](../promote.py) | Seed-checkpoint scoring, affine calibration fit, and production ensemble artifact writer. |
 | [../predictor.py](../predictor.py) | Draft-time runtime bridge. |
 
 ## Throughput Default
@@ -402,16 +281,13 @@ Use `--batch-size 16384` for the current 128x32 HGNN recipe unless the
 experiment is explicitly a throughput/allocator sweep. Batch
 size is architecture-dependent: if parameter count or activation footprint
 increases, retune downward by measured samples/s; if it decreases, retune upward
-only after a fresh sweep. The 2026-06-10 local RTX 5070 Ti sweep on the refreshed
-S16.1-S16.11 cache found batch `16384` as the fastest stable point at `51,505`
-team-swap-augmented samples/s (`25,752` raw rows/s). Larger tested batches hit
-the allocator/throughput cliff:
+only after a fresh sweep. The 2026-06-10 local RTX 5070 Ti sweep found batch
+`16384` as the fastest stable point at `51,505` team-swap-augmented samples/s
+(`25,752` raw rows/s). Larger tested batches hit the allocator/throughput cliff:
 
 Local experiment hardware is an NVIDIA GeForce RTX 5070 Ti with `16,303 MiB`
 VRAM. Production-scale runs should use `--raw-tensor-cache-device cpu` so the
 GPU holds the model and active minibatch rather than the full raw split cache.
-A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
-`67k-71k` team-swap-augmented samples/s before the run was stopped by request.
 
 | Batch size | Augmented samples/s | Raw rows/s |
 | ---: | ---: | ---: |
@@ -430,12 +306,11 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 | Learning rate / patience / weight decay | `3e-4` / `5` / `0.0` |
 | Raw tensor cache device | `cpu`; model-device caching is an explicit throughput sweep option. |
 | Test evaluation | Always on: test is tensor-cached, evaluated every epoch, and written to metrics with accuracy/NLL and `selection_split: "test"`. |
-| Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required, and the artifact must be loadable by the current predictor. |
-| Direct 1v1/2vX integrations | Removed from the model, cache, priors, and predictor. |
+| Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required for `train.py`. |
+| Production promotion | `python -m app.ml.promote --checkpoints <3 seed checkpoints>`; logit-mean + train-fitted affine calibration. |
+| Direct 1v1/2vX integrations, player priors | Removed from the model, cache, priors, and predictor. |
 | Loadout head | Offline-training head with v32 cache metadata and `loadout_features.npy`; the default production serving path rejects checkpoints that require it. |
 | Patch-only Temporal head | Offline-training head with v32 cache metadata and `patch_features.npy`; season/patch blue-side drift only; the default production serving path rejects checkpoints that require it. |
-| Player-prior arrays | Experimental opt-in cache-build surface; disabled in promoted serving and rejected by current RL serving when enabled. |
-| Identity-encoder node-init sidecar MLPs (static/full-game/temporal) | Removed from the maintained model surface. |
 | Learned semantic MoE head over all three identity sidecars | Enabled by default. |
 | Semantic group features and relationship head | Enabled by default for the learned semantic MoE. |
 

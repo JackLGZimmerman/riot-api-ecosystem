@@ -19,8 +19,8 @@ from app.classification.embeddings.static_champion import load_static_by_id
 
 SEMANTIC_GROUP_FEATURE_SCHEMA_VERSION = 2
 
-# `identity_context_raw.npy` axis indices from the audit cache. These indices are
-# fixed by the side-row context cache that produced HGNN_CONTEXT_EXAMPLES_AUDIT.md.
+# `identity_context_raw.npy` axis indices, fixed by the retired side-row
+# context cache layout (audit tooling removed 2026-06-11).
 CONTEXT_AXIS_INDEX: dict[str, int] = {
     "physical": 0,
     "magic": 1,

@@ -1,11 +1,13 @@
 # ML Win-Rate Model
 
-As of 2026-06-10, the production model uses champion/build identity embeddings on top of
+As of 2026-06-11, the production artifact is a calibrated 3-seed ensemble of
+HGNN checkpoints. Each member uses champion/build identity embeddings on top of
 the smoothed 1vX champion-role/build prior, the production Loadout head, the bounded
 patch-only Temporal head, and the promoted all-encoder learned semantic MoE over
 frozen static, full-game, and temporal identity latents. The old
-classification-derived semantic, profile, context, and direct relationship
-inputs have been removed from the HGNN contract.
+classification-derived semantic, profile, context, direct relationship, and
+player-prior inputs have been removed from the HGNN contract. The model is
+draft-generic by hard constraint: no player information of any kind.
 
 The current identity-signal surface is the frozen identity-encoder sidecar
 artifact at `app/ml/data/semantic_identity_sidecar_compact.npz`. Production
@@ -27,7 +29,8 @@ cache/prior arrays
 -> Loadout + patch-only Temporal residual heads
 -> static/full-game/temporal sidecars into learned semantic MoE
 -> blue/red mean + attention team readout
--> final logit
+-> per-seed final logit, mean over 3 seeds
+-> affine calibration (scale, bias)
 -> sigmoid = P(blue wins)
 ```
 
@@ -41,8 +44,18 @@ uv run python -m app.ml.train \
 
 Training tensor-caches the train and test splits, evaluates test every epoch,
 selects the best checkpoint by raw test accuracy, and writes lean accuracy/NLL
-metrics. Test is the model-selection split, not a final untouched holdout. Add
-`--allow-production-artifact-overwrite` only for an explicit promotion run.
+metrics. Test is the model-selection split, not a final untouched holdout.
+
+Promote seed checkpoints to the production ensemble with:
+
+```bash
+uv run python -m app.ml.promote --checkpoints seed4.pt seed5.pt seed6.pt
+```
+
+Promotion averages the per-seed logits, fits an affine logit calibration
+(scale, bias) on the train split — the bias restores the blue-side prior that
+team-swap augmentation suppresses — and writes the ensemble artifact with its
+embedded test metrics.
 
 Training writes:
 
@@ -51,12 +64,12 @@ Training writes:
 | Candidate `model.pt` | HGNN config, confidence strength, and state dict |
 | Candidate `metrics.json` | Train/test metrics and epoch history with `selection_split: "test"` |
 
-The promoted load paths remain `app/ml/data/hgnn_production_model.pt` and
-`app/ml/data/metrics_latest.json`. Runtime prediction uses `load_predictor()`
-from `app/ml/predictor.py`; it now fails fast for checkpoints that require
-Loadout, patch, or player-prior tensors because the current
-`app.rl.reward.Predictor` protocol only supplies champions, roles, and build
-ids.
+The promoted load path is `app/ml/data/hgnn_production_model.pt` (the ensemble
+artifact embeds its calibration and test metrics); `metrics_latest.json` is the
+default train metrics output path. Runtime prediction uses `load_predictor()`
+from `app/ml/predictor.py`; it fails fast for checkpoints that require
+Loadout or patch tensors because the current `app.rl.reward.Predictor`
+protocol only supplies champions, roles, and build ids.
 
 ## Cache Contract
 
@@ -77,12 +90,7 @@ caches with a validation split must be rebuilt:
 | `build_id.npy` | `[games, 10]` | build embedding index |
 | `loadout_features.npy` | `[games, 10]` | production Loadout residual features |
 | `patch_features.npy` | `[games, 2]` | bounded patch-only Temporal residual features |
-| `player_rate.npy`, `player_cnt.npy` | `[games, 10]` | optional per-player overall priors; disabled in the production model until serving supplies player features |
-| `player_champ_rate.npy`, `player_champ_cnt.npy` | `[games, 10]` | optional per-player/champion priors; disabled in the production model until serving supplies player features |
 | `blue_win.npy` | `[games]` | target label |
-
-The default model path now points at the promoted learned semantic MoE
-checkpoint copied into `app/ml/data/hgnn_production_model.pt`.
 
 ## Identity Semantic Context
 

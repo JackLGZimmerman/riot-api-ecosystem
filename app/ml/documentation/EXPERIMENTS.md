@@ -104,11 +104,9 @@ columns.
 
 The val-crossfit numbers are diagnostic ceilings (out-of-fold, no test
 contact), never promotion evidence: promotion still requires a train-side
-construction evaluated on untouched splits. Artifacts:
-`app/ml/data/experiments/semantic_boundary_inband_ceiling/inband_ceiling.{json,md}`
-plus cached frozen-base predictions. The one-off runner and its tests were
-removed after this conclusion was recorded, per the experiment rules; the
-construction above is sufficient to rebuild it.
+construction evaluated on untouched splits. The runner, its tests, and the
+report artifacts were removed after this conclusion was recorded, per the
+experiment rules; the construction above is sufficient to rebuild it.
 
 ## Time-Local Teacher Ceiling (2026-06-10)
 
@@ -127,8 +125,7 @@ Per-row time metadata: the cache stream is deterministic (keyset-paginated
 `ORDER BY matchid` per split), so `(season, patch, gamestarttimestamp)` was
 re-derived from ClickHouse (`ml_game_player_pivot` joined to `game_data.info`)
 in cache row order and verified by exact `blue_win` equality on all 1,431,313
-rows. Artifact:
-`app/ml/data/experiments/semantic_boundary_timelocal_ceiling/row_time_meta.npz`.
+rows.
 
 The era layout this exposed: the v30 splits are purely chronological and cut
 *inside* patches. Train spans 1601-1608 (ends 2026-04-22), validation is the
@@ -186,9 +183,7 @@ Findings:
   harness). All priors (1vX, loadout, patch) are also hard-scoped to
   `split = 'train'`, so served features carry the same staleness.
 
-Artifacts:
-`app/ml/data/experiments/semantic_boundary_timelocal_ceiling/timelocal_ceiling.{json,md}`
-plus `row_time_meta.npz`. The one-off runner was removed after this conclusion
+The one-off runner and report artifacts were removed after this conclusion
 was recorded; the construction above plus the in-band section is sufficient to
 rebuild it.
 
@@ -289,9 +284,21 @@ headroom most plausibly requires new draft-generic information rather than
 residual heads on current features.
 
 Artifacts: `app/ml/data/experiments/split_v32/` (untracked) — seed
-checkpoints, `preds.npz`, `probe_features.npz`, `run_probes.py`,
-`probe_deep.py`, `probe_strong.py`, `core_character.py`, `extract_bans.sh`
-(regenerates the `/tmp` ban TSVs).
+checkpoints, `preds.npz`, and `verify_equivalence.py` (the no-regression gate
+for the promoted ensemble). The probe runners were removed after these
+conclusions were recorded.
+
+## Production Promotion: 3-Seed Ensemble + Side Calibration (2026-06-11)
+
+Both bankable levers from the probe round were promoted via
+`app/ml/promote.py`: the production artifact
+`app/ml/data/hgnn_production_model.pt` is now the 3-seed (4/5/6) logit-mean
+ensemble with a train-fitted affine logit calibration — scale `1.1686`, bias
+`-0.0432`, where the bias is the blue-side intercept that team-swap
+augmentation suppresses. Test accuracy `0.58260` and test NLL `0.67105`,
+vs `0.5788` / `0.6723` for the single-seed mean.
+`split_v32/verify_equivalence.py` re-checks the artifact against the frozen
+seed logits and recorded metrics after any model-code change.
 
 ## Where The Issue Lies
 
@@ -329,20 +336,19 @@ See "Next Data Direction".
 
 ## Documentation Review
 
-These documents are all useful, but not all in the same way.
+| Document | Current role |
+| --- | --- |
+| `HGNN_CURRENT.md` | Production architecture and default behavior source of truth. Keep this current whenever model inputs, cache format, serving behavior, or promoted artifacts change. |
+| `EXPERIMENTS.md` (this file) | Closed-lever decision records and the rules/gates template for future experiments. |
+| `HGNN_BUILD_INTENT.md` | Build-intent leakage policy and the accepted draft-safe path. |
+| `README.md` | Entry-point overview: production path, train/promote commands, cache contract. |
 
-| Document | Keep? | Current role |
-| --- | --- | --- |
-| `HGNN_CURRENT.md` | Yes, critical. | Production architecture and default behavior source of truth. Keep this current whenever model inputs, cache format, serving behavior, or promoted checkpoints change. |
-| `HGNN_CONTEXT_EXAMPLES_AUDIT.md` | Yes, critical as an evaluation fixture. | The specific instances of group context are valuable. They prevent aggregate metrics from hiding semantic failures and should remain available for qualitative evaluation. Do not use raw example gaps alone as a promotion metric because many bins are noisy. |
-| `HGNN_GROUP_CONTEXT_AUDIT.md` | Yes, critical as the aggregate guardrail. | This is the lower-noise EB/group companion to the examples audit. It should remain the semantic calibration guardrail alongside accuracy, AUC, NLL, and ECE. |
-| `HGNN_CENTRAL_BAND_REVIEW.md` | Keep, but treat as historical. | Useful for the original missing-signal taxonomy and central-band intuition. It is not the current production source of truth and contains historical ablation narrative. Prefer referencing it for forensic background, not current promotion decisions. |
-
-The specific context instances in `HGNN_CONTEXT_EXAMPLES_AUDIT.md` are worth
-keeping even if they are verbose. They are the semantic equivalent of regression
-fixtures: small enough to inspect, rich enough to show why a model is wrong, and
-stable enough to keep future architectures honest. Their main limitation is that
-they are evaluation examples, not a direct supervised target.
+The context-examples and group-EB audit docs and their tooling were retired on
+2026-06-11 after the semantic-boundary line closed (the audits' role was
+selecting semantic-path candidates; the thresholds they promoted live on in
+`app/ml/semantic_group_features.py`). The central-band review was retired as a
+historical methodology note; its missing-signal taxonomy is summarized by the
+sections above.
 
 ## Experiment Rules
 
@@ -459,8 +465,9 @@ with the active defaults from `HGNN_CURRENT.md`: learned semantic MoE 128x32,
 compact sidecar, semantic group features, batch `16384`, validation-accuracy
 checkpoint selection, and seeds `4` and `5`. The from-scratch round and
 warm-start round were both rejected for promotion under the pre-registered
-validation gates; retained candidate artifacts live under
-`app/ml/data/experiments/rolled_split_production/`.
+validation gates. The rolled-split line was subsequently superseded by the
+per-patch v32 protocol, and its candidate artifacts and runners were removed
+(2026-06-11); the records below are the retained conclusions.
 
 Batch `16384` is the measured throughput setting for the current architecture
 (`51,505` team-swap-augmented samples/s on the local RTX 5070 Ti). If the MoE or
@@ -489,8 +496,8 @@ than carried over mechanically.
    confirmation: central NLL lift at least `+0.002`, central accuracy lift at
    least `+0.30pp`, and the same global/audit guardrails. If test fails, reject
    the candidate; do not tune and retest on the same test window.
-7. Re-run `HGNN_GROUP_CONTEXT_AUDIT.md` and the high-support examples in
-   `HGNN_CONTEXT_EXAMPLES_AUDIT.md` as guardrails. Treat low-support context
+7. Re-run the group EB audit and the high-support context examples as
+   guardrails (audit tooling since retired). Treat low-support context
    examples as qualitative only, not max-gap evidence.
 8. Compare the rolled-boundary results to the old frozen-boundary production
    checkpoint and the time-local teacher ceiling. The key question is whether
@@ -503,10 +510,9 @@ than carried over mechanically.
 ### Rolled Split Round 1: From-Scratch Recipe Rejected (2026-06-10)
 
 The full production recipe (active defaults, lr `3e-4`, from scratch) was
-trained on the rolled split for seeds `4` and `5` and evaluated with the
-no-group band harness
-(`app/ml/data/experiments/rolled_split_production/eval_no_group_bands.py`,
-validation printed only; test written to JSON unread). The previous
+trained on the rolled split for seeds `4` and `5` and evaluated with a
+no-group band harness (validation printed only; test written to JSON unread,
+runner since removed). The previous
 frozen-boundary production checkpoint was re-evaluated on the rolled windows
 as the incumbent anchor (`existing/`); the harness reproduced its recorded
 metrics (NLL to `4e-7`, accuracy within 8 of 164,792 rows from batch
@@ -632,11 +638,7 @@ operations decisions, not model changes:
    recommendation; the rolled fine-tune (~6 minutes) makes within-patch
    refresh cheap.
 
-Round-2 artifacts: `app/ml/data/experiments/rolled_split_production/`
-(`warm4/`, `warm5/`, `existing/`, `no_group_bands.json`, `cohort_bands.json`,
-`cross_model_central.json`, `val_probabilities.npz`, plus the temporary
-runners `eval_no_group_bands.py`, `cohort_bands.py`,
-`cross_model_central.py`; the data directory is gitignored).
+Round-2 artifacts were removed with the rolled-split experiment directory.
 
 ### Player Priors Round: First Gate-Scale Signal (2026-06-10)
 
@@ -691,9 +693,7 @@ end-to-end with BCE wreck calibration (full fine-tune and slot-level node head
 both failed); the probe-validated low-capacity form on a frozen base captured
 the signal cleanly.
 
-Artifacts: `app/ml/data/experiments/rolled_split_production/player4_res/`
-(checkpoint, metrics, `player_eval.json` ablations; gitignored data dir).
-Note `eval_player.py`'s AUC column is unreliable — use the trainer's AUC.
+Artifacts were removed with the rolled-split experiment directory.
 
 Follow-ups resolved in the next round (below): seed-5 reproduced player4_res
 identically; the nonlinear residual head (`--player-residual-hidden 32`)
@@ -770,11 +770,11 @@ HGNN_CURRENT.md is not reachable under the frozen split + frozen aggregates
 protocol; the two levers that move it (rolling split refresh, refreshed
 player aggregates) are both pipeline decisions outside model training.
 
-Artifacts (gitignored data dir):
-`rolled_split_production/{player4_role,player5_role,late15_l015}/`,
-`late_head_fit.py` + `late_head_fit_report.json` (sweep), patched-checkpoint
-candidate in `late15_l015/model.pt`. The `eval_player.py` no-player ablation
-now also zeroes `player_role_cnt` for dim-11 checkpoints.
+Artifacts were removed with the rolled-split experiment directory. Closure
+note, 2026-06-11: the user made the draft-generic constraint permanent (no
+player information of any kind), and the opt-in player-prior code path —
+cache arrays, config fields, model wiring, and CLI flags — was removed
+end-to-end. This lever is closed, not parked.
 
 ### Champion Strength / Meta Drift: Oracle Ceiling Is Empty (2026-06-11)
 
@@ -834,8 +834,7 @@ explains the historical wash of champion-role patch deltas in the old broad
 needed — the bound is on val and dominates any implementation. The 60% gate
 assessment from Player Priors Round 2 stands unchanged.
 
-Artifacts (gitignored data dir): `rolled_split_production/champ_oracle_probe.py`
-+ `champ_oracle_report.json`.
+Artifacts were removed with the rolled-split experiment directory.
 
 ### Semantic Identity Profiles: Real Signal, Fully Redundant With Champion Identity (2026-06-11)
 
@@ -919,5 +918,4 @@ shared `_binary_auc(scores, targets)` helper was called with swapped
 arguments, the same root cause as the known-buggy `eval_player.py` AUC
 column. Conclusions use acc/NLL only; the probe script is fixed.
 
-Artifacts (gitignored data dir): `rolled_split_production/semantic_profile_probe.py`
-+ `semantic_profile_report.json` + `semantic_profile_slots.npz`.
+Artifacts were removed with the rolled-split experiment directory.

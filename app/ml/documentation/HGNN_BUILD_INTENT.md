@@ -10,7 +10,7 @@ sub-agent plan for isolated implementation.
 ## Goal
 
 Maximise the useful effect of build information while keeping every accepted
-training, validation, test, serving, and RL/search path constrained to
+training, test, serving, and RL/search path constrained to
 draft-phase information.
 
 The production signal is not an observed held-out build label and not a single
@@ -180,7 +180,7 @@ For one draft:
 4. Average sigmoid probabilities with the original retained weights.
 5. Report retained mass and tail mass instead of hiding pruned probability by
    blind renormalisation.
-6. Calibrate the final marginal probability on validation using the same
+6. Calibrate the final marginal probability on the train split using the same
    marginalisation procedure.
 
 If retained joint mass is too low, surface a low-confidence diagnostic rather
@@ -268,9 +268,8 @@ uv run pyright
 Metric promotion gates:
 
 - Oracle metrics are reported only as ceiling estimates.
-- Accepted build marginalisation improves or preserves validation NLL versus the
-  safe no-build baseline.
-- Accuracy gain transfers from validation to test without reliability collapse.
+- Accepted build marginalisation improves or preserves test NLL versus the
+  safe no-build baseline, without reliability collapse.
 - Brier and corrected ECE do not materially regress.
 - Retained mass, support tier, fallback source, and build source are emitted in
   every accepted report.

@@ -1,9 +1,9 @@
 # pyright: reportPrivateImportUsage=false
 
-"""Match-outcome HGNN validation model.
+"""Match-outcome HGNN win model.
 
-Production validation uses champion/build identity, 1vX priors, and optional
-residual heads. Runtime serving must provide any configured feature tensors.
+Production uses champion/build identity, 1vX priors, and optional residual
+heads. Runtime serving must provide any configured feature tensors.
 """
 
 from __future__ import annotations
