@@ -134,32 +134,32 @@ def claim_pending_matchids(*, batch_size: int) -> list[str]:
             WITH limited AS (
                 SELECT
                     matchid,
-                    lower(splitByChar('_', matchid)[1]) AS region,
-                    cityHash64(matchid) AS shuffle_key
+                    {_continent_expr()} AS continent,
+                    cityHash64('matchdata_claim', matchid) AS shuffle_key
                 FROM {MATCHDATA_STATE_TABLE}
-                ORDER BY region, shuffle_key, matchid
-                LIMIT %(limit)s BY region
+                ORDER BY continent, shuffle_key, matchid
+                LIMIT %(limit)s BY continent
             ),
             ranked AS (
                 SELECT
                     matchid,
-                    region,
+                    continent,
                     shuffle_key,
                     row_number() OVER (
-                        PARTITION BY region
+                        PARTITION BY continent
                         ORDER BY shuffle_key, matchid
                     ) AS row_n,
                     transform(
-                        region,
-                        {_sql_strings(REGIONS, brackets="[]")},
-                        arrayEnumerate({_sql_strings(REGIONS, brackets="[]")}),
-                        length({_sql_strings(REGIONS, brackets="[]")}) + 1
-                    ) AS region_order
+                        continent,
+                        {_sql_strings(CONTINENTS, brackets="[]")},
+                        arrayEnumerate({_sql_strings(CONTINENTS, brackets="[]")}),
+                        length({_sql_strings(CONTINENTS, brackets="[]")}) + 1
+                    ) AS continent_order
                 FROM limited
             )
             SELECT matchid
             FROM ranked
-            ORDER BY row_n, region_order, shuffle_key, matchid
+            ORDER BY row_n, continent_order, shuffle_key, matchid
             LIMIT %(limit)s
             """,
             parameters={"limit": batch_size},
@@ -168,18 +168,19 @@ def claim_pending_matchids(*, batch_size: int) -> list[str]:
     )
     claimed = dedupe_matchids(row[0] for row in rows)
 
-    counts: dict[str, int] = {r: 0 for r in REGIONS}
+    counts: dict[str, int] = {c: 0 for c in CONTINENTS}
     unknown = 0
     for matchid in claimed:
         shard = matchid.split("_", 1)[0].lower()
-        if shard not in counts:
+        continent = SHARD_TO_CONTINENT.get(shard)
+        if continent is None:
             unknown += 1
         else:
-            counts[shard] += 1
-    exhausted = [region for region, count in counts.items() if count == 0]
+            counts[continent] += 1
+    exhausted = [continent for continent, count in counts.items() if count == 0]
 
     logger.debug(
-        "Claimed matchdata queue rows=%d region_counts=%s exhausted_regions=%s unknown=%d",
+        "Claimed matchdata queue rows=%d continent_counts=%s exhausted_continents=%s unknown=%d",
         len(claimed),
         counts,
         exhausted,

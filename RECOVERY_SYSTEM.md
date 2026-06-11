@@ -44,7 +44,7 @@ Flow:
 
 1. On first loader call in a matchdata run, seed queue from latest `matchids` run (`data_timestamps.name = 'matchids_puuids_ts'`), excluding only matchids already present in both `info` and `tl_game_end` and matchids already in the queue.
 2. Record a seed anchor (`data_timestamps.name = 'matchdata_seeded_matchids_run'`) so the same `matchids` run is not reseeded on restart.
-3. Claim next `MATCHDATA_CLAIM_BATCH_SIZE` pending matchids (per-platform-region round-robin).
+3. Claim next `MATCHDATA_CLAIM_BATCH_SIZE` pending matchids (per-continent round-robin).
 4. Fetch non-timeline and timeline payloads concurrently.
 5. Persist parsed rows.
 6. Per-match resolution at end of batch:

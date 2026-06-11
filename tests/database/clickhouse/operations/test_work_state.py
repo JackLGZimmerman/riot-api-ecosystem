@@ -111,7 +111,7 @@ def test_seed_from_latest_matchids_marks_empty_seed(monkeypatch):
     ]
 
 
-def test_claim_pending_matchids_balances_by_region(monkeypatch):
+def test_claim_pending_matchids_balances_by_continent(monkeypatch):
     client = FakeClient(
         [
             [("NA1_1",), ("LA1_1",), ("EUW1_1",)],
@@ -126,9 +126,11 @@ def test_claim_pending_matchids_balances_by_region(monkeypatch):
     ]
 
     claim_sql, claim_params = client.queries[0]
-    assert "lower(splitByChar('_', matchid)[1]) AS region" in claim_sql
-    assert "LIMIT %(limit)s BY region" in claim_sql
-    assert "PARTITION BY region" in claim_sql
-    assert "region_order" in claim_sql
-    assert "continent_order" not in claim_sql
+    assert "AS continent" in claim_sql
+    assert "cityHash64('matchdata_claim', matchid) AS shuffle_key" in claim_sql
+    assert "LIMIT %(limit)s BY continent" in claim_sql
+    assert "PARTITION BY continent" in claim_sql
+    assert "continent_order" in claim_sql
+    assert "LIMIT %(limit)s BY region" not in claim_sql
+    assert "region_order" not in claim_sql
     assert claim_params == {"limit": 250}
