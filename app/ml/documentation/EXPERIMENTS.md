@@ -1,6 +1,6 @@
 # HGNN Experiment Guidance
 
-Last updated: 2026-06-10.
+Last updated: 2026-06-11.
 
 This note records the current semantic-boundary experiment findings and the rules
 for future HGNN experiments. The goal is to keep useful conclusions while keeping
@@ -192,6 +192,107 @@ plus `row_time_meta.npz`. The one-off runner was removed after this conclusion
 was recorded; the construction above plus the in-band section is sufficient to
 rebuild it.
 
+## Draft-Only Residual Probes Under the Per-Patch Split (2026-06-11)
+
+With the per-patch 80/20 protocol validated (see `HGNN_CURRENT.md`), this
+experiment asked where additional draft-only signal remains. Hard constraint,
+set by the user and binding on all future work: the model is draft-generic —
+no player information of any kind (no puuids, no player priors, no rank
+features). The admissible surface is champions, positions, runes, summoners,
+bans, patch, and (champion, role, build)-keyed historical profiles via the
+three encoder sidecars.
+
+Setup: three default-recipe v32 seeds (4/5/6) frozen; residual probes fit on
+train only and scored on test, with three cohorts — global, central band
+(seed-4 `p in [0.45, 0.55]`, 122,527 rows), and the stable core (all three
+seeds in band, 52,008 rows = 15.8% of test). Feature blocks, train-stat
+standardized: ban features (3: train-window winrate/popularity/unbanned diffs
+of the ten bans), the 10 cache loadout features, the 146-dim sidecar-latent
+team difference (+ support means), and role-aligned per-lane latent diffs
+(5x144; slot order verified against the `6900` pivot: 0-4 blue
+TOP/JG/MID/BOT/UTILITY, 5-9 red). Learners: IRLS logistic over
+`[logit, 1, features]` and a 128/64 GELU MLP residual with zero-init output.
+
+| probe (offset) | global acc | band acc | core acc |
+| --- | ---: | ---: | ---: |
+| seed4 refit (slope+intercept) | `0.5800` | `0.5243` | `0.5104` |
+| seed4 + bans(3) | `0.5800` | `0.5242` | — |
+| seed4 + loadout(10) | `0.5806` | `0.5258` | — |
+| seed4 + latent diff(146) | `0.5803` | `0.5251` | — |
+| seed4 + all(159) | `0.5808` | `0.5265` | — |
+| seed4 + MLP(159) | `0.5813` | `0.5279` | `0.5162` |
+| seed4 + role-aligned diffs(720) | `0.5801` | `0.5247` | `0.5120` |
+| 3-seed ensemble refit | `0.5826` | `0.5309` | `0.5163` |
+| ensemble + all(159) | `0.5820` | `0.5300` | `0.5154` |
+| ensemble + MLP256(159) | `0.5827` | `0.5316` | `0.5165` |
+| ensemble + ban-identity embeddings | `0.5827` | `0.5315` | `0.5170` |
+| ensemble + set probe(10x144 latents) | `0.5815` | `0.5300` | `0.5133` |
+
+Findings:
+
+- The side prior is the one real correction in current features: team-swap
+  augmentation forces side-symmetric predictions (model mean `p = 0.4930` vs
+  true blue winrate `0.4818`) and the tanh-clipped `patch_residual`
+  (`max_abs_logit 0.15`) recovers only ~40% of the needed intercept. A
+  train-fitted intercept is leak-free and worth `+0.11pp` global / `+0.31pp`
+  band on a single seed. In-model fix: loosen the clip or add a learned side
+  bias.
+- The 3-seed ensemble is the largest free gain: `+0.26pp` over the refit
+  single seed (`+0.29pp` over raw), `-0.0011` NLL, `+0.66pp` band, `+0.6pp`
+  core. No new information required.
+- Single-seed feature residuals are noise, not signal. The largest
+  (`+0.08pp` global / `+0.21pp` band for all features) is paired-McNemar
+  `z = 1.8` — below significance and 2x the seed-to-seed accuracy spread —
+  and on the ensemble offset the same stack adds nothing (`0.5820` vs
+  `0.5826`, within noise). The per-block deltas (loadout `+0.05pp`, latent
+  `+0.03pp`) are noise-level descriptive numbers, not effects. Ban scalars
+  are empty outright (standalone test AUC `0.5052`; the null is not an
+  alignment artifact — the ban columns correlate with the label and the
+  model logit at 4-8 sigma with consistent sign on both splits).
+- Role-aligned lane diffs are null (`+0.01pp`): attention pooling is not
+  discarding linearly recoverable lane-matchup structure from the encoder
+  latents.
+- The stable core shows no sparsity signature: core games have *higher*
+  encoder support than the rest of test (mean `51.8k` vs `49.5k`), equal
+  loadout coverage (`0.918` vs `0.915`), equal-or-higher champion and
+  (champ, build) train counts, and slightly *smaller* latent team-diff
+  norms. The hard set is well-covered drafts that are close to 50/50 —
+  consistent with genuinely balanced drafts rather than a data blind spot.
+  Two caveats: the compared properties are themselves encoder-derived, so a
+  purely representational blind spot would be invisible to this comparison;
+  and the core is not literally at coin-flip — the ensemble still scores
+  `~0.516` there (6.7 sigma above 0.5 at `n = 52,008`).
+
+A separate methodology audit reproduced the probe numbers exactly, verified
+train-only fitting and standardization, confirmed cache/preds/feature/ban row
+alignment through the `ORDER BY matchid` contract plus label-equality and
+correlation checks, and confirmed fp16 storage cannot mask signal at these
+scales. It also flagged the first MLP probe as underfit (84 optimizer steps);
+the strong-probe rows above are the corrected rerun (proper schedule, train
+holdout early stopping, ensemble offset), including the two strongest
+previously-untested classes: ban identities (learned embeddings instead of 3
+scalars) and a nonlinear set probe over the full per-slot latents (team-mean
+differencing is a linear compression).
+
+Verdict: under the per-patch protocol, every probe class tried — linear,
+fairly-trained shallow-nonlinear, ban identities, per-slot set probes — finds
+nothing beyond the ensemble and the side intercept; measured residuals are
+within noise of zero. The era-conditional residual that dominated the
+2026-06-10 ceilings (in-band `+1.25pp` test central) was freshness and is now
+inside the split change's `+0.50pp`. The conclusion is scoped to these probe
+classes: still untested are gradient-boosted/deep probes over raw champion
+*identities* (champion-pair interaction structure beyond what the encoder
+latents linearize — though the HGNN itself is already a deep model over that
+surface, so this amounts to boosting), draft-sequence/pick-order information
+(not present in the data), and cross-patch train weighting. Remaining
+headroom most plausibly requires new draft-generic information rather than
+residual heads on current features.
+
+Artifacts: `app/ml/data/experiments/split_v32/` (untracked) — seed
+checkpoints, `preds.npz`, `probe_features.npz`, `run_probes.py`,
+`probe_deep.py`, `probe_strong.py`, `core_character.py`, `extract_bans.sh`
+(regenerates the `/tmp` ban TSVs).
+
 ## Where The Issue Lies
 
 The issue lies in extracting decision signal from semantic groups, not in the
@@ -307,6 +408,11 @@ protocol itself, not to targets or architecture:
   fitted curve — they differ in cohort and construction.
 - The fixed-feature ceiling harness (in-band + time-local sections above)
   remains the gate for any cheaper variant before HGNN wiring changes.
+
+Status 2026-06-11: done — implemented as the per-patch chronological 80/20
+protocol (`ml_game_split` v32; see `HGNN_CURRENT.md`). The freshness dividend
+is banked (`+0.50pp` test accuracy, `-0.0037` NLL), and the follow-up probe
+section above records what remains on the draft-only surface.
 
 Rolling the boundary regenerates split-scoped artifacts (filter tables,
 priors, encoder sidecars, semantic context tables, cache), so it is a

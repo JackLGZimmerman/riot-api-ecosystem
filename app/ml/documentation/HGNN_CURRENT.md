@@ -28,7 +28,15 @@ chronological quartiles of each patch's 20% test tail is flat (`0.5775`,
 remains. Remaining headroom is model/feature, not split mechanics;
 cross-patch train weighting is still an open, untested lever. Candidate
 artifacts and the per-patch runner live at
-`app/ml/data/experiments/split_v32/` (untracked).
+`app/ml/data/experiments/split_v32/` (untracked). Follow-up draft-only
+residual probes (see EXPERIMENTS.md, 2026-06-11) found two bankable levers —
+a 3-seed ensemble (`+0.26pp` acc, `-0.0011` NLL over a refit single seed) and
+a side-prior intercept the swap-augmented model cannot express (`+0.11pp`
+global, `+0.31pp` central band) — and otherwise no linear or
+shallow-nonlinear residual in bans, loadout, encoder latents, or role-aligned
+lane diffs; the stable hard core is well-covered balanced drafts, not a data
+blind spot. The model is draft-generic by constraint: no player information
+of any kind.
 
 Experiment guidance and the latest semantic-boundary findings are in
 [EXPERIMENTS.md](EXPERIMENTS.md). In short: semantic group examples remain
