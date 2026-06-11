@@ -94,7 +94,7 @@ def build_matchids_time_window(season: int | None, *, ts: int) -> tuple[int, int
 
 def build_initial_player_states(
     players: list[PlayerKeyRow],
-    collected_puuids: set[str],
+    collected_player_keys: set[tuple[str, str]],
     collected_puuids_ts: int,
     *,
     ts: int,
@@ -106,12 +106,14 @@ def build_initial_player_states(
     for player in players:
         puuid = player.puuid
         queue_type = Queues(player.queue_type)
-        continent = REGION_TO_CONTINENT[Region(player.region)]
+        region = Region(player.region)
+        continent = REGION_TO_CONTINENT[region]
         queue = QUEUE_TYPE_TO_QUEUE_CODE[queue_type]
+        player_key = (puuid, queue_type.value)
 
         start_time = (
             collected_puuids_ts
-            if (puuid in collected_puuids and collected_puuids_ts > 0)
+            if (player_key in collected_player_keys and collected_puuids_ts > 0)
             else 0
         )
         start_time = min(max(start_time, start_time_floor), ts)
@@ -131,6 +133,7 @@ def build_initial_player_states(
             PlayerCrawlState(
                 puuid=puuid,
                 queue_type=queue_type,
+                region=region,
                 continent=continent,
                 next_page_start=0,
                 base_url=base_url,
@@ -189,13 +192,13 @@ class MatchIDLoader:
     def load(self, ctx: OrchestrationContext) -> MatchIDCollectorState:
         players: list[PlayerKeyRow] = load_players()
         collected_player_keys = load_matchid_puuids()
-        collected_puuids: set[str] = {puuid for puuid, _ in collected_player_keys}
+        collected_player_key_set: set[tuple[str, str]] = set(collected_player_keys)
         collected_puuid_ts: int = load_matchid_puuid_ts()
         start_ts, end_ts = build_matchids_time_window(self.season, ts=ctx.ts)
 
         initial_states = build_initial_player_states(
             players,
-            collected_puuids,
+            collected_player_key_set,
             collected_puuid_ts,
             ts=end_ts,
             start_time_floor=start_ts,
@@ -261,10 +264,15 @@ class MatchIDSaver:
                 if player_key not in state.failed_player_keys
             ]
             if state.failed_player_keys:
-                logger.info(
-                    "MatchIDExcludingFailedPlayers failed=%d successful=%d",
+                logger.error(
+                    "MatchIDCrawlIncomplete failed=%d total=%d sample=%s",
                     len(state.failed_player_keys),
-                    len(successful_player_keys),
+                    len(state.full_player_keys),
+                    sorted(state.failed_player_keys)[:20],
+                )
+                raise RuntimeError(
+                    f"Match ID crawl failed for {len(state.failed_player_keys)} "
+                    "player keys"
                 )
             await asyncio.to_thread(
                 insert_puuids_in_batches,

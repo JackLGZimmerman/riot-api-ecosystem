@@ -9,15 +9,13 @@ from app.core.config.constants import (
     URLTemplate,
 )
 from app.models import EliteBoundsConfig, LeagueListDTO, MinifiedLeagueEntryDTO
-from app.services.riot_api_client.base import RiotAPI
+from app.services.riot_api_client.base import FetchOutcome, RiotAPI
 from app.services.riot_api_client.utils import (
     MAX_IN_FLIGHT,
     UrlTuple,
     bounded_elite_tiers,
     iter_in_flight,
-    make_region_fetcher,
     spreading_region,
-    validate_or_log,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,24 +47,31 @@ async def stream_elite_players(
 
     spread_urls = spreading_region(urls)
 
+    async def fetch_one(job):
+        url, region = job
+        result = await riot_api.fetch_json_detailed(url=url, location=region)
+        if result.outcome is not FetchOutcome.OK:
+            raise RuntimeError(
+                "EliteLeagueFetchFailed "
+                f"region={region.value} outcome={result.outcome.value} "
+                f"status={result.status}"
+            )
+        if not isinstance(result.data, dict):
+            raise RuntimeError(
+                "EliteLeagueUnexpectedPayload "
+                f"region={region.value} type={type(result.data).__name__}"
+            )
+        return region, result.data
+
     async for region, resp in iter_in_flight(
         spread_urls,
-        make_region_fetcher(riot_api, logger),
+        fetch_one,
         max_in_flight=MAX_IN_FLIGHT,
     ):
-        if resp is None:
-            continue
-
-        entries = validate_or_log(
-            resp,
+        entries = MinifiedLeagueEntryDTO.from_list(
+            LeagueListDTO.model_validate(resp),
             region=region,
-            convert=lambda r: MinifiedLeagueEntryDTO.from_list(
-                LeagueListDTO.model_validate(r), region=region
-            ),
-            logger=logger,
         )
-        if entries is None:
-            continue
 
         for entry in entries:
             yield entry

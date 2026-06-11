@@ -22,6 +22,7 @@ type MatchEndpointType = Literal["by_match_id", "timeline_by_match_id"]
 
 class MatchWork(NamedTuple):
     match_id: str
+    region: Region
     continent: Continent
 
 
@@ -55,9 +56,9 @@ async def stream_match_data(
             )
 
         continent = REGION_TO_CONTINENT[region]
-        work_items.append(MatchWork(match_id, continent))
+        work_items.append(MatchWork(match_id, region, continent))
 
-    shuffled = spreading(work_items, lambda w: w.continent)
+    shuffled = spreading(work_items, lambda w: w.region)
 
     async def fetch_one(work: MatchWork) -> MatchFetchResult:
         result = await riot_api.fetch_json_detailed(

@@ -32,6 +32,7 @@ type UrlTuple = list[UrlRegion]
 class PlayerCrawlState(NamedTuple):
     puuid: str
     queue_type: Queues
+    region: Region
     continent: Continent
     next_page_start: int
     base_url: str

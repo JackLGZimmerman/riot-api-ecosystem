@@ -56,6 +56,7 @@ def test_seed_from_latest_matchids_uses_insert_select(monkeypatch):
         "INSERT INTO game_data.matchdata_matchids (run_id, matchid)" in command_sql
     )
     assert "SELECT DISTINCT" in command_sql
+    assert "INNER JOIN timeline_matchids USING (matchid)" in command_sql
     assert command_params == {"run_id": run_id}
 
     count_sql, count_params = client.queries[2]
@@ -108,3 +109,26 @@ def test_seed_from_latest_matchids_marks_empty_seed(monkeypatch):
             ("name", "run_id", "stored_at"),
         )
     ]
+
+
+def test_claim_pending_matchids_balances_by_region(monkeypatch):
+    client = FakeClient(
+        [
+            [("NA1_1",), ("LA1_1",), ("EUW1_1",)],
+        ]
+    )
+    _patch_client(monkeypatch, client)
+
+    assert work_state.claim_pending_matchids(batch_size=250) == [
+        "NA1_1",
+        "LA1_1",
+        "EUW1_1",
+    ]
+
+    claim_sql, claim_params = client.queries[0]
+    assert "lower(splitByChar('_', matchid)[1]) AS region" in claim_sql
+    assert "LIMIT %(limit)s BY region" in claim_sql
+    assert "PARTITION BY region" in claim_sql
+    assert "region_order" in claim_sql
+    assert "continent_order" not in claim_sql
+    assert claim_params == {"limit": 250}

@@ -23,9 +23,7 @@ from app.services.riot_api_client.utils import (
     UrlTuple,
     bounded_sub_elite_tiers,
     iter_in_flight,
-    make_region_fetcher,
     spreading,
-    validate_or_log,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,36 +98,17 @@ async def discover_page_bounds(
 
     results: list[tuple[PageKey, int]] = []
 
-    async def probe_safe(
+    async def probe_one(
         args: tuple[Region, Queues, Tiers, Divisions],
-    ) -> tuple[
-        tuple[Region, Queues, Tiers, Divisions],
-        tuple[PageKey, int] | None,
-        Exception | None,
-    ]:
-        try:
-            return args, await probe(*args), None
-        except Exception as exc:
-            return args, None, exc
+    ) -> tuple[PageKey, int]:
+        return await probe(*args)
 
-    async for args, item, exc in iter_in_flight(
+    async for item in iter_in_flight(
         spread_work,
-        probe_safe,
+        probe_one,
         max_in_flight=MAX_IN_FLIGHT,
     ):
-        if exc is not None:
-            region, queue, tier, div = args
-            logger.warning(
-                "LeagueBoundProbeFailed region=%s queue=%s tier=%s division=%s error=%s",
-                region.value,
-                queue.value,
-                tier.value,
-                div.value,
-                type(exc).__name__,
-            )
-            continue
-        if item is not None:
-            results.append(item)
+        results.append(item)
 
     return results
 
@@ -161,23 +140,30 @@ async def stream_sub_elite_players(
     del jobs
     del page_bounds
 
+    async def fetch_one(job):
+        url, region = job
+        result = await riot_api.fetch_json_detailed(url=url, location=region)
+        if result.outcome is not FetchOutcome.OK:
+            raise RuntimeError(
+                "SubEliteLeagueFetchFailed "
+                f"region={region.value} outcome={result.outcome.value} "
+                f"status={result.status}"
+            )
+        if not isinstance(result.data, list):
+            raise RuntimeError(
+                "SubEliteLeagueUnexpectedPayload "
+                f"region={region.value} type={type(result.data).__name__}"
+            )
+        return region, result.data
+
     async for region, records in iter_in_flight(
         spread_jobs,
-        make_region_fetcher(riot_api, logger),
+        fetch_one,
         max_in_flight=MAX_IN_FLIGHT,
     ):
-        if not isinstance(records, list) or not records:
-            continue
-
         for raw in records:
-            entry = validate_or_log(
-                raw,
+            entry = MinifiedLeagueEntryDTO.from_entry(
+                LeagueEntryDTO(**raw),
                 region=region,
-                convert=lambda r: MinifiedLeagueEntryDTO.from_entry(
-                    LeagueEntryDTO(**r), region=region
-                ),
-                logger=logger,
             )
-            if entry is None:
-                continue
             yield entry

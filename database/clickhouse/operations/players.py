@@ -7,6 +7,7 @@ from uuid import UUID
 from app.models.riot.league import MinifiedLeagueEntryDTO
 from database.clickhouse.client import get_client
 from database.clickhouse.operations.utils import (
+    _as_text,
     delete_timestamp_for_run,
     delete_timestamps_except_run,
     record_timestamp,
@@ -111,23 +112,30 @@ def delete_old_players_snapshot_ts(run_id: UUID) -> None:
 
 def load_players() -> list[PlayerKeyRow]:
     query = """
+    WITH latest AS (
+        SELECT argMax(run_id, stored_at) AS run_id
+        FROM game_data.data_timestamps
+        WHERE name = %(timestamp_name)s
+    )
     SELECT
         DISTINCT
         puuid,
         queue_type,
         region
     FROM game_data.players
+    WHERE run_id = (SELECT run_id FROM latest)
     """
 
-    result = get_client().query(query)
+    result = get_client().query(
+        query,
+        parameters={"timestamp_name": PLAYERS_SNAPSHOT_TIMESTAMP_NAME},
+    )
 
     return [
         PlayerKeyRow(
-            puuid=row[0].decode("utf-8").rstrip("\x00")
-            if isinstance(row[0], (bytes, bytearray))
-            else row[0],
-            queue_type=row[1],
-            region=row[2],
+            puuid=_as_text(row[0]),
+            queue_type=_as_text(row[1]),
+            region=_as_text(row[2]),
         )
         for row in result.result_rows
     ]

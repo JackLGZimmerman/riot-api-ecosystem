@@ -40,7 +40,7 @@ async def stream_match_ids(
 
     seed_url_jobs = spreading(
         [(_state_url(state), state) for state in initial_states],
-        key_fn=lambda job: job[1].continent,
+        key_fn=lambda job: job[1].region,
     )
     for _, state in seed_url_jobs:
         work_q.put_nowait(state)

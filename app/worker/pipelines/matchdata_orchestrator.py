@@ -469,12 +469,12 @@ class MatchDataSaver(Saver):
                     continue
                 successes = stream_successes.get(mid, set())
                 terminals = stream_terminals.get(mid, set())
-                if successes | terminals != both:
-                    requeued.append(mid)
-                elif successes:
+                if successes == both:
                     finished.append(mid)
-                else:
+                elif successes | terminals == both and terminals:
                     retired.append(mid)
+                else:
+                    requeued.append(mid)
 
             if requeued:
                 logger.warning(

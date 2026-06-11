@@ -34,14 +34,14 @@ Queue table: `game_data.matchdata_matchids`
 
 Flow:
 
-1. On first loader call in a matchdata run, seed queue from latest `matchids` run (`data_timestamps.name = 'matchids_puuids_ts'`), excluding matchids already present in `info` or `tl_game_end` and matchids already in the queue.
+1. On first loader call in a matchdata run, seed queue from latest `matchids` run (`data_timestamps.name = 'matchids_puuids_ts'`), excluding only matchids already present in both `info` and `tl_game_end` and matchids already in the queue.
 2. Record a seed anchor (`data_timestamps.name = 'matchdata_seeded_matchids_run'`) so the same `matchids` run is not reseeded on restart.
-3. Claim next `MATCHDATA_CLAIM_BATCH_SIZE` pending matchids (per-continent round-robin).
+3. Claim next `MATCHDATA_CLAIM_BATCH_SIZE` pending matchids (per-platform-region round-robin).
 4. Fetch non-timeline and timeline payloads concurrently.
 5. Persist parsed rows.
 6. Per-match resolution at end of batch:
-   - At least one stream succeeded and the other resolved (succeeded or terminal): delete queue row, keep persisted rows.
-   - Both streams returned a non-retryable HTTP status (e.g. 404): delete the source `matchids` row and the queue row.
+   - Both streams succeeded: delete queue row, keep persisted rows.
+   - One stream succeeded and the other returned terminal, or both streams returned terminal: delete partial persisted rows, delete the source `matchids` row, and delete the queue row.
    - Any retryable failure (5xx exhausted, retry pending): delete partial persisted rows and leave the queue row in place for the next batch.
 7. Repeat until no pending rows remain.
 

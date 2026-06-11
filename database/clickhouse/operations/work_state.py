@@ -5,7 +5,7 @@ import time
 from collections.abc import Iterable
 from uuid import UUID
 
-from app.core.config.constants import CONTINENT_TO_REGIONS, Continent
+from app.core.config.constants import CONTINENT_TO_REGIONS, Continent, Region
 from database.clickhouse.client import get_client
 from database.clickhouse.operations.matchids import PUUID_DATA_TIMESTAMP_NAME
 from database.clickhouse.operations.utils import dedupe_matchids, record_timestamp
@@ -13,6 +13,7 @@ from database.clickhouse.operations.utils import dedupe_matchids, record_timesta
 MATCHDATA_STATE_TABLE = "game_data.matchdata_matchids"
 MATCHDATA_SEEDED_RUN_NAME = "matchdata_seeded_matchids_run"
 CONTINENTS: tuple[str, ...] = tuple(c.value for c in Continent)
+REGIONS: tuple[str, ...] = tuple(r.value for r in Region)
 CONTINENT_SHARDS: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
     (c.value, tuple(r.value for r in CONTINENT_TO_REGIONS[c])) for c in Continent
 )
@@ -55,11 +56,19 @@ def _mark_seeded(run_id: UUID) -> None:
 
 def _seed_candidates_select() -> str:
     return f"""
-        WITH completed_matchids AS
+        WITH info_matchids AS
         (
             SELECT DISTINCT matchid FROM game_data.info WHERE matchid != ''
-            UNION DISTINCT
+        ),
+        timeline_matchids AS
+        (
             SELECT DISTINCT matchid FROM game_data.tl_game_end WHERE matchid != ''
+        ),
+        completed_matchids AS
+        (
+            SELECT info_matchids.matchid
+            FROM info_matchids
+            INNER JOIN timeline_matchids USING (matchid)
         )
         SELECT DISTINCT
             m.run_id AS run_id,
@@ -125,31 +134,32 @@ def claim_pending_matchids(*, batch_size: int) -> list[str]:
             WITH limited AS (
                 SELECT
                     matchid,
-                    {_continent_expr()} AS continent,
+                    lower(splitByChar('_', matchid)[1]) AS region,
                     cityHash64(matchid) AS shuffle_key
                 FROM {MATCHDATA_STATE_TABLE}
-                ORDER BY continent, shuffle_key, matchid
-                LIMIT %(limit)s BY continent
+                ORDER BY region, shuffle_key, matchid
+                LIMIT %(limit)s BY region
             ),
             ranked AS (
                 SELECT
                     matchid,
+                    region,
                     shuffle_key,
                     row_number() OVER (
-                        PARTITION BY continent
+                        PARTITION BY region
                         ORDER BY shuffle_key, matchid
                     ) AS row_n,
                     transform(
-                        continent,
-                        {_sql_strings(CONTINENTS, brackets="[]")},
-                        [1, 2, 3, 4],
-                        5
-                    ) AS continent_order
+                        region,
+                        {_sql_strings(REGIONS, brackets="[]")},
+                        arrayEnumerate({_sql_strings(REGIONS, brackets="[]")}),
+                        length({_sql_strings(REGIONS, brackets="[]")}) + 1
+                    ) AS region_order
                 FROM limited
             )
             SELECT matchid
             FROM ranked
-            ORDER BY row_n, continent_order, shuffle_key, matchid
+            ORDER BY row_n, region_order, shuffle_key, matchid
             LIMIT %(limit)s
             """,
             parameters={"limit": batch_size},
@@ -158,20 +168,21 @@ def claim_pending_matchids(*, batch_size: int) -> list[str]:
     )
     claimed = dedupe_matchids(row[0] for row in rows)
 
-    counts: dict[str, int] = {c: 0 for c in CONTINENTS}
+    counts: dict[str, int] = {r: 0 for r in REGIONS}
     unknown = 0
     for matchid in claimed:
         shard = matchid.split("_", 1)[0].lower()
-        c = SHARD_TO_CONTINENT.get(shard)
-        if c is None:
+        if shard not in counts:
             unknown += 1
         else:
-            counts[c] += 1
+            counts[shard] += 1
+    exhausted = [region for region, count in counts.items() if count == 0]
 
     logger.debug(
-        "Claimed matchdata queue rows=%d counts=%s unknown=%d",
+        "Claimed matchdata queue rows=%d region_counts=%s exhausted_regions=%s unknown=%d",
         len(claimed),
         counts,
+        exhausted,
         unknown,
     )
     return claimed
