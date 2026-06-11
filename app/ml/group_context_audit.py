@@ -211,8 +211,8 @@ def main() -> None:
             f"{s['systematic_gap_mse']:>10.2f} {s['systematic_gap_mse_clipped']:>6.2f} | "
             f"{s['eb_mean_abs_gap']:>7.2f} {s['eb_max_abs_gap']:>7.2f}"
         )
-        if args.per_row and split == "val":
-            print("\n  per-row EB gap (val), sorted by |systematic| desc:")
+        if args.per_row and split == "test":
+            print("\n  per-row EB gap (test), sorted by |systematic| desc:")
             detail = []
             for r in rows:
                 for b in r.bins:

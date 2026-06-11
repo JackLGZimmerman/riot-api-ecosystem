@@ -153,15 +153,6 @@ def test_context_examples_audit_render_includes_effect_and_tail_shrinkage() -> N
                 gap_mse=0.0004,
             ),
             AuditSplitSummary(
-                split="val",
-                n_games=20,
-                n_tests=2,
-                n_populated_bins=6,
-                mean_abs_gap=0.02,
-                max_abs_gap=0.05,
-                gap_mse=0.0009,
-            ),
-            AuditSplitSummary(
                 split="test",
                 n_games=10,
                 n_tests=2,
@@ -181,9 +172,8 @@ def test_context_examples_audit_render_includes_effect_and_tail_shrinkage() -> N
     assert "**Accuracy**" in markdown
     assert "**Accuracy if calibrated**" in markdown
     assert "**Calibration lift**" in markdown
-    assert "## Train, Validation, And Test Summary" in markdown
+    assert "## Train And Test Summary" in markdown
     assert "| Train | 100 | 1,000 | 2 | 7 | 1.00 pp | 4.00 pp | 4.00 pp^2 |" in markdown
-    assert "| Validation | 20 | 200 | 2 | 6 | 2.00 pp | 5.00 pp | 9.00 pp^2 |" in markdown
     assert "| Test | 10 | 100 | 2 | 5 | 3.00 pp | 6.00 pp | 16.00 pp^2 |" in markdown
     assert "## Enemy Count Tail Shrinkage" in markdown
     assert "Empirical tail effect" in markdown
@@ -232,32 +222,32 @@ def test_context_examples_audit_json_tags_flagged_rows_and_weighted_gaps() -> No
     summary = context_gap_summary(row.bins)
 
     payload = audit_json_payload(
-        rows_by_split={"val": (row,)},
+        rows_by_split={"test": (row,)},
         split_summaries=(),
         model_path=Path("model.pt"),
         model_cache_dir=Path("model-cache"),
         context_cache_dir=Path("context-cache"),
         encoder_sidecar_path=Path("sidecar.npz"),
         prediction_cache=Path("predictions.npy"),
-        audit_split="val",
+        audit_split="test",
         updated="2026-06-04",
     )
 
-    val_payload = payload["splits"]["val"]
-    assert val_payload["rows"][0]["is_flagged"] is True
-    assert val_payload["rows"][0]["bins"][0]["bootstrap_samples"] == 32
-    assert val_payload["rows"][0]["bins"][0]["gap_ci95_low"] == pytest.approx(0.01)
-    assert val_payload["rows"][0]["bins"][1]["empirical_wr"] is None
-    assert val_payload["rows"][0]["level_gap"] == pytest.approx(0.10)
-    assert val_payload["rows"][0]["slope_gap"] is None
-    assert val_payload["rows"][0]["tail_gap"] == pytest.approx(0.10)
-    assert val_payload["rows"][0]["tail_bin_label"] == "0"
-    assert val_payload["rows"][0]["tail_bin_n"] == 10
-    assert val_payload["rows"][0]["direction_correct"] is None
-    assert val_payload["flagged_summary"]["support_weighted_gap_mse"] == pytest.approx(
+    test_payload = payload["splits"]["test"]
+    assert test_payload["rows"][0]["is_flagged"] is True
+    assert test_payload["rows"][0]["bins"][0]["bootstrap_samples"] == 32
+    assert test_payload["rows"][0]["bins"][0]["gap_ci95_low"] == pytest.approx(0.01)
+    assert test_payload["rows"][0]["bins"][1]["empirical_wr"] is None
+    assert test_payload["rows"][0]["level_gap"] == pytest.approx(0.10)
+    assert test_payload["rows"][0]["slope_gap"] is None
+    assert test_payload["rows"][0]["tail_gap"] == pytest.approx(0.10)
+    assert test_payload["rows"][0]["tail_bin_label"] == "0"
+    assert test_payload["rows"][0]["tail_bin_n"] == 10
+    assert test_payload["rows"][0]["direction_correct"] is None
+    assert test_payload["flagged_summary"]["support_weighted_gap_mse"] == pytest.approx(
         summary["support_weighted_gap_mse"]
     )
-    assert val_payload["flagged_summary"]["n_focus_rows"] == 10
+    assert test_payload["flagged_summary"]["n_focus_rows"] == 10
 
 
 def test_context_examples_support_weighted_gap_math() -> None:
@@ -279,12 +269,11 @@ def test_context_examples_audit_slices_full_prediction_cache_to_split(tmp_path) 
         """
         {
           "n_games": 4,
-          "splits": {"train": 1, "val": 2, "test": 1},
-          "split_order": ["train", "val", "test"],
+          "splits": {"train": 1, "test": 3},
+          "split_order": ["train", "test"],
           "split_ranges": {
             "train": {"start": 0, "stop": 1},
-            "val": {"start": 1, "stop": 3},
-            "test": {"start": 3, "stop": 4}
+            "test": {"start": 1, "stop": 4}
           },
           "identity": {"build_vocab": ["ability_power"]}
         }
@@ -300,12 +289,12 @@ def test_context_examples_audit_slices_full_prediction_cache_to_split(tmp_path) 
     data = AuditData(
         context_cache_dir=tmp_path,
         blue_probability=probabilities,
-        audit_split="val",
+        audit_split="test",
     )
 
-    assert data.n_games == 2
-    assert data.blue_win.tolist() == [0.0, 1.0]
-    assert np.allclose(data.predictions, probabilities[1:3])
+    assert data.n_games == 3
+    assert data.blue_win.tolist() == [0.0, 1.0, 0.0]
+    assert np.allclose(data.predictions, probabilities[1:4])
 
 
 def test_context_examples_predict_split_passes_residual_feature_inputs(monkeypatch) -> None:

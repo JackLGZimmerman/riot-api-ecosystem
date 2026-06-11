@@ -45,7 +45,6 @@ TMP_TABLE_PREFIX = "game_data_filtered.hgnn_prod_loadout_patch"
 
 SPLIT_DB_NAMES = {
     "train": "train",
-    "val": "validation",
     "test": "test",
 }
 

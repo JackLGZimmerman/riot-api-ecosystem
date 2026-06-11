@@ -39,8 +39,8 @@ game_data.participant_stats
 | `5003_participant_stats_only_build.sql` | Fast iteration copy for `participant_stats` |
 | `5132_participant_item_value_totals_schema.sql` | DROP + CREATE for `game_data_filtered.participant_item_value_totals` |
 | `5132_participant_item_value_totals_build.sql` | Populate build labels in `participant_item_value_totals` |
-| `5900_ml_game_split_schema.sql` | Persistent chronological train/validation/test label table |
-| `5900_ml_game_split_build.sql` | Populate the 80/10/10 split labels used by 6000+ aggregate builds |
+| `5900_ml_game_split_schema.sql` | Persistent per-patch chronological train/test label table |
+| `5900_ml_game_split_build.sql` | Populate the per-patch chronological 80/20 train/test labels used by 6000+ aggregate builds |
 | `6000`/`6003`/`6004` | Active build-conditioned 1v1, 1vx, and 2vx aggregate tables |
 | `6020`-`6024` | Active no-build, champion, and build-group backoff aggregate tables |
 | `6900_ml_game_player_pivot_schema.sql` | Persistent per-game player tuple table for aggregate and cache builds |

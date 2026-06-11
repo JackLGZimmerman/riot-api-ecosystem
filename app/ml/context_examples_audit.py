@@ -392,7 +392,7 @@ def predict_blue_probabilities(
             device=device,
             gatherer=gatherer,
         )
-        for split in (splits["train"], splits["val"], splits["test"])
+        for split in (splits[name] for name in SPLIT_ORDER)
     ]
     return np.concatenate(outputs).astype(np.float64)
 
@@ -642,10 +642,10 @@ def render_audit(
         lines.extend(
             [
                 "",
-                "## Train, Validation, And Test Summary",
+                "## Train And Test Summary",
                 "",
                 "These rows reuse the same audit specs and prediction cache, but evaluate "
-                "the cached train, validation, and test ranges separately.",
+                "the cached train and test ranges separately.",
                 "",
                 "| Split | Games | Focus-slot rows | Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE | Accuracy | Acc if calibrated | Calibration lift |",
                 "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -1120,8 +1120,6 @@ def _static_lookups() -> tuple[np.ndarray, np.ndarray]:
 
 
 def _format_split_label(split: str) -> str:
-    if split == "val":
-        return "Validation"
     if split == "all":
         return "All"
     return split.capitalize()
@@ -1244,7 +1242,7 @@ def main() -> None:
             audit_split=split_name,
             specs=specs,
         )
-        for split_name in ("train", "val", "test")
+        for split_name in SPLIT_ORDER
     )
     markdown = render_audit(
         rows,
@@ -1260,7 +1258,7 @@ def main() -> None:
     write_audit(args.output, markdown)
     if args.json_output is not None:
         rows_by_split: dict[str, Sequence[AuditRow]] = {str(args.audit_split): rows}
-        for split_name in ("train", "val", "test"):
+        for split_name in SPLIT_ORDER:
             if split_name == args.audit_split:
                 continue
             split_data = AuditData(

@@ -30,8 +30,7 @@ from clickhouse_connect.driver.exceptions import StreamFailureError
 
 from database.clickhouse.client import _local, get_client
 
-SPLITS = (("train", "train"), ("validation", "val"), ("test", "test"))
-SPLIT_ORDER = tuple(meta_split for _, meta_split in SPLITS)
+SPLIT_ORDER = ("train", "test")
 
 setup_logging_config()
 logger = logging.getLogger(__name__)
@@ -124,7 +123,7 @@ def _split_counts(cfg: DatasetConfig) -> dict[str, int]:
         f"""
         SELECT split, count()
         FROM {cfg.player_pivot_table}
-        WHERE split IN ('train', 'validation', 'test')
+        WHERE split IN ('train', 'test')
         GROUP BY split
         """
     )
@@ -132,16 +131,13 @@ def _split_counts(cfg: DatasetConfig) -> dict[str, int]:
     if cfg.max_games is None:
         return {
             "train": available.get("train", 0),
-            "val": available.get("validation", 0),
             "test": available.get("test", 0),
         }
 
     n_test = round(cfg.max_games * cfg.test_fraction)
-    n_val = round(cfg.max_games * cfg.val_fraction)
-    n_train = cfg.max_games - n_val - n_test
+    n_train = cfg.max_games - n_test
     return {
         "train": min(n_train, available.get("train", 0)),
-        "val": min(n_val, available.get("validation", 0)),
         "test": min(n_test, available.get("test", 0)),
     }
 
@@ -433,24 +429,24 @@ def build(cfg: DatasetConfig | None = None) -> Path:
         n_builds,
     )
     offset = 0
-    for sql_split, meta_split in SPLITS:
+    for split_name in SPLIT_ORDER:
         written = _write_split(
             arrays,
             cfg,
-            split=sql_split,
-            limit=counts[meta_split],
+            split=split_name,
+            limit=counts[split_name],
             offset=offset,
-            leave_one_out=cfg.interaction_loo and sql_split == "train",
+            leave_one_out=cfg.interaction_loo and split_name == "train",
             build_vocab_sql=build_vocab_sql,
             n_builds=n_builds,
             key_build_expr=key_build_expr,
         )
-        if written != counts[meta_split]:
+        if written != counts[split_name]:
             raise RuntimeError(
-                f"{meta_split} wrote {written}, expected {counts[meta_split]}"
+                f"{split_name} wrote {written}, expected {counts[split_name]}"
             )
         offset += written
-        logger.info("Wrote split %s: %d games", meta_split, written)
+        logger.info("Wrote split %s: %d games", split_name, written)
 
     write_loadout_patch_feature_arrays(
         cfg=cfg,

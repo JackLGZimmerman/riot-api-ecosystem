@@ -4,11 +4,13 @@ from pathlib import Path
 
 import numpy as np
 
-# v30 added draft-safe per-player priors: train-window overall and per-champion
-# (rate, count) pairs per slot, LOO-adjusted on train. v31 adds the per-(player,
-# role) experience count. The identity-encoder latents still gather per batch
-# from the small frozen artifact.
-CACHE_FORMAT = "npy-memmap-v31"
+# v32 replaces the global 80/10/10 train/val/test split with the per-patch
+# chronological 80/20 train/test split (no validation range); caches built
+# under the old protocol must be rebuilt. v30/v31 added the draft-safe
+# per-player priors and per-(player, role) experience count. The
+# identity-encoder latents still gather per batch from the small frozen
+# artifact.
+CACHE_FORMAT = "npy-memmap-v32"
 CACHE_META_FILE = "cache_meta.json"
 
 WIN_RATE_FILE = "win_rate.npy"

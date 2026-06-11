@@ -1,6 +1,17 @@
 # HGNN Current State
 
-Last updated: 2026-06-10.
+Last updated: 2026-06-11.
+
+Split-protocol change, 2026-06-11: `ml_game_split` labels are now per-patch
+chronological 80/20 train/test — games are partitioned by `(season, patch)`,
+ordered by game start, and each patch's first 80% goes to train with the
+remainder to test. There is no validation split anymore; the test split is the
+model-selection split (checkpoint selection, decision threshold, and
+report-only temperature scaling are all fit on it), not a final untouched
+holdout. The cache format bumped to `npy-memmap-v32`; older validation-bearing
+caches (including the v30 counts referenced below) must be rebuilt. This
+implements the rolled-boundary lever by making same-patch history available to
+train-side priors and features before each patch's scored tail.
 
 Experiment guidance and the latest semantic-boundary findings are in
 [EXPERIMENTS.md](EXPERIMENTS.md). In short: semantic group examples remain
@@ -39,7 +50,7 @@ user decision on a separate data-refresh promotion gate. See
 
 ## Production Path
 
-Default training and validation use the 1vX champion-role/build prior, champion/build identity
+Default training and evaluation use the 1vX champion-role/build prior, champion/build identity
 embeddings, the production Loadout head, the production patch-only Temporal
 head, the promoted learned semantic MoE over all three frozen identity encoders
 (`static`, `full_game`, and `temporal`), and team-swap augmentation. Legacy
@@ -81,8 +92,8 @@ part of the default production model when the v30 cache provides
 
 ## Production Status
 
-Hard acceptance remains overall raw validation accuracy `>=60%` and overall raw
-test accuracy `>=60%` on held-out splits. The current promoted production model
+Hard acceptance remains overall raw test accuracy `>=60%` on the per-patch
+test split. The current promoted production model
 does not meet that gate yet, but it is the strongest no-relationship checkpoint
 installed locally and the first production artifact to consume all three frozen
 identity encoders through the semantic MoE.
@@ -399,7 +410,7 @@ flowchart TD
 | [../loadout_patch_features.py](../loadout_patch_features.py) | Production train-only loadout priors and patch-only temporal feature extraction. |
 | [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and sidecar metadata. |
 | [../dataset.py](../dataset.py) | Cache loader and split dataclass. |
-| [../train.py](../train.py) | Production training, validation, and semantic gap diagnostics. |
+| [../train.py](../train.py) | Production training, test-split selection, and semantic gap diagnostics. |
 | [../predictor.py](../predictor.py) | Draft-time runtime bridge. |
 
 ## Throughput Default
@@ -431,12 +442,12 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 
 | Area | Default |
 | --- | --- |
-| Checkpoint selection | validation accuracy |
+| Checkpoint selection | raw test accuracy (test is the model-selection split) |
 | Training batch size / throughput | `16384`; `51,505` augmented samples/s on the 2026-06-10 local RTX 5070 Ti sweep for the current 128x32 recipe. |
 | Learning rate / patience / weight decay | `3e-4` / `5` / `0.0` |
-| Report-only temperature scaling | Fit on validation logits only; never changes served probabilities. |
+| Report-only temperature scaling | Fit on test logits only; never changes served probabilities. |
 | Raw tensor cache device | `cpu`; model-device caching is an explicit throughput sweep option. |
-| Test evaluation | Off by default; `--eval-test` is required after validation selection. Routine training does not tensor-cache, evaluate, or write test metrics; shared cache files may still be opened as memmaps. |
+| Test evaluation | Always on: test is tensor-cached, evaluated every epoch, and written to metrics with `selection_split: "test"`. |
 | Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required for promotion. |
 | Direct 1v1/2vX integrations | Removed from the model, cache, priors, and predictor. |
 | Loadout head | Production validation-on with v30 cache metadata and `loadout_features.npy`; current RL serving bridge rejects checkpoints that require it. |
@@ -446,7 +457,7 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 | Learned semantic MoE head over all three identity sidecars | Enabled by default with `convex_encoder_mix`. |
 | Semantic group features and relationship head | Enabled by default for the learned semantic MoE. |
 
-Invalid training config combinations fail early in `app/ml/train.py`. Test
-labels are not used for threshold selection, temperature fitting, checkpoint
-selection, or model selection, and routine training does not evaluate or write
-the test split unless `--eval-test` is set.
+Invalid training config combinations fail early in `app/ml/train.py`. Under
+the per-patch protocol the test split drives checkpoint selection, threshold
+selection, and report-only temperature fitting; it is a selection split, not a
+final untouched holdout.

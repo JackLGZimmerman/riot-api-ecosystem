@@ -17,13 +17,13 @@ SIDE_DIMS = {"static": 2, "full_game": 3, "temporal": 4}
 
 
 def _write_compact_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12, rng):
-    splits = {"train": 8, "val": 2, "test": 2}
+    splits = {"train": 8, "test": 4}
     build_vocab = ["b0", "b1", "b2"]
     n_builds = len(build_vocab)
 
     champion_id = rng.integers(1, n_champions, size=(n_games, 10)).astype(np.int16)
     build_id = rng.integers(0, n_builds, size=(n_games, 10)).astype(np.int16)
-    # Both classes in every split (val/test have exactly two rows).
+    # Alternating labels keep both classes in each split range.
     blue_win = np.tile([0, 1], n_games // 2).astype(np.uint8)
 
     arrays = {
@@ -80,7 +80,7 @@ def _write_compact_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12
 
     offset = 0
     split_ranges = {}
-    for name in ("train", "val", "test"):
+    for name in ("train", "test"):
         split_ranges[name] = {"start": offset, "stop": offset + splits[name]}
         offset += splits[name]
     (cache_dir / "cache_meta.json").write_text(
@@ -89,7 +89,7 @@ def _write_compact_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12
                 "format": CACHE_FORMAT,
                 "n_games": n_games,
                 "splits": splits,
-                "split_order": ["train", "val", "test"],
+                "split_order": ["train", "test"],
                 "split_ranges": split_ranges,
                 "identity": {
                     "n_champions": n_champions,
@@ -153,10 +153,11 @@ def test_train_gathers_sidecar_for_learned_moe_from_artifact_without_per_game_ar
     assert model.learned_semantic_moe is not None
 
     metrics = json.loads(metrics_path.read_text())
-    assert metrics["evaluated_splits"] == ["train", "val"]
-    assert "test" not in metrics
+    assert metrics["evaluated_splits"] == ["train", "test"]
+    assert metrics["selection_split"] == "test"
+    assert "val" not in metrics
     assert "semantic_moe_view_top_k" not in metrics["model_config"]
-    for split_name in ("train", "val"):
+    for split_name in ("train", "test"):
         logit_diagnostics = metrics[split_name]["logit_diagnostics"]
         assert set(logit_diagnostics) == {
             "base_logit_std",
@@ -190,7 +191,6 @@ def test_train_gathers_sidecar_and_semantic_group_features_from_compact_cache(
             max_epochs=1,
             patience=1,
             device="cpu",
-            eval_test=True,
         ),
         model_overrides={
             "use_learned_semantic_moe": True,
@@ -218,7 +218,7 @@ def test_train_gathers_sidecar_and_semantic_group_features_from_compact_cache(
     assert model.learned_semantic_moe is not None
 
     metrics = json.loads(metrics_path.read_text())
-    for split_name in ("train", "val", "test"):
+    for split_name in ("train", "test"):
         moe_diagnostics = metrics[split_name]["semantic_moe_diagnostics"]
         assert moe_diagnostics["group_features_enabled"] == 1.0
         assert moe_diagnostics["group_feature_dim"] > 0

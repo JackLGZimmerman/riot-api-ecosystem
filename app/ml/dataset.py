@@ -14,26 +14,8 @@ from app.ml.cache_layout import (
 from app.ml.config import DatasetConfig
 from app.ml.semantic_group_features import materialize_semantic_group_feature_cache
 
-LEGACY_CACHE_FORMATS = frozenset(
-    {
-        "npy-memmap-v15",
-        "npy-memmap-v17",
-        "npy-memmap-v18",
-        "npy-memmap-v19",
-        "npy-memmap-v20",
-        "npy-memmap-v21",
-        "npy-memmap-v23",
-        "npy-memmap-v24",
-        "npy-memmap-v25",
-        "npy-memmap-v26",
-        "npy-memmap-v27",
-        "npy-memmap-v28",
-        "npy-memmap-v29",
-        "npy-memmap-v30",
-    }
-)
 COUNT_ARRAY_NAMES = ("p1_cnt",)
-SPLIT_ORDER = ("train", "val", "test")
+SPLIT_ORDER = ("train", "test")
 
 
 @dataclass(frozen=True)
@@ -122,15 +104,15 @@ def _split_counts(meta: dict, n_games: int) -> dict[str, int]:
     return counts
 
 
-def _split_order(meta: dict) -> tuple[str, str, str]:
+def _split_order(meta: dict) -> tuple[str, str]:
     raw = meta.get("split_order", SPLIT_ORDER)
     order = tuple(str(name) for name in raw)
     if sorted(order) != sorted(SPLIT_ORDER):
         raise ValueError(
-            "Cache split_order is invalid; expected train, val, and test. "
+            "Cache split_order is invalid; expected train and test. "
             "Rebuild the cache."
         )
-    return (order[0], order[1], order[2])
+    return (order[0], order[1])
 
 
 def _range_pair(raw: object) -> tuple[int, int]:
@@ -198,15 +180,11 @@ def load_splits(
 ) -> dict[str, SplitData]:
     meta = json.loads((cfg.cache_dir / CACHE_META_FILE).read_text())
     cache_format = meta.get("format")
-    if cache_format != CACHE_FORMAT and cache_format not in LEGACY_CACHE_FORMATS:
+    if cache_format != CACHE_FORMAT:
         raise ValueError(
             f"Dataset cache format is stale (found {cache_format}, "
-            f"expected {CACHE_FORMAT}); rebuild the cache."
-        )
-    if require_counts and cache_format == "npy-memmap-v15":
-        raise ValueError(
-            f"Dataset cache format {cache_format} does not include support counts; "
-            "rebuild the cache."
+            f"expected {CACHE_FORMAT}); rebuild the cache with the per-patch "
+            "train/test split."
         )
 
     n = int(meta["n_games"])

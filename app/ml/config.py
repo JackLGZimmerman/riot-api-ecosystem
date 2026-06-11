@@ -39,8 +39,7 @@ class DatasetConfig:
     player_prior_dict: str = PLAYER_PRIOR_DICT
     player_champ_prior_dict: str = PLAYER_CHAMP_PRIOR_DICT
     player_role_prior_dict: str = PLAYER_ROLE_PRIOR_DICT
-    val_fraction: float = 0.1
-    test_fraction: float = 0.1
+    test_fraction: float = 0.2
     smoothing_prior_mean: float = 0.5
     smoothing_prior_strength: float = 20.0
     # Dynamic low-sample weighting. The prior strength applied to each
@@ -101,9 +100,6 @@ class TrainConfig:
     raw_tensor_cache_device: str = "cpu"
     seed: int = 0
     max_grad_norm: float | None = 1.0
-    # Routine candidate runs stay validation-only. Use eval_test only after a
-    # validation-selected final candidate is ready for the held-out test read.
-    eval_test: bool = False
     # Production artifact paths are the load/serve defaults, not routine train
     # outputs. Promotion runs must opt in before overwriting them.
     allow_production_artifact_overwrite: bool = False

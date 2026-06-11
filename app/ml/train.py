@@ -405,7 +405,7 @@ def _logit_nll(
 
 
 def _fit_temperature(logits: np.ndarray, targets: np.ndarray) -> float:
-    """Fit one scalar temperature on validation logits only.
+    """Fit one scalar temperature on the selection split's logits only.
 
     This is deliberately report-only: saved checkpoints and predictor outputs
     continue to use the raw logits/probabilities unless a future runtime plan
@@ -1551,7 +1551,7 @@ def train(
     raw_cache_device = "cpu" if train_cfg.raw_tensor_cache_device == "cpu" else device
     tensor_splits = {
         name: _cache_raw_tensor_split(name, splits[name], device=raw_cache_device)
-        for name in ("train", "val")
+        for name in ("train", "test")
     }
 
     model = HGNNWinModel(model_config).to(device)
@@ -1576,9 +1576,9 @@ def train(
     rng = np.random.default_rng(train_cfg.seed)
     semantic_moe_enabled = bool(model_config.use_learned_semantic_moe)
     best_state = copy.deepcopy(model.state_dict())
-    best_val_nll = math.inf
-    best_checkpoint_val_nll = math.inf
-    best_checkpoint_val_ece = math.inf
+    best_test_nll = math.inf
+    best_checkpoint_test_nll = math.inf
+    best_checkpoint_test_ece = math.inf
     best_checkpoint_accuracy = -math.inf
     best_epoch = 0
     best_threshold = 0.5
@@ -1586,7 +1586,7 @@ def train(
     history: list[dict[str, float | int]] = []
 
     logger.info(
-        "HGNN training device=%s raw_tensor_cache_device=%s batch_size=%s requested_batch_size=%s train_batch_cap=%s train_epoch_max_games=%s max_epochs=%s strength=%s checkpoint=val_accuracy",
+        "HGNN training device=%s raw_tensor_cache_device=%s batch_size=%s requested_batch_size=%s train_batch_cap=%s train_epoch_max_games=%s max_epochs=%s strength=%s checkpoint=test_accuracy",
         device,
         raw_cache_device,
         train_batch_size,
@@ -1604,59 +1604,59 @@ def train(
             torch.cuda.synchronize()
 
     if train_cfg.warm_start_model_path is not None:
-        val_outputs = _predict_hgnn_outputs(
+        test_outputs = _predict_hgnn_outputs(
             model,
-            tensor_splits["val"],
+            tensor_splits["test"],
             batch_size=train_cfg.batch_size,
             strength=strength,
             device=device,
             gatherer=gatherer,
         )
-        val_logits = val_outputs["final_logit"]
-        val_predictions = _sigmoid_np(val_logits)
-        val_metrics = _evaluate_predictions(val_predictions, splits["val"])
+        test_logits = test_outputs["final_logit"]
+        test_predictions = _sigmoid_np(test_logits)
+        test_metrics = _evaluate_predictions(test_predictions, splits["test"])
         if load_semantic_group_features:
-            val_metrics.update(
+            test_metrics.update(
                 _semantic_context_gap_metrics(
-                    val_outputs["focus_side_probability"],
-                    splits["val"],
+                    test_outputs["focus_side_probability"],
+                    splits["test"],
                     build_vocab=tuple(model_config.build_vocab),
                     min_count=train_cfg.semantic_context_metric_min_count,
                 )
             )
-            val_metrics.update(
+            test_metrics.update(
                 _semantic_group_eb_gap_metrics(
-                    val_outputs["focus_side_probability"],
-                    splits["val"],
+                    test_outputs["focus_side_probability"],
+                    splits["test"],
                     build_vocab=tuple(model_config.build_vocab),
                 )
             )
-        val_threshold, val_threshold_accuracy = _select_threshold(
-            val_predictions,
-            splits["val"].blue_win,
+        test_threshold, test_threshold_accuracy = _select_threshold(
+            test_predictions,
+            splits["test"].blue_win,
         )
-        best_val_nll = float(val_metrics["nll"])
-        best_checkpoint_val_nll = float(val_metrics["nll"])
-        best_checkpoint_val_ece = float(val_metrics["ece"])
-        best_checkpoint_accuracy = float(val_metrics["accuracy"])
+        best_test_nll = float(test_metrics["nll"])
+        best_checkpoint_test_nll = float(test_metrics["nll"])
+        best_checkpoint_test_ece = float(test_metrics["ece"])
+        best_checkpoint_accuracy = float(test_metrics["accuracy"])
         best_epoch = 0
-        best_threshold = val_threshold
+        best_threshold = test_threshold
         best_state = copy.deepcopy(model.state_dict())
-        if "context_gap_mse" in val_metrics:
+        if "context_gap_mse" in test_metrics:
             logger.info(
-                "epoch=0 warm_start val_nll=%.5f val_context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f",
-                val_metrics["nll"],
-                val_metrics["context_gap_mse"],
-                val_metrics["context_mean_abs_gap"],
-                val_metrics["context_max_abs_gap"],
+                "epoch=0 warm_start test_nll=%.5f test_context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f",
+                test_metrics["nll"],
+                test_metrics["context_gap_mse"],
+                test_metrics["context_mean_abs_gap"],
+                test_metrics["context_max_abs_gap"],
             )
         else:
             logger.info(
-                "epoch=0 warm_start val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
-                val_metrics["nll"],
-                val_metrics["accuracy"],
-                val_threshold,
-                val_threshold_accuracy,
+                "epoch=0 warm_start test_nll=%.5f test_acc=%.4f test_thr=%.3f test_thr_acc=%.4f",
+                test_metrics["nll"],
+                test_metrics["accuracy"],
+                test_threshold,
+                test_threshold_accuracy,
             )
 
     for epoch in range(1, train_cfg.max_epochs + 1):
@@ -1721,62 +1721,62 @@ def train(
 
         synchronize_training_device()
         train_seconds = time.perf_counter() - train_started
-        val_started = time.perf_counter()
-        val_outputs = _predict_hgnn_outputs(
+        test_started = time.perf_counter()
+        test_outputs = _predict_hgnn_outputs(
             model,
-            tensor_splits["val"],
+            tensor_splits["test"],
             batch_size=train_cfg.batch_size,
             strength=strength,
             device=device,
             gatherer=gatherer,
         )
         synchronize_training_device()
-        val_logits = val_outputs["final_logit"]
-        val_predictions = _sigmoid_np(val_logits)
+        test_logits = test_outputs["final_logit"]
+        test_predictions = _sigmoid_np(test_logits)
         train_nll = train_loss_sum / max(train_seen, 1)
         train_semantic_moe_regularization_loss = (
             train_semantic_moe_regularization_loss_sum / max(train_seen, 1)
         )
-        val_metrics = _evaluate_predictions(val_predictions, splits["val"])
+        test_metrics = _evaluate_predictions(test_predictions, splits["test"])
         if load_semantic_group_features:
-            val_metrics.update(
+            test_metrics.update(
                 _semantic_context_gap_metrics(
-                    val_outputs["focus_side_probability"],
-                    splits["val"],
+                    test_outputs["focus_side_probability"],
+                    splits["test"],
                     build_vocab=tuple(model_config.build_vocab),
                     min_count=train_cfg.semantic_context_metric_min_count,
                 )
             )
-            val_metrics.update(
+            test_metrics.update(
                 _semantic_group_eb_gap_metrics(
-                    val_outputs["focus_side_probability"],
-                    splits["val"],
+                    test_outputs["focus_side_probability"],
+                    splits["test"],
                     build_vocab=tuple(model_config.build_vocab),
                 )
             )
-        val_seconds = time.perf_counter() - val_started
+        test_seconds = time.perf_counter() - test_started
         epoch_seconds = time.perf_counter() - epoch_started
         train_rows_per_second = (train_seen / 2.0) / max(train_seconds, EPS)
         train_epoch_games_seen = int(train_seen // 2)
         train_augmented_samples_per_second = train_seen / max(train_seconds, EPS)
-        val_nll = float(val_metrics["nll"])
-        val_threshold, val_threshold_accuracy = _select_threshold(
-            val_predictions,
-            splits["val"].blue_win,
+        test_nll = float(test_metrics["nll"])
+        test_threshold, test_threshold_accuracy = _select_threshold(
+            test_predictions,
+            splits["test"].blue_win,
         )
-        checkpoint_accuracy = float(val_metrics["accuracy"])
+        checkpoint_accuracy = float(test_metrics["accuracy"])
         history_row: dict[str, float | int] = {
             "epoch": epoch,
             "train_nll": train_nll,
-            "val_nll": val_nll,
-            "val_accuracy": float(val_metrics["accuracy"]),
-            "val_auc": float(val_metrics["auc"]),
-            "val_ece": float(val_metrics["ece"]),
-            "val_threshold": val_threshold,
-            "val_threshold_accuracy": val_threshold_accuracy,
+            "test_nll": test_nll,
+            "test_accuracy": float(test_metrics["accuracy"]),
+            "test_auc": float(test_metrics["auc"]),
+            "test_ece": float(test_metrics["ece"]),
+            "test_threshold": test_threshold,
+            "test_threshold_accuracy": test_threshold_accuracy,
             "checkpoint_accuracy": checkpoint_accuracy,
             "train_seconds": train_seconds,
-            "val_seconds": val_seconds,
+            "test_seconds": test_seconds,
             "epoch_seconds": epoch_seconds,
             "train_rows_per_second": train_rows_per_second,
             "train_epoch_games_seen": train_epoch_games_seen,
@@ -1786,46 +1786,46 @@ def train(
             "train_augmented_samples_per_second": train_augmented_samples_per_second,
             "train_batch_size": train_batch_size,
         }
-        if "context_gap_mse" in val_metrics:
-            history_row["val_context_gap_mse"] = float(val_metrics["context_gap_mse"])
-            history_row["val_context_mean_abs_gap"] = float(
-                val_metrics["context_mean_abs_gap"]
+        if "context_gap_mse" in test_metrics:
+            history_row["test_context_gap_mse"] = float(test_metrics["context_gap_mse"])
+            history_row["test_context_mean_abs_gap"] = float(
+                test_metrics["context_mean_abs_gap"]
             )
-            history_row["val_context_max_abs_gap"] = float(
-                val_metrics["context_max_abs_gap"]
+            history_row["test_context_max_abs_gap"] = float(
+                test_metrics["context_max_abs_gap"]
             )
-            history_row["val_context_support_weighted_gap_mse"] = float(
-                val_metrics["context_support_weighted_gap_mse"]
+            history_row["test_context_support_weighted_gap_mse"] = float(
+                test_metrics["context_support_weighted_gap_mse"]
             )
-            history_row["val_context_support_weighted_mean_abs_gap"] = float(
-                val_metrics["context_support_weighted_mean_abs_gap"]
+            history_row["test_context_support_weighted_mean_abs_gap"] = float(
+                test_metrics["context_support_weighted_mean_abs_gap"]
             )
-            history_row["val_context_high_support_gap_mse"] = float(
-                val_metrics["context_high_support_gap_mse"]
+            history_row["test_context_high_support_gap_mse"] = float(
+                test_metrics["context_high_support_gap_mse"]
             )
-            history_row["val_context_high_support_p95_abs_gap"] = float(
-                val_metrics["context_high_support_p95_abs_gap"]
+            history_row["test_context_high_support_p95_abs_gap"] = float(
+                test_metrics["context_high_support_p95_abs_gap"]
             )
-            history_row["val_context_high_support_max_abs_gap"] = float(
-                val_metrics["context_high_support_max_abs_gap"]
+            history_row["test_context_high_support_max_abs_gap"] = float(
+                test_metrics["context_high_support_max_abs_gap"]
             )
-            history_row["val_context_high_support_populated_bins"] = int(
-                val_metrics["context_high_support_populated_bins"]
+            history_row["test_context_high_support_populated_bins"] = int(
+                test_metrics["context_high_support_populated_bins"]
             )
-        if "group_systematic_gap_mse" in val_metrics:
-            history_row["val_group_eb_gap_mse"] = float(val_metrics["group_eb_gap_mse"])
-            history_row["val_group_eb_floor"] = float(val_metrics["group_eb_floor"])
-            history_row["val_group_floor_normalized_eb_gap"] = float(
-                val_metrics["group_eb_gap_mse"]
-            ) / max(float(val_metrics["group_eb_floor"]), EPS)
-            history_row["val_group_systematic_gap_mse"] = float(
-                val_metrics["group_systematic_gap_mse"]
+        if "group_systematic_gap_mse" in test_metrics:
+            history_row["test_group_eb_gap_mse"] = float(test_metrics["group_eb_gap_mse"])
+            history_row["test_group_eb_floor"] = float(test_metrics["group_eb_floor"])
+            history_row["test_group_floor_normalized_eb_gap"] = float(
+                test_metrics["group_eb_gap_mse"]
+            ) / max(float(test_metrics["group_eb_floor"]), EPS)
+            history_row["test_group_systematic_gap_mse"] = float(
+                test_metrics["group_systematic_gap_mse"]
             )
-            history_row["val_group_systematic_gap_mse_clipped"] = float(
-                val_metrics["group_systematic_gap_mse_clipped"]
+            history_row["test_group_systematic_gap_mse_clipped"] = float(
+                test_metrics["group_systematic_gap_mse_clipped"]
             )
-            history_row["val_group_eb_mean_abs_gap"] = float(
-                val_metrics["group_eb_mean_abs_gap"]
+            history_row["test_group_eb_mean_abs_gap"] = float(
+                test_metrics["group_eb_mean_abs_gap"]
             )
         if semantic_moe_enabled:
             history_row["train_semantic_moe_regularization_loss"] = (
@@ -1834,63 +1834,63 @@ def train(
         history.append(history_row)
         if semantic_moe_enabled:
             logger.info(
-                "epoch=%s train_nll=%.5f semantic_moe_reg=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
+                "epoch=%s train_nll=%.5f semantic_moe_reg=%.5f test_nll=%.5f test_acc=%.4f test_thr=%.3f test_thr_acc=%.4f",
                 epoch,
                 train_nll,
                 train_semantic_moe_regularization_loss,
-                val_nll,
-                val_metrics["accuracy"],
-                val_threshold,
-                val_threshold_accuracy,
+                test_nll,
+                test_metrics["accuracy"],
+                test_threshold,
+                test_threshold_accuracy,
             )
         else:
             logger.info(
-                "epoch=%s train_nll=%.5f val_nll=%.5f val_acc=%.4f val_thr=%.3f val_thr_acc=%.4f",
+                "epoch=%s train_nll=%.5f test_nll=%.5f test_acc=%.4f test_thr=%.3f test_thr_acc=%.4f",
                 epoch,
                 train_nll,
-                val_nll,
-                val_metrics["accuracy"],
-                val_threshold,
-                val_threshold_accuracy,
+                test_nll,
+                test_metrics["accuracy"],
+                test_threshold,
+                test_threshold_accuracy,
             )
-        if "context_gap_mse" in val_metrics:
+        if "context_gap_mse" in test_metrics:
             logger.info(
-                "epoch=%s val_context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f high_support_max_abs=%.3f high_support_bins=%s",
+                "epoch=%s test_context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f high_support_max_abs=%.3f high_support_bins=%s",
                 epoch,
-                val_metrics["context_gap_mse"],
-                val_metrics["context_mean_abs_gap"],
-                val_metrics["context_max_abs_gap"],
-                val_metrics["context_high_support_max_abs_gap"],
-                val_metrics["context_high_support_populated_bins"],
+                test_metrics["context_gap_mse"],
+                test_metrics["context_mean_abs_gap"],
+                test_metrics["context_max_abs_gap"],
+                test_metrics["context_high_support_max_abs_gap"],
+                test_metrics["context_high_support_populated_bins"],
             )
-        if "group_systematic_gap_mse" in val_metrics:
+        if "group_systematic_gap_mse" in test_metrics:
             logger.info(
-                "epoch=%s val_group_systematic_gap_mse=%.4f eb_mse=%.4f mean_abs=%.3f max_abs=%.3f",
+                "epoch=%s test_group_systematic_gap_mse=%.4f eb_mse=%.4f mean_abs=%.3f max_abs=%.3f",
                 epoch,
-                val_metrics["group_systematic_gap_mse"],
-                val_metrics["group_eb_gap_mse"],
-                val_metrics["group_eb_mean_abs_gap"],
-                val_metrics["group_eb_max_abs_gap"],
+                test_metrics["group_systematic_gap_mse"],
+                test_metrics["group_eb_gap_mse"],
+                test_metrics["group_eb_mean_abs_gap"],
+                test_metrics["group_eb_max_abs_gap"],
             )
         logger.info(
-            "epoch=%s timing train_seconds=%.2f val_seconds=%.2f epoch_seconds=%.2f train_games=%s train_rows_per_s=%.1f train_augmented_samples_per_s=%.1f batch_size=%s",
+            "epoch=%s timing train_seconds=%.2f test_seconds=%.2f epoch_seconds=%.2f train_games=%s train_rows_per_s=%.1f train_augmented_samples_per_s=%.1f batch_size=%s",
             epoch,
             train_seconds,
-            val_seconds,
+            test_seconds,
             epoch_seconds,
             train_epoch_games_seen,
             train_rows_per_second,
             train_augmented_samples_per_second,
             train_batch_size,
         )
-        if val_nll < best_val_nll:
-            best_val_nll = val_nll
+        if test_nll < best_test_nll:
+            best_test_nll = test_nll
         if checkpoint_accuracy > best_checkpoint_accuracy:
             best_checkpoint_accuracy = checkpoint_accuracy
-            best_checkpoint_val_nll = val_nll
-            best_checkpoint_val_ece = float(val_metrics["ece"])
+            best_checkpoint_test_nll = test_nll
+            best_checkpoint_test_ece = float(test_metrics["ece"])
             best_epoch = epoch
-            best_threshold = val_threshold
+            best_threshold = test_threshold
             best_state = copy.deepcopy(model.state_dict())
             stale_epochs = 0
         else:
@@ -1901,14 +1901,8 @@ def train(
     model.load_state_dict(best_state)
     save_hgnn_model(train_cfg.model_path, model, confidence_strength=strength)
 
-    prediction_split_names = ("train", "val") + (
-        ("test",) if train_cfg.eval_test else ()
-    )
+    prediction_split_names = ("train", "test")
     prediction_tensor_splits = dict(tensor_splits)
-    if train_cfg.eval_test:
-        prediction_tensor_splits["test"] = _cache_raw_tensor_split(
-            "test", splits["test"], device=raw_cache_device
-        )
     prediction_outputs = {
         split_name: _predict_hgnn_outputs(
             model,
@@ -1924,7 +1918,7 @@ def train(
         split_name: outputs["final_logit"]
         for split_name, outputs in prediction_outputs.items()
     }
-    temperature = _fit_temperature(prediction_logits["val"], splits["val"].blue_win)
+    temperature = _fit_temperature(prediction_logits["test"], splits["test"].blue_win)
     predictions = {
         split_name: _sigmoid_np(logits)
         for split_name, logits in prediction_logits.items()
@@ -1982,24 +1976,23 @@ def train(
         "metrics_path": train_cfg.metrics_path,
         "device": device,
         "best_epoch": best_epoch,
-        "best_val_nll": best_val_nll,
-        "best_checkpoint_val_nll": best_checkpoint_val_nll,
-        "best_checkpoint_val_ece": best_checkpoint_val_ece,
+        "selection_split": "test",
+        "best_test_nll": best_test_nll,
+        "best_checkpoint_test_nll": best_checkpoint_test_nll,
+        "best_checkpoint_test_ece": best_checkpoint_test_ece,
         "best_checkpoint_accuracy": best_checkpoint_accuracy,
         "decision_threshold": best_threshold,
         "temperature_scaling": {
             "temperature": temperature,
-            "fit_split": "val",
+            "fit_split": "test",
             "report_only": True,
         },
         "elapsed_seconds": time.monotonic() - started,
         "history": history,
         "evaluated_splits": list(prediction_split_names),
         "train": split_metrics["train"],
-        "val": split_metrics["val"],
+        "test": split_metrics["test"],
     }
-    if train_cfg.eval_test:
-        metrics["test"] = split_metrics["test"]
     _write_metrics(train_cfg.metrics_path, metrics)
 
     logger.info("Saved HGNN model: %s", _project_relative(train_cfg.model_path))
@@ -2173,15 +2166,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
             "Where raw split tensors are cached before minibatch indexing. "
             "'cpu' moves only minibatches to the model device; 'model' keeps "
             "the full raw cache on the model device for explicit sweeps."
-        ),
-    )
-    parser.add_argument(
-        "--eval-test",
-        action="store_true",
-        default=train_defaults.eval_test,
-        help=(
-            "Evaluate and write held-out test metrics. Use only after selecting "
-            "a final candidate from validation."
         ),
     )
     parser.add_argument(
@@ -2422,7 +2406,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
             raw_tensor_cache_device=args.raw_tensor_cache_device,
             seed=args.seed,
             max_grad_norm=args.max_grad_norm,
-            eval_test=args.eval_test,
             allow_production_artifact_overwrite=(
                 args.allow_production_artifact_overwrite
             ),

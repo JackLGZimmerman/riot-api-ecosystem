@@ -77,18 +77,18 @@ def test_temperature_scaling_is_report_only_and_keeps_raw_threshold_path() -> No
     assert np.allclose(raw, _sigmoid_np(logits))
 
 
-def test_threshold_and_temperature_are_fit_from_validation_arrays_only() -> None:
-    val_logits = np.array([-3.0, -1.0, 1.0, 3.0])
-    val_labels = np.array([0, 0, 1, 1], dtype=np.float64)
-    test_labels = 1.0 - val_labels
+def test_threshold_and_temperature_are_fit_from_selection_split_arrays_only() -> None:
+    selection_logits = np.array([-3.0, -1.0, 1.0, 3.0])
+    selection_labels = np.array([0, 0, 1, 1], dtype=np.float64)
+    other_labels = 1.0 - selection_labels
 
-    val_raw = _sigmoid_np(val_logits)
-    threshold, threshold_acc = _select_threshold(val_raw, val_labels)
-    temperature = _fit_temperature(val_logits, val_labels)
+    selection_raw = _sigmoid_np(selection_logits)
+    threshold, threshold_acc = _select_threshold(selection_raw, selection_labels)
+    temperature = _fit_temperature(selection_logits, selection_labels)
 
     assert threshold_acc == 1.0
-    assert _threshold_accuracy(val_raw, test_labels, threshold) == 0.0
-    assert temperature == _fit_temperature(val_logits, val_labels)
+    assert _threshold_accuracy(selection_raw, other_labels, threshold) == 0.0
+    assert temperature == _fit_temperature(selection_logits, selection_labels)
 
 
 def test_prior_1vx_support_bucket_metrics_expose_variance_risk() -> None:
@@ -174,11 +174,11 @@ def test_semantic_moe_head_fails_early_without_sidecar_cache_arrays() -> None:
 
 
 def test_output_diagnostics_include_logit_std_and_semantic_moe_stats() -> None:
-    split_metrics: dict[str, dict[str, object]] = {"val": {}}
+    split_metrics: dict[str, dict[str, object]] = {"test": {}}
     _attach_output_diagnostics(
         split_metrics,
         {
-            "val": {
+            "test": {
                 "base_logit": np.array([-1.0, 0.0, 1.0]),
                 "context_logit": np.array([0.2, 0.0, -0.2]),
                 "final_logit": np.array([-0.8, 0.0, 0.8]),
@@ -199,13 +199,13 @@ def test_output_diagnostics_include_logit_std_and_semantic_moe_stats() -> None:
         },
     )
 
-    logit_diagnostics = split_metrics["val"]["logit_diagnostics"]
+    logit_diagnostics = split_metrics["test"]["logit_diagnostics"]
     assert isinstance(logit_diagnostics, dict)
     assert logit_diagnostics["base_logit_std"] == pytest.approx(np.sqrt(2.0 / 3.0))
     assert logit_diagnostics["context_logit_std"] == pytest.approx(np.sqrt(0.08 / 3.0))
     assert logit_diagnostics["final_logit_std"] == pytest.approx(np.sqrt(1.28 / 3.0))
 
-    moe = split_metrics["val"]["semantic_moe_diagnostics"]
+    moe = split_metrics["test"]["semantic_moe_diagnostics"]
     assert isinstance(moe, dict)
     assert np.allclose(moe["expert_usage"], [0.2, 0.5, 0.3])
     assert np.allclose(moe["expert_selected_fraction"], [0.5, 1.0, 0.5])
@@ -220,11 +220,10 @@ def test_output_diagnostics_include_logit_std_and_semantic_moe_stats() -> None:
 def test_training_target_validation_catches_degenerate_cache_split() -> None:
     splits = {
         "train": _split(np.array([0, 1], dtype=np.float64)),
-        "val": _split(np.zeros(3, dtype=np.float64)),
-        "test": _split(np.array([0, 1], dtype=np.float64)),
+        "test": _split(np.zeros(3, dtype=np.float64)),
     }
 
-    with pytest.raises(ValueError, match="val split has degenerate blue_win labels"):
+    with pytest.raises(ValueError, match="test split has degenerate blue_win labels"):
         _validate_split_targets(splits)
 
 
@@ -399,8 +398,8 @@ def test_train_group_eb_metrics_match_formal_group_audit_lens(tmp_path) -> None:
         json.dumps(
             {
                 "n_games": n,
-                "splits": {"train": n, "val": 0, "test": 0},
-                "split_order": ["train", "val", "test"],
+                "splits": {"train": n, "test": 0},
+                "split_order": ["train", "test"],
                 "identity": {"build_vocab": list(PRODUCTION_BUILD_VOCAB)},
             }
         ),

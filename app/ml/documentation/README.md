@@ -1,6 +1,6 @@
 # ML Win-Rate Model
 
-As of 2026-06-10, production validation uses champion/build identity embeddings on top of
+As of 2026-06-10, the production model uses champion/build identity embeddings on top of
 the smoothed 1vX champion-role/build prior, the production Loadout head, the bounded
 patch-only Temporal head, and the promoted all-encoder learned semantic MoE over
 frozen static, full-game, and temporal identity latents. The old
@@ -40,17 +40,19 @@ uv run python -m app.ml.train \
   --metrics-path app/ml/data/experiments/manual/metrics.json
 ```
 
-Routine training tensor-caches train/validation splits and writes
-train/validation metrics only. Add `--eval-test` only after selecting a final
-candidate from validation, and add `--allow-production-artifact-overwrite` only
-for an explicit promotion run.
+Training tensor-caches the train and test splits, evaluates test every epoch,
+and selects the best checkpoint by raw test accuracy. Test is the
+model-selection split — checkpoint selection, decision threshold, and
+report-only temperature scaling are all fit on it — not a final untouched
+holdout. Add `--allow-production-artifact-overwrite` only for an explicit
+promotion run.
 
 Training writes:
 
 | File | Meaning |
 | --- | --- |
 | Candidate `model.pt` | HGNN config, confidence strength, and state dict |
-| Candidate `metrics.json` | Train/validation metrics and epoch history; test metrics only when `--eval-test` is set |
+| Candidate `metrics.json` | Train/test metrics and epoch history with `selection_split: "test"` |
 
 The promoted load paths remain `app/ml/data/hgnn_production_model.pt` and
 `app/ml/data/metrics_latest.json`. Runtime prediction uses `load_predictor()`
@@ -61,7 +63,9 @@ ids.
 
 ## Cache Contract
 
-The model consumes `npy-memmap-v30` cache arrays with 10 ordered slots:
+The model consumes `npy-memmap-v32` cache arrays with 10 ordered slots. Splits
+are per-patch chronological 80/20 train/test (no validation range); older
+caches with a validation split must be rebuilt:
 
 ```text
 0..4 = blue TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY
@@ -96,7 +100,7 @@ semantic MoE route.
 ## Training
 
 `app/ml/train.py` trains one production model shape with AdamW, team-swap
-augmentation, validation temperature diagnostics, and raw validation-accuracy
+augmentation, test-split temperature diagnostics, and raw test-accuracy
 checkpointing.
 
 Each batch is trained twice: original blue/red order with label `y`, and a
