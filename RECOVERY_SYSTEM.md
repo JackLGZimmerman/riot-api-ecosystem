@@ -42,8 +42,8 @@ Queue table: `game_data.matchdata_matchids`
 
 Flow:
 
-1. On first loader call in a matchdata run, seed queue from latest `matchids` run (`data_timestamps.name = 'matchids_puuids_ts'`), excluding only matchids already present in both `info` and `tl_game_end` and matchids already in the queue.
-2. Record a seed anchor (`data_timestamps.name = 'matchdata_seeded_matchids_run'`) so the same `matchids` run is not reseeded on restart.
+1. On first loader call in a matchdata run, seed queue from existing `game_data.matchids`, excluding only matchids already present in both `info` and `tl_game_end` and matchids already in the queue.
+2. Record a seed anchor (`data_timestamps.name = 'matchdata_seeded_available_matchids_run'`) tied to the latest `matchids_puuids_ts` run so the same available inventory is not reseeded on restart.
 3. Claim next `MATCHDATA_CLAIM_BATCH_SIZE` pending matchids (per-continent round-robin).
 4. Fetch non-timeline and timeline payloads concurrently.
 5. Persist parsed rows.

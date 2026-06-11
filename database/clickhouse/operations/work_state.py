@@ -11,7 +11,7 @@ from database.clickhouse.operations.matchids import PUUID_DATA_TIMESTAMP_NAME
 from database.clickhouse.operations.utils import dedupe_matchids, record_timestamp
 
 MATCHDATA_STATE_TABLE = "game_data.matchdata_matchids"
-MATCHDATA_SEEDED_RUN_NAME = "matchdata_seeded_matchids_run"
+MATCHDATA_AVAILABLE_SEEDED_NAME = "matchdata_seeded_available_matchids_run"
 CONTINENTS: tuple[str, ...] = tuple(c.value for c in Continent)
 REGIONS: tuple[str, ...] = tuple(r.value for r in Region)
 CONTINENT_SHARDS: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
@@ -50,13 +50,18 @@ def _load_latest_run_id(*, client, name: str) -> UUID | None:
     return None if not rows or rows[0][0] is None else rows[0][0]
 
 
-def _mark_seeded(run_id: UUID) -> None:
-    record_timestamp(MATCHDATA_SEEDED_RUN_NAME, run_id, int(time.time()))
-
-
 def _seed_candidates_select() -> str:
     return f"""
-        WITH info_matchids AS
+        WITH source_matchids AS
+        (
+            SELECT
+                any(run_id) AS run_id,
+                toString(matchid) AS matchid
+            FROM game_data.matchids
+            WHERE matchid != ''
+            GROUP BY matchid
+        ),
+        info_matchids AS
         (
             SELECT DISTINCT matchid FROM game_data.info WHERE matchid != ''
         ),
@@ -71,29 +76,29 @@ def _seed_candidates_select() -> str:
             INNER JOIN timeline_matchids USING (matchid)
         )
         SELECT DISTINCT
-            m.run_id AS run_id,
-            toString(m.matchid) AS matchid
-        FROM game_data.matchids AS m
-        WHERE m.run_id = %(run_id)s
-          AND toString(m.matchid) NOT IN completed_matchids
-          AND toString(m.matchid) NOT IN (
+            source_matchids.run_id AS run_id,
+            source_matchids.matchid AS matchid
+        FROM source_matchids
+        WHERE source_matchids.matchid NOT IN completed_matchids
+          AND source_matchids.matchid NOT IN (
               SELECT DISTINCT matchid FROM {MATCHDATA_STATE_TABLE}
           )
     """
 
 
-def seed_from_latest_matchids() -> int:
+def seed_from_matchids() -> int:
     client = get_client()
     latest_run_id = _load_latest_run_id(client=client, name=PUUID_DATA_TIMESTAMP_NAME)
     if latest_run_id is None:
         return 0
 
     if (
-        _load_latest_run_id(client=client, name=MATCHDATA_SEEDED_RUN_NAME)
+        _load_latest_run_id(client=client, name=MATCHDATA_AVAILABLE_SEEDED_NAME)
         == latest_run_id
     ):
         logger.debug(
-            "Matchdata seed skipped latest_run_id=%s (already seeded)", latest_run_id
+            "Matchdata seed skipped latest_run_id=%s (available inventory already seeded)",
+            latest_run_id,
         )
         return 0
 
@@ -102,24 +107,26 @@ def seed_from_latest_matchids() -> int:
         f"""
         SELECT count()
         FROM ({candidates_select})
-        """,
-        parameters={"run_id": latest_run_id},
+        """
     ).result_rows
     pending = int(rows[0][0]) if rows else 0
     if pending == 0:
-        _mark_seeded(latest_run_id)
+        record_timestamp(
+            MATCHDATA_AVAILABLE_SEEDED_NAME, latest_run_id, int(time.time())
+        )
         return 0
 
     client.command(
         f"""
         INSERT INTO {MATCHDATA_STATE_TABLE} (run_id, matchid)
         {candidates_select}
-        """,
-        parameters={"run_id": latest_run_id},
+        """
     )
-    _mark_seeded(latest_run_id)
+    record_timestamp(MATCHDATA_AVAILABLE_SEEDED_NAME, latest_run_id, int(time.time()))
     logger.debug(
-        "Seeded matchdata queue rows=%d latest_run_id=%s", pending, latest_run_id
+        "Seeded matchdata queue rows=%d latest_run_id=%s source=available_matchids",
+        pending,
+        latest_run_id,
     )
     return pending
 

@@ -68,7 +68,7 @@ from database.clickhouse.operations.utils import persist_data
 from database.clickhouse.operations.work_state import (
     claim_pending_matchids,
     mark_matchids_finished,
-    seed_from_latest_matchids,
+    seed_from_matchids,
 )
 
 logger = logging.getLogger(__name__)
@@ -341,7 +341,7 @@ class MatchDataLoader(Loader):
     def load(self, ctx: OrchestrationContext) -> MatchDataCollectorState:
         _ = ctx
         if not self._initialized:
-            seeded_pending = seed_from_latest_matchids()
+            seeded_pending = seed_from_matchids()
             if seeded_pending:
                 logger.info("MatchData loader seeded pending=%d", seeded_pending)
             self._initialized = True
