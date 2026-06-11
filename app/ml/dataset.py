@@ -30,14 +30,6 @@ class SplitData:
     # blue-minus-red; coverage columns are unsigned.
     loadout_features: np.ndarray | None = None
     patch_features: np.ndarray | None = None
-    # Draft-safe per-player priors [games, 10]: train-window smoothed overall
-    # rate/count, nested per-champion rate/count, and per-role experience
-    # count (v31). None for caches predating each array.
-    player_rate: np.ndarray | None = None
-    player_cnt: np.ndarray | None = None
-    player_champ_rate: np.ndarray | None = None
-    player_champ_cnt: np.ndarray | None = None
-    player_role_cnt: np.ndarray | None = None
     # Optional frozen three-encoder sidecar blocks; None for caches built
     # without an encoder_sidecar_path.
     identity_static_sidecar: np.ndarray | None = None
@@ -205,15 +197,7 @@ def load_splits(
             )
         else:
             arrays[name] = np.zeros(arrays["win_rate"].shape, dtype=np.float32)
-    for name in (
-        "champion_id",
-        "build_id",
-        "player_rate",
-        "player_cnt",
-        "player_champ_rate",
-        "player_champ_cnt",
-        "player_role_cnt",
-    ):
+    for name in ("champion_id", "build_id"):
         if paths[name].exists():
             arrays[name] = np.load(paths[name], mmap_mode="r")[:n]
     feature_meta = meta.get("production_features")

@@ -78,11 +78,6 @@ class RawTensorSplit:
     semantic_group_features: torch.Tensor | None = None
     loadout_features: torch.Tensor | None = None
     patch_features: torch.Tensor | None = None
-    player_rate: torch.Tensor | None = None
-    player_cnt: torch.Tensor | None = None
-    player_champ_rate: torch.Tensor | None = None
-    player_champ_cnt: torch.Tensor | None = None
-    player_role_cnt: torch.Tensor | None = None
 
 
 class _SidecarGatherer:
@@ -255,31 +250,7 @@ def _drop_unused_model_arrays(
         "semantic_group_features": not semantic_group_features_enabled,
         "loadout_features": int(config.loadout_feature_dim) <= 0,
         "patch_features": int(config.patch_feature_dim) <= 0,
-        "player_rate": not config.use_player_priors,
-        "player_cnt": not config.use_player_priors,
-        "player_champ_rate": not config.use_player_priors,
-        "player_champ_cnt": not config.use_player_priors,
-        # The role block exists only for player_prior_feature_dim > 8 (v31).
-        "player_role_cnt": not (
-            config.use_player_priors and int(config.player_prior_feature_dim) > 8
-        ),
     }
-    if config.use_player_priors:
-        required = [
-            "player_rate",
-            "player_cnt",
-            "player_champ_rate",
-            "player_champ_cnt",
-        ]
-        if int(config.player_prior_feature_dim) > 8:
-            required.append("player_role_cnt")
-        for name in required:
-            value = getattr(split, name)
-            if value is None or value.ndim != 2 or value.shape[1] != 10:
-                raise ValueError(
-                    f"HGNN config enables player priors, but the cache is missing "
-                    f"{name} [games, 10]; rebuild the dataset cache (v30+)."
-                )
     for name, dim in (
         ("loadout_features", int(config.loadout_feature_dim)),
         ("patch_features", int(config.patch_feature_dim)),
@@ -640,11 +611,6 @@ def _hgnn_inputs_from_raw(
         semantic_group_features=raw.semantic_group_features,
         loadout_features=raw.loadout_features,
         patch_features=raw.patch_features,
-        player_rate=raw.player_rate,
-        player_cnt=raw.player_cnt,
-        player_champ_rate=raw.player_champ_rate,
-        player_champ_cnt=raw.player_champ_cnt,
-        player_role_cnt=raw.player_role_cnt,
         device=device,
         **sidecar,
     )
@@ -1129,11 +1095,6 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "semantic_group_relationship_hidden": args.semantic_group_relationship_hidden,
         "semantic_group_relationship_dropout": args.semantic_group_relationship_dropout,
         "semantic_group_relationship_l2_weight": args.semantic_group_relationship_l2_weight,
-        "use_player_priors": args.use_player_priors,
-        "player_prior_mode": args.player_prior_mode,
-        "player_prior_hidden": args.player_prior_hidden,
-        "player_residual_hidden": args.player_residual_hidden,
-        "player_prior_feature_dim": args.player_prior_feature_dim,
     }
 
 
@@ -1366,47 +1327,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         "--semantic-group-relationship-l2-weight",
         type=float,
         default=model_defaults.semantic_group_relationship_l2_weight,
-    )
-    parser.add_argument(
-        "--use-player-priors",
-        action=argparse.BooleanOptionalAction,
-        default=model_defaults.use_player_priors,
-        help=(
-            "Feed draft-safe per-player priors (overall and per-champion "
-            "train-window record) through zero-initialised residual/node "
-            "paths. Requires a v30 cache."
-        ),
-    )
-    parser.add_argument(
-        "--player-prior-hidden",
-        type=_parse_int_tuple,
-        default=model_defaults.player_prior_hidden,
-        help="Comma-separated hidden sizes for the player prior encoder MLP.",
-    )
-    parser.add_argument(
-        "--player-prior-mode",
-        choices=("residual", "node", "both"),
-        default=model_defaults.player_prior_mode,
-        help=(
-            "residual: zero-init game-level head on blue-minus-red team means; "
-            "node: zero-init per-slot encoder into the phi node features; both."
-        ),
-    )
-    parser.add_argument(
-        "--player-residual-hidden",
-        type=_parse_int_tuple,
-        default=model_defaults.player_residual_hidden,
-        help="Comma-separated hidden sizes for the game-level player residual head.",
-    )
-    parser.add_argument(
-        "--player-prior-feature-dim",
-        type=int,
-        choices=(8, 11),
-        default=model_defaults.player_prior_feature_dim,
-        help=(
-            "8: overall + per-champion blocks (v30); 11 adds the per-role "
-            "experience block (v31 cache)."
-        ),
     )
     args = parser.parse_args()
     if args.use_semantic_group_features and not args.use_learned_semantic_moe:

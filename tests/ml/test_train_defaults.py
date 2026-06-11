@@ -63,7 +63,7 @@ def test_production_defaults_use_all_identity_encoders() -> None:
     assert train_cfg.raw_tensor_cache_device == "cpu"
     assert train_cfg.train_epoch_max_games is None
     assert not hasattr(train_cfg, "eval_test")
-    assert dataset_cfg.test_fraction == 0.2
+    assert not hasattr(dataset_cfg, "test_fraction")
     assert not hasattr(dataset_cfg, "val_fraction")
     assert train_cfg.allow_production_artifact_overwrite is False
     assert train_cfg.model_path == DEFAULT_PRODUCTION_MODEL_PATH

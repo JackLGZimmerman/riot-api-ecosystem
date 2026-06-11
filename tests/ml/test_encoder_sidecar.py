@@ -269,7 +269,6 @@ def test_learned_semantic_moe_flag_disabled_preserves_old_outputs() -> None:
         "context_logit",
         "loadout_logit",
         "patch_logit",
-        "player_logit",
         "feature_logit",
         "final_logit",
     }

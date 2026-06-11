@@ -17,7 +17,6 @@ from app.ml.cache_layout import (
     CACHE_FORMAT,
     CACHE_META_FILE,
     DISK_DTYPES,
-    PLAYER_ARRAY_NAMES,
     array_paths,
     sidecar_array_paths,
 )
@@ -50,30 +49,11 @@ def _sql_str(value: str) -> str:
     return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
-def _player_prior_selects(enabled: bool) -> str:
-    if enabled:
-        return f"""
-    {_player("win_rate", "toFloat32(0.5)")} AS pl_raw,
-    {_player("matchups", "toUInt32(0)")} AS pl_cnt,
-    {_player_champ("win_rate", "toFloat32(0.5)")} AS plc_raw,
-    {_player_champ("matchups", "toUInt32(0)")} AS plc_cnt,
-    {_player_role("matchups", "toUInt32(0)")} AS plr_cnt,
-"""
-    return """
-    arrayMap(k -> toFloat32(0.5), solo_keys) AS pl_raw,
-    arrayMap(k -> toUInt32(0), solo_keys) AS pl_cnt,
-    arrayMap(k -> toFloat32(0.5), solo_keys) AS plc_raw,
-    arrayMap(k -> toUInt32(0), solo_keys) AS plc_cnt,
-    arrayMap(k -> toUInt32(0), solo_keys) AS plr_cnt,
-"""
-
-
 def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
-    """Subtract each train game's own outcome from its in-sample priors, in place.
+    """Subtract each train game's own outcome from its in-sample solo prior, in place.
 
     Own-outcome per slot is the focal side's win: blue 0-4 / red 5-9. Count-1
     cells collapse to count 0, so smoothing returns their composite prior.
-    Applies to the solo (champion/role/build) prior and both per-player priors.
     """
     blue_win = raw["blue_win"]
     red_win = 1.0 - blue_win
@@ -85,45 +65,17 @@ def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
         axis=1,
     )
 
-    prior_pairs = [("p1_raw", "p1_cnt")]
-    if "pl_raw" in raw and "pl_cnt" in raw:
-        prior_pairs.extend([("pl_raw", "pl_cnt"), ("plc_raw", "plc_cnt")])
-    for rate_key, cnt_key in prior_pairs:
-        count = raw[cnt_key]
-        loo_count = count - 1.0
-        loo_wins = np.rint(raw[rate_key] * count) - own
-        safe = loo_count > 0.0
-        raw[rate_key] = np.where(safe, loo_wins / np.where(safe, loo_count, 1.0), 0.5)
-        raw[cnt_key] = np.maximum(loo_count, 0.0)
-    # Count-only role experience: each train game counts itself once.
-    if "plr_cnt" in raw:
-        raw["plr_cnt"] = np.maximum(raw["plr_cnt"] - 1.0, 0.0)
+    count = raw["p1_cnt"]
+    loo_count = count - 1.0
+    loo_wins = np.rint(raw["p1_raw"] * count) - own
+    safe = loo_count > 0.0
+    raw["p1_raw"] = np.where(safe, loo_wins / np.where(safe, loo_count, 1.0), 0.5)
+    raw["p1_cnt"] = np.maximum(loo_count, 0.0)
 
 
 def _solo(attr: str, default: str) -> str:
     # The solo prior key is the player tuple (championid, teamposition, build) itself.
     return f"arrayMap(k -> dictGetOrDefault('{{solo_prior_dict}}', '{attr}', k, {default}), solo_keys)"
-
-
-def _player(attr: str, default: str) -> str:
-    # Per-player prior keyed by puuid alone.
-    return f"arrayMap(k -> dictGetOrDefault('{{player_prior_dict}}', '{attr}', tuple(k), {default}), player_keys)"
-
-
-def _player_champ(attr: str, default: str) -> str:
-    # Per-(player, champion) prior; champion comes from the matching solo key.
-    return (
-        f"arrayMap((k, s) -> dictGetOrDefault('{{player_champ_prior_dict}}', '{attr}', "
-        f"(k, toInt32(tupleElement(s, 1))), {default}), player_keys, solo_keys)"
-    )
-
-
-def _player_role(attr: str, default: str) -> str:
-    # Per-(player, role) experience; role comes from the matching solo key.
-    return (
-        f"arrayMap((k, s) -> dictGetOrDefault('{{player_role_prior_dict}}', '{attr}', "
-        f"(k, toString(tupleElement(s, 2))), {default}), player_keys, solo_keys)"
-    )
 
 
 # Two-stage query: the subquery canonicalises the per-slot solo key once per game,
@@ -135,7 +87,6 @@ SELECT
     {_solo("matchups", "toUInt32(0)")} AS p1_cnt,
     arrayMap(k -> toInt16(k.1), solo_keys) AS champion_id,
     arrayMap(k -> toInt16(if(indexOf({{build_vocab}}, toString(k.3)) = 0, {{n_builds}}, indexOf({{build_vocab}}, toString(k.3)) - 1)), solo_keys) AS build_id,
-{{player_prior_selects}}
     matchid
 FROM (
     SELECT
@@ -143,8 +94,7 @@ FROM (
         blue_win,
         arrayMap(p -> (tupleElement(p, 1), tupleElement(p, 2), {{key_build_expr}}), blue_players) AS blue_key_players,
         arrayMap(p -> (tupleElement(p, 1), tupleElement(p, 2), {{key_build_expr}}), red_players) AS red_key_players,
-        arrayConcat(blue_key_players, red_key_players) AS solo_keys,
-        arrayMap(p -> toString(tupleElement(p, 4)), arrayConcat(blue_players, red_players)) AS player_keys
+        arrayConcat(blue_key_players, red_key_players) AS solo_keys
     FROM {{table}}
     WHERE split = {{split}} AND matchid > {{last_matchid}}
     ORDER BY matchid
@@ -177,39 +127,16 @@ def _split_counts(cfg: DatasetConfig) -> dict[str, int]:
     }
 
 
-def _array_names(*, include_player_priors: bool) -> tuple[str, ...]:
-    return tuple(
-        name
-        for name in ARRAY_SHAPES
-        if include_player_priors or name not in PLAYER_ARRAY_NAMES
-    )
-
-
-def _open_arrays(
-    n_games: int,
-    cache_dir: Path,
-    *,
-    include_player_priors: bool,
-) -> dict[str, np.ndarray]:
+def _open_arrays(n_games: int, cache_dir: Path) -> dict[str, np.ndarray]:
     paths = array_paths(cache_dir)
     arrays: dict[str, np.ndarray] = {}
-    for name in _array_names(include_player_priors=include_player_priors):
+    for name in ARRAY_SHAPES:
         path = paths[name]
         shape = (n_games, *ARRAY_SHAPES[name])
         arrays[name] = np.lib.format.open_memmap(
             path, mode="w+", dtype=DISK_DTYPES[name], shape=shape
         )
     return arrays
-
-
-def _remove_stale_optional_arrays(
-    cache_dir: Path, *, include_player_priors: bool
-) -> None:
-    if include_player_priors:
-        return
-    paths = array_paths(cache_dir)
-    for name in PLAYER_ARRAY_NAMES:
-        paths[name].unlink(missing_ok=True)
 
 
 def _remove_stale_sidecar_arrays(cache_dir: Path) -> None:
@@ -230,10 +157,6 @@ _RAW_COLUMNS = (
     "champion_id",
     "build_id",
     "pl_raw",
-    "pl_cnt",
-    "plc_raw",
-    "plc_cnt",
-    "plr_cnt",
 )
 
 _CHUNK_SIZE = 50_000
@@ -294,7 +217,7 @@ def _smoothed_features(
         )
 
     win_rate = smooth(raw["p1_raw"], raw["p1_cnt"], cfg.smoothing_prior_mean)
-    features = {
+    return {
         "blue_win": raw["blue_win"],
         "win_rate": win_rate.astype(DISK_DTYPES["win_rate"], copy=False),
         "p1_cnt": raw["p1_cnt"].astype(DISK_DTYPES["p1_cnt"], copy=False),
@@ -303,29 +226,6 @@ def _smoothed_features(
         ),
         "build_id": raw["build_id"].astype(DISK_DTYPES["build_id"], copy=False),
     }
-    if not cfg.include_player_priors:
-        return features
-
-    player_rate = smooth(raw["pl_raw"], raw["pl_cnt"], cfg.smoothing_prior_mean)
-    # Nested EB: the per-(player, champion) rate shrinks toward the player's
-    # own smoothed overall rate, not the global mean.
-    player_champ_rate = smooth(raw["plc_raw"], raw["plc_cnt"], player_rate)
-    features.update(
-        {
-            "player_rate": player_rate.astype(DISK_DTYPES["player_rate"], copy=False),
-            "player_cnt": raw["pl_cnt"].astype(DISK_DTYPES["player_cnt"], copy=False),
-            "player_champ_rate": player_champ_rate.astype(
-                DISK_DTYPES["player_champ_rate"], copy=False
-            ),
-            "player_champ_cnt": raw["plc_cnt"].astype(
-                DISK_DTYPES["player_champ_cnt"], copy=False
-            ),
-            "player_role_cnt": raw["plr_cnt"].astype(
-                DISK_DTYPES["player_role_cnt"], copy=False
-            ),
-        }
-    )
-    return features
 
 
 def _fetch_chunk_rows(query: str, attempts: int = 4) -> list:
@@ -367,16 +267,6 @@ def _stream_split(
         query = _CHUNK_QUERY_TEMPLATE.format(
             table=_sql_ident(cfg.player_pivot_table),
             solo_prior_dict=_sql_ident(cfg.solo_prior_dict),
-            player_prior_dict=_sql_ident(cfg.player_prior_dict),
-            player_champ_prior_dict=_sql_ident(cfg.player_champ_prior_dict),
-            player_role_prior_dict=_sql_ident(cfg.player_role_prior_dict),
-            player_prior_selects=_player_prior_selects(
-                cfg.include_player_priors
-            ).format(
-                player_prior_dict=_sql_ident(cfg.player_prior_dict),
-                player_champ_prior_dict=_sql_ident(cfg.player_champ_prior_dict),
-                player_role_prior_dict=_sql_ident(cfg.player_role_prior_dict),
-            ),
             split=_sql_str(split),
             last_matchid=_sql_str(last_matchid),
             chunk=chunk,
@@ -473,15 +363,11 @@ def _write_meta(
                     "interaction_loo": cfg.interaction_loo,
                     "use_final_build_labels": cfg.use_final_build_labels,
                     "draft_unknown_build_label": cfg.draft_unknown_build_label,
-                    "include_player_priors": cfg.include_player_priors,
                 },
                 "sources": {
                     "player_pivot_table": cfg.player_pivot_table,
                     "solo_prior_table": cfg.solo_prior_table,
                     "solo_prior_dict": cfg.solo_prior_dict,
-                    "player_prior_dict": cfg.player_prior_dict,
-                    "player_champ_prior_dict": cfg.player_champ_prior_dict,
-                    "player_role_prior_dict": cfg.player_role_prior_dict,
                 },
             },
             indent=2,
@@ -506,15 +392,7 @@ def build(cfg: DatasetConfig | None = None) -> Path:
         else None
     )
     _remove_stale_sidecar_arrays(cfg.cache_dir)
-    _remove_stale_optional_arrays(
-        cfg.cache_dir,
-        include_player_priors=cfg.include_player_priors,
-    )
-    arrays = _open_arrays(
-        n_games,
-        cfg.cache_dir,
-        include_player_priors=cfg.include_player_priors,
-    )
+    arrays = _open_arrays(n_games, cfg.cache_dir)
     n_builds = len(build_vocab)
     build_vocab_sql = "[" + ",".join(_sql_str(b) for b in build_vocab) + "]"
     key_build_expr = (
@@ -581,17 +459,10 @@ def _parse_args() -> DatasetConfig:
         default=defaults.encoder_sidecar_path,
         help="Frozen three-encoder sidecar artifact to record in cache metadata.",
     )
-    parser.add_argument(
-        "--include-player-priors",
-        action=argparse.BooleanOptionalAction,
-        default=defaults.include_player_priors,
-        help="Build experimental player-prior arrays. Disabled for production caches.",
-    )
     args = parser.parse_args()
     return DatasetConfig(
         cache_dir=args.cache_dir,
         max_games=args.max_games,
-        include_player_priors=args.include_player_priors,
         encoder_sidecar_path=args.encoder_sidecar_path,
     )
 

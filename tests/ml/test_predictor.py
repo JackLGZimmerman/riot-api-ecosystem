@@ -35,7 +35,6 @@ class _SemanticModel:
             use_semantic_group_features=True,
             loadout_feature_dim=0,
             patch_feature_dim=0,
-            use_player_priors=False,
         )
         self.seen_features: torch.Tensor | None = None
 
@@ -168,11 +167,10 @@ def test_predictor_rejects_feature_heads_missing_from_runtime_protocol(
     model = _SemanticModel()
     model.config.loadout_feature_dim = 10
     model.config.patch_feature_dim = 2
-    model.config.use_player_priors = True
 
     with pytest.raises(
         ValueError,
-        match="loadout_features, patch_features, player_prior_features",
+        match="loadout_features, patch_features",
     ):
         WinRatePredictor(
             model,

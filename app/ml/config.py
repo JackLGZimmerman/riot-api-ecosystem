@@ -23,9 +23,6 @@ DEFAULT_PRODUCTION_METRICS_PATH = ML_DATA_DIR / "metrics_latest.json"
 PLAYER_PIVOT_TABLE = "game_data_filtered.ml_game_player_pivot"
 SOLO_PRIOR_TABLE = "game_data_filtered.synergy_1vx"
 SOLO_PRIOR_DICT = "game_data_filtered.synergy_1vx_dict"
-PLAYER_PRIOR_DICT = "game_data_filtered.player_1vx_dict"
-PLAYER_CHAMP_PRIOR_DICT = "game_data_filtered.player_champ_1vx_dict"
-PLAYER_ROLE_PRIOR_DICT = "game_data_filtered.player_role_1vx_dict"
 
 
 @dataclass(frozen=True)
@@ -35,14 +32,6 @@ class DatasetConfig:
     player_pivot_table: str = PLAYER_PIVOT_TABLE
     solo_prior_table: str = SOLO_PRIOR_TABLE
     solo_prior_dict: str = SOLO_PRIOR_DICT
-    # Draft-safe per-player priors (train-window overall, per-champion, per-role).
-    # Disabled for production cache builds unless an explicit player-prior
-    # experiment needs the extra arrays.
-    include_player_priors: bool = False
-    player_prior_dict: str = PLAYER_PRIOR_DICT
-    player_champ_prior_dict: str = PLAYER_CHAMP_PRIOR_DICT
-    player_role_prior_dict: str = PLAYER_ROLE_PRIOR_DICT
-    test_fraction: float = 0.2
     smoothing_prior_mean: float = 0.5
     smoothing_prior_strength: float = 20.0
     # Dynamic low-sample weighting. The prior strength applied to each
