@@ -28,9 +28,13 @@ LOGIT_EPS = 1e-6
 
 @dataclass(frozen=True)
 class HGNNConfig:
-    n_champions: int = 951  # embedding rows for champion ids (raw id; size from cache meta)
+    n_champions: int = (
+        951  # embedding rows for champion ids (raw id; size from cache meta)
+    )
     n_builds: int = 11  # embedding rows for build ids
-    build_vocab: tuple[str, ...] = ()  # build label -> embedding index (for the predictor)
+    build_vocab: tuple[
+        str, ...
+    ] = ()  # build label -> embedding index (for the predictor)
     node_dim: int = 96
     edge_hidden: int = 64  # phi output width
     value_hidden: tuple[int, ...] = (64,)
@@ -41,22 +45,9 @@ class HGNNConfig:
     use_1vx_posterior_variance: bool = True
     dropout: float = 0.1
     logit_clip: float | None = 5.0
-    structural_antisymmetry: bool = False
-    structural_antisymmetry_scale: float = 0.5
     identity_static_sidecar_dim: int = 0
     identity_full_game_sidecar_dim: int = 0
     identity_temporal_sidecar_dim: int = 0
-    use_identity_static_sidecar: bool = False
-    use_identity_full_game_sidecar: bool = False
-    use_identity_temporal_sidecar: bool = False
-    identity_encoder_sidecar_hidden: tuple[int, ...] = (64,)
-    identity_encoder_sidecar_dropout: float = 0.0
-    identity_encoder_sidecar_support_strength: float = 30.0
-    use_identity_semantic_context_head: bool = False
-    semantic_context_dim: int = 96
-    semantic_context_hidden: tuple[int, ...] = (128,)
-    semantic_context_dropout: float = 0.0
-    semantic_context_support_strength: float = 30.0
     use_learned_semantic_moe: bool = False
     semantic_moe_num_experts: int = 128
     semantic_moe_top_k: int = 32
@@ -66,11 +57,7 @@ class HGNNConfig:
     semantic_moe_expert_hidden: tuple[int, ...] = (64,)
     semantic_moe_dropout: float = 0.0
     semantic_moe_context_token_dropout: float = 0.05
-    semantic_moe_architecture: str = "convex_encoder_mix"
     semantic_moe_view_gate_hidden: tuple[int, ...] = (64,)
-    # Deprecated checkpoint field. The production convex encoder mix uses dense
-    # softmax view weights, so this value is retained only for old model configs.
-    semantic_moe_view_top_k: int = 2
     semantic_moe_view_router_noise: float = 0.01
     semantic_moe_view_balance_weight: float = 1.0e-2
     semantic_moe_view_entropy_weight: float = 1.0e-3
@@ -107,6 +94,47 @@ class HGNNConfig:
     # 8 = overall + per-champion (mu, conf, log_count, missing) blocks (v30);
     # 11 adds the per-role experience (conf, log_count, missing) block (v31).
     player_prior_feature_dim: int = 8
+
+
+ENCODER_SIDECAR_INPUTS = (
+    "identity_static_sidecar",
+    "identity_full_game_sidecar",
+    "identity_temporal_sidecar",
+    "identity_encoder_support",
+)
+
+_LEGACY_STATE_PREFIXES = (
+    "identity_sidecar.",
+    "identity_semantic_context.",
+    "learned_semantic_moe.sidecar_factor.",
+)
+
+
+def model_uses_encoder_sidecar(config: HGNNConfig) -> bool:
+    return bool(config.use_learned_semantic_moe)
+
+
+def model_requires_semantic_group_features(config: HGNNConfig) -> bool:
+    return bool(config.use_learned_semantic_moe and config.use_semantic_group_features)
+
+
+def runtime_unsupported_inputs(config: HGNNConfig) -> tuple[str, ...]:
+    missing: list[str] = []
+    if int(config.loadout_feature_dim) > 0:
+        missing.append("loadout_features")
+    if int(config.patch_feature_dim) > 0:
+        missing.append("patch_features")
+    if bool(config.use_player_priors):
+        missing.append("player_prior_features")
+    return tuple(missing)
+
+
+def expected_encoder_sidecar_dims(config: HGNNConfig) -> dict[str, int]:
+    return {
+        "static": int(config.identity_static_sidecar_dim),
+        "full_game": int(config.identity_full_game_sidecar_dim),
+        "temporal": int(config.identity_temporal_sidecar_dim),
+    }
 
 
 def resolve_device(device: str) -> str:
@@ -152,7 +180,9 @@ def support_features(
     """
     count_f = count.clamp_min(0.0)
     denom = count_f + float(strength)
-    confidence = torch.where(denom > 0.0, count_f / denom.clamp_min(1.0e-12), torch.zeros_like(count_f))
+    confidence = torch.where(
+        denom > 0.0, count_f / denom.clamp_min(1.0e-12), torch.zeros_like(count_f)
+    )
     log_count = torch.log1p(count_f)
     missing = (count_f <= 0.0).to(count.dtype)
     return confidence, log_count, missing
@@ -289,7 +319,9 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
     return swapped
 
 
-def _mlp(input_dim: int, hidden: tuple[int, ...], output_dim: int, *, dropout: float) -> nn.Sequential:
+def _mlp(
+    input_dim: int, hidden: tuple[int, ...], output_dim: int, *, dropout: float
+) -> nn.Sequential:
     layers: list[nn.Module] = []
     in_features = input_dim
     for hidden_dim in hidden:
@@ -320,8 +352,12 @@ class PhiEncoder(nn.Module):
         self.use_variance = bool(config.use_1vx_posterior_variance)
         value_dim = 4 if self.use_variance else 3
         gate_dim = 3 if self.use_variance else 2
-        self.value = _mlp(value_dim, config.value_hidden, config.edge_hidden, dropout=config.dropout)
-        self.gate = _mlp(gate_dim, config.gate_hidden, config.edge_hidden, dropout=config.dropout)
+        self.value = _mlp(
+            value_dim, config.value_hidden, config.edge_hidden, dropout=config.dropout
+        )
+        self.gate = _mlp(
+            gate_dim, config.gate_hidden, config.edge_hidden, dropout=config.dropout
+        )
 
     def forward(
         self,
@@ -387,7 +423,9 @@ class IdentityEncoder(nn.Module):
             "fused": fused,
         }
 
-    def forward(self, champion_id: torch.Tensor, build_id: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, champion_id: torch.Tensor, build_id: torch.Tensor
+    ) -> torch.Tensor:
         return self.components(champion_id, build_id)["fused"]
 
 
@@ -405,165 +443,10 @@ class AttnPool(nn.Module):
         return (x * weights).sum(dim=1)
 
 
-# own / ally / enemy semantic feature blocks scored per slot. The first seven
-# are means/interactions; the last three add order-statistics (max) so convex
-# composition signal ("3 burst threats") is not averaged away by mean pooling.
-N_SEMANTIC_FEATURE_BLOCKS = 10
-
 # Explicit semantic-group relationship blocks. These stay at the raw feature
 # grain so a focus identity can learn separate responses to every promoted
 # grouping across own, allied, enemy, count, tail, and interaction contexts.
 N_SEMANTIC_GROUP_RELATION_BLOCKS = 11
-
-
-class IdentitySemanticContextHead(nn.Module):
-    """Slot-level own/ally/enemy latent interaction over the three encoder blocks."""
-
-    def __init__(self, config: HGNNConfig) -> None:
-        super().__init__()
-        input_dim = (
-            int(config.identity_static_sidecar_dim)
-            + int(config.identity_full_game_sidecar_dim)
-            + int(config.identity_temporal_sidecar_dim)
-        )
-        if input_dim <= 0:
-            raise ValueError("semantic context head requires non-empty identity sidecar dims")
-        if (
-            int(config.identity_static_sidecar_dim) <= 0
-            or int(config.identity_full_game_sidecar_dim) <= 0
-            or int(config.identity_temporal_sidecar_dim) <= 0
-        ):
-            raise ValueError(
-                "semantic context head requires static, full-game, and temporal sidecar dims"
-            )
-        context_dim = int(config.semantic_context_dim)
-        if context_dim <= 0:
-            raise ValueError("semantic_context_dim must be positive")
-        self.static_dim = int(config.identity_static_sidecar_dim)
-        self.full_game_dim = int(config.identity_full_game_sidecar_dim)
-        self.temporal_dim = int(config.identity_temporal_sidecar_dim)
-        self.support_strength = float(config.semantic_context_support_strength)
-        self.project = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, context_dim),
-            nn.ReLU(),
-            nn.LayerNorm(context_dim),
-        )
-        self.score = _mlp(
-            context_dim * N_SEMANTIC_FEATURE_BLOCKS,
-            tuple(int(dim) for dim in config.semantic_context_hidden),
-            1,
-            dropout=float(config.semantic_context_dropout),
-        )
-        last = self.score[-1]
-        if isinstance(last, nn.Linear):
-            nn.init.zeros_(last.weight)
-            nn.init.zeros_(last.bias)
-        # Learned amplitude on the (zero-initialised) context residual. Starts at
-        # 1.0 and stays a no-op at init because the score head is zero-init; it
-        # lets the optimiser grow the context correction without fighting the
-        # score head's weight decay, countering the systematic effect-shrinkage.
-        self.context_scale = nn.Parameter(torch.ones(()))
-
-    def _confidence(self, support: torch.Tensor) -> torch.Tensor:
-        strength = max(self.support_strength, 0.0)
-        support = support.to(dtype=torch.float32).clamp_min(0.0)
-        return support / (support + strength + 1.0e-12)
-
-    @staticmethod
-    def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        weighted = values * weights.unsqueeze(-1)
-        denom = weights.sum(dim=1, keepdim=True).clamp_min(1.0e-12)
-        return weighted.sum(dim=1) / denom
-
-    @staticmethod
-    def _leave_one_out_max(own: torch.Tensor) -> torch.Tensor:
-        """Per-slot max over the other four own-team slots (extremity, LOO).
-
-        Uses top-2 over the team so the focus slot is excluded without a Python
-        loop: if a slot is its own argmax, it falls back to the runner-up.
-        """
-        top2 = own.topk(2, dim=1)
-        max1 = top2.values[:, 0]
-        max2 = top2.values[:, 1]
-        argmax0 = top2.indices[:, 0]
-        slot_ids = torch.arange(own.shape[1], device=own.device).view(1, -1, 1)
-        focus_is_argmax = argmax0.unsqueeze(1) == slot_ids
-        return torch.where(focus_is_argmax, max2.unsqueeze(1), max1.unsqueeze(1))
-
-    def _side_contexts(
-        self,
-        own: torch.Tensor,
-        enemy: torch.Tensor,
-        own_conf: torch.Tensor,
-        enemy_conf: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        own_sum = (own * own_conf.unsqueeze(-1)).sum(dim=1, keepdim=True)
-        own_den = own_conf.sum(dim=1, keepdim=True).clamp_min(1.0e-12)
-        ally_num = own_sum - own * own_conf.unsqueeze(-1)
-        ally_den = (own_den - own_conf).clamp_min(1.0e-12).unsqueeze(-1)
-        ally_context = ally_num / ally_den
-        enemy_context = self._weighted_mean(enemy, enemy_conf).unsqueeze(1).expand_as(own)
-        # Extremity (max) summaries preserve the convex composition signal that
-        # the support-weighted mean averages away (e.g. "3 burst threats").
-        ally_max = self._leave_one_out_max(own)
-        enemy_max = enemy.max(dim=1).values.unsqueeze(1).expand_as(own)
-        return ally_context, enemy_context, ally_max, enemy_max
-
-    def forward(
-        self,
-        *,
-        static: torch.Tensor,
-        full_game: torch.Tensor,
-        temporal: torch.Tensor,
-        support: torch.Tensor,
-    ) -> torch.Tensor:
-        if support.ndim != 2 or support.shape[1] != N_PLAYERS:
-            raise ValueError("identity_encoder_support must have shape [batch, 10]")
-        for name, value, expected_dim in (
-            ("identity_static_sidecar", static, self.static_dim),
-            ("identity_full_game_sidecar", full_game, self.full_game_dim),
-            ("identity_temporal_sidecar", temporal, self.temporal_dim),
-        ):
-            if value.ndim != 3 or value.shape[1] != N_PLAYERS:
-                raise ValueError(f"{name} must have shape [batch, 10, {expected_dim}]")
-            if value.shape[0] != support.shape[0] or value.shape[2] != expected_dim:
-                raise ValueError(f"{name} must have shape [batch, 10, {expected_dim}]")
-        latent = torch.cat([static, full_game, temporal], dim=-1)
-        semantic = self.project(latent)
-        confidence = self._confidence(support).to(dtype=semantic.dtype)
-
-        blue, red = semantic[:, :5], semantic[:, 5:]
-        blue_conf, red_conf = confidence[:, :5], confidence[:, 5:]
-        blue_ally, blue_enemy, blue_ally_max, blue_enemy_max = self._side_contexts(
-            blue, red, blue_conf, red_conf
-        )
-        red_ally, red_enemy, red_ally_max, red_enemy_max = self._side_contexts(
-            red, blue, red_conf, blue_conf
-        )
-        own = torch.cat([blue, red], dim=1)
-        ally = torch.cat([blue_ally, red_ally], dim=1)
-        enemy = torch.cat([blue_enemy, red_enemy], dim=1)
-        ally_max = torch.cat([blue_ally_max, red_ally_max], dim=1)
-        enemy_max = torch.cat([blue_enemy_max, red_enemy_max], dim=1)
-        features = torch.cat(
-            [
-                own,
-                ally,
-                enemy,
-                own * ally,
-                own * enemy,
-                ally * enemy,
-                enemy - ally,
-                ally_max,
-                enemy_max,
-                own * enemy_max,
-            ],
-            dim=-1,
-        )
-        slot_scores = self.score(features).squeeze(-1) * confidence
-        context = slot_scores[:, :5].mean(dim=1) - slot_scores[:, 5:].mean(dim=1)
-        return self.context_scale * context
 
 
 class LearnedSemanticMoEHead(nn.Module):
@@ -571,24 +454,15 @@ class LearnedSemanticMoEHead(nn.Module):
 
     def __init__(self, config: HGNNConfig) -> None:
         super().__init__()
-        architecture = str(config.semantic_moe_architecture).strip().lower().replace("-", "_")
-        aliases = {
-            "convex_view_mix": "convex_encoder_mix",
-            "view_mix": "convex_encoder_mix",
-        }
-        architecture = aliases.get(architecture, architecture)
-        allowed_architectures = {"convex_encoder_mix"}
-        if architecture not in allowed_architectures:
-            known = ", ".join(sorted(allowed_architectures | set(aliases)))
-            raise ValueError(f"unknown semantic_moe_architecture {architecture!r}; expected one of: {known}")
-        self.architecture = architecture
         self.view_names = ("static", "full_game", "temporal")
         self.static_dim = int(config.identity_static_sidecar_dim)
         self.full_game_dim = int(config.identity_full_game_sidecar_dim)
         self.temporal_dim = int(config.identity_temporal_sidecar_dim)
         sidecar_dim = self.static_dim + self.full_game_dim + self.temporal_dim
         if sidecar_dim <= 0:
-            raise ValueError("learned semantic MoE requires non-empty identity sidecar dims")
+            raise ValueError(
+                "learned semantic MoE requires non-empty identity sidecar dims"
+            )
         if self.static_dim <= 0 or self.full_game_dim <= 0 or self.temporal_dim <= 0:
             raise ValueError(
                 "learned semantic MoE requires static, full-game, and temporal sidecar dims"
@@ -606,7 +480,9 @@ class LearnedSemanticMoEHead(nn.Module):
         self.top_k = min(self.top_k, self.num_experts)
         self.temperature = max(float(config.semantic_moe_temperature), 1.0e-6)
         self.support_strength = float(config.semantic_moe_support_strength)
-        self.context_token_dropout = max(float(config.semantic_moe_context_token_dropout), 0.0)
+        self.context_token_dropout = max(
+            float(config.semantic_moe_context_token_dropout), 0.0
+        )
         self.view_router_noise = max(float(config.semantic_moe_view_router_noise), 0.0)
         self.view_balance_weight = float(config.semantic_moe_view_balance_weight)
         self.view_entropy_weight = float(config.semantic_moe_view_entropy_weight)
@@ -618,15 +494,18 @@ class LearnedSemanticMoEHead(nn.Module):
         self.factor_variance_weight = float(config.semantic_moe_factor_variance_weight)
         self.factor_std_floor = float(config.semantic_moe_factor_std_floor)
         self.delta_l2_weight = float(config.semantic_moe_delta_l2_weight)
-        self.max_abs_slot_delta = max(float(config.semantic_moe_max_abs_slot_delta), 0.0)
+        self.max_abs_slot_delta = max(
+            float(config.semantic_moe_max_abs_slot_delta), 0.0
+        )
         self.use_semantic_group_features = bool(config.use_semantic_group_features)
         self.group_feature_dim = int(config.semantic_group_feature_dim)
         if self.use_semantic_group_features and self.group_feature_dim <= 0:
             raise ValueError("semantic_group_feature_dim must be positive when enabled")
 
-        sidecar_token_dim = sidecar_dim + 2
         identity_token_dim = int(config.node_dim) * 4
-        group_context_dim = self.group_feature_dim * 7 if self.use_semantic_group_features else 0
+        group_context_dim = (
+            self.group_feature_dim * 7 if self.use_semantic_group_features else 0
+        )
         group_token_dim = self.factor_dim if self.use_semantic_group_features else 0
         group_relationship_dim = (
             self.group_feature_dim * N_SEMANTIC_GROUP_RELATION_BLOCKS
@@ -677,7 +556,6 @@ class LearnedSemanticMoEHead(nn.Module):
                 _zero_last_linear(expert)
             return experts
 
-        self.sidecar_factor = make_sidecar_factor(sidecar_token_dim)
         self.factor = make_factor(token_dim)
         self.group_context = (
             nn.Sequential(
@@ -701,7 +579,9 @@ class LearnedSemanticMoEHead(nn.Module):
                 nn.LayerNorm(relationship_token_dim),
                 _mlp(
                     relationship_token_dim,
-                    tuple(int(dim) for dim in config.semantic_group_relationship_hidden),
+                    tuple(
+                        int(dim) for dim in config.semantic_group_relationship_hidden
+                    ),
                     group_relationship_dim + 1,
                     dropout=float(config.semantic_group_relationship_dropout),
                 ),
@@ -729,31 +609,25 @@ class LearnedSemanticMoEHead(nn.Module):
             "full_game": self.full_game_dim,
             "temporal": self.temporal_dim,
         }
-        uses_view_sidecar_factors = True
-        uses_view_gate = True
-        self.view_sidecar_factors = (
-            nn.ModuleDict(
-                {
-                    name: make_sidecar_factor(int(dim) + 2)
-                    for name, dim in self.view_dims.items()
-                }
-            )
-            if uses_view_sidecar_factors
-            else None
+        self.view_sidecar_factors = nn.ModuleDict(
+            {
+                name: make_sidecar_factor(int(dim) + 2)
+                for name, dim in self.view_dims.items()
+            }
         )
-        view_gate_dim = identity_token_dim + self.factor_dim * len(self.view_names) + group_token_dim + 2
-        self.view_gate = (
-            _mlp(
-                view_gate_dim,
-                tuple(int(dim) for dim in config.semantic_moe_view_gate_hidden),
-                len(self.view_names),
-                dropout=dropout,
-            )
-            if uses_view_gate
-            else None
+        view_gate_dim = (
+            identity_token_dim
+            + self.factor_dim * len(self.view_names)
+            + group_token_dim
+            + 2
         )
-        if self.view_gate is not None:
-            _zero_last_linear(self.view_gate)
+        self.view_gate = _mlp(
+            view_gate_dim,
+            tuple(int(dim) for dim in config.semantic_moe_view_gate_hidden),
+            len(self.view_names),
+            dropout=dropout,
+        )
+        _zero_last_linear(self.view_gate)
 
         self.response_scale = nn.Parameter(torch.ones(()))
 
@@ -763,13 +637,15 @@ class LearnedSemanticMoEHead(nn.Module):
         confidence = support / (support + strength + 1.0e-12)
         return confidence, torch.log1p(support)
 
-    def _mask_context_tokens(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _mask_context_tokens(
+        self, tokens: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.training or self.context_token_dropout <= 0.0:
             return tokens, tokens.new_ones(())
         keep_prob = max(1.0 - self.context_token_dropout, 1.0e-6)
-        mask = (torch.rand(tokens.shape[:2] + (1,), device=tokens.device) < keep_prob).to(
-            dtype=tokens.dtype
-        )
+        mask = (
+            torch.rand(tokens.shape[:2] + (1,), device=tokens.device) < keep_prob
+        ).to(dtype=tokens.dtype)
         return tokens * mask / keep_prob, mask.mean()
 
     @staticmethod
@@ -778,7 +654,9 @@ class LearnedSemanticMoEHead(nn.Module):
         return (values * weights.unsqueeze(-1)).sum(dim=1) / denom
 
     @staticmethod
-    def _leave_one_out_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    def _leave_one_out_mean(
+        values: torch.Tensor, weights: torch.Tensor
+    ) -> torch.Tensor:
         total = (values * weights.unsqueeze(-1)).sum(dim=1, keepdim=True)
         denom = weights.sum(dim=1, keepdim=True).unsqueeze(-1)
         loo_total = total - values * weights.unsqueeze(-1)
@@ -1063,12 +941,18 @@ class LearnedSemanticMoEHead(nn.Module):
         route_probs = router_logits.new_zeros(router_logits.shape)
         route_probs.scatter_(-1, top_indices, top_weights)
 
-        expert_outputs = torch.cat([expert(semantic_factor) for expert in experts], dim=-1)
+        expert_outputs = torch.cat(
+            [expert(semantic_factor) for expert in experts], dim=-1
+        )
         slot_delta_raw = (expert_outputs * route_probs).sum(dim=-1)
 
         expert_usage = route_probs.mean(dim=(0, 1))
-        selected_fraction = (route_probs > 0.0).to(dtype=route_probs.dtype).mean(dim=(0, 1))
-        target_usage = route_probs.new_full((self.num_experts,), 1.0 / float(self.num_experts))
+        selected_fraction = (
+            (route_probs > 0.0).to(dtype=route_probs.dtype).mean(dim=(0, 1))
+        )
+        target_usage = route_probs.new_full(
+            (self.num_experts,), 1.0 / float(self.num_experts)
+        )
         balance_loss = (expert_usage - target_usage).pow(2).mean()
         safe_probs = route_probs.clamp_min(1.0e-12)
         entropy = -(safe_probs * safe_probs.log()).sum(dim=-1)
@@ -1095,8 +979,6 @@ class LearnedSemanticMoEHead(nn.Module):
         confidence: torch.Tensor,
         log_support: torch.Tensor,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
-        if self.view_sidecar_factors is None:
-            raise ValueError("view sidecar factors are not enabled for this architecture")
         view_inputs = {
             "static": static,
             "full_game": full_game,
@@ -1132,8 +1014,6 @@ class LearnedSemanticMoEHead(nn.Module):
         confidence: torch.Tensor,
         log_support: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        if self.view_gate is None:
-            raise ValueError("view gate is not enabled for this architecture")
         gate_parts = [
             champion_embedding,
             role_embedding,
@@ -1146,12 +1026,16 @@ class LearnedSemanticMoEHead(nn.Module):
         gate_parts.extend([confidence.unsqueeze(-1), log_support.unsqueeze(-1)])
         view_logits = self.view_gate(torch.cat(gate_parts, dim=-1)) / self.temperature
         if self.training and self.view_router_noise > 0.0:
-            view_logits = view_logits + torch.randn_like(view_logits) * self.view_router_noise
+            view_logits = (
+                view_logits + torch.randn_like(view_logits) * self.view_router_noise
+            )
         weights = torch.softmax(view_logits, dim=-1)
 
         usage = weights.mean(dim=(0, 1))
         selected_fraction = torch.ones_like(usage)
-        target_usage = weights.new_full((len(self.view_names),), 1.0 / float(len(self.view_names)))
+        target_usage = weights.new_full(
+            (len(self.view_names),), 1.0 / float(len(self.view_names))
+        )
         balance_loss = (usage - target_usage).pow(2).mean()
         safe_weights = weights.clamp_min(1.0e-12)
         entropy = -(safe_weights * safe_weights.log()).sum(dim=-1)
@@ -1184,9 +1068,12 @@ class LearnedSemanticMoEHead(nn.Module):
             cap = float(self.max_abs_slot_delta)
             slot_delta = cap * torch.tanh(slot_delta / cap)
             logit = slot_delta[:, :5].mean(dim=1) - slot_delta[:, 5:].mean(dim=1)
-        factor_orthogonality_loss, factor_variance_loss, factor_std_mean, factor_std_min = (
-            self._factor_regularization(semantic_factor)
-        )
+        (
+            factor_orthogonality_loss,
+            factor_variance_loss,
+            factor_std_mean,
+            factor_std_min,
+        ) = self._factor_regularization(semantic_factor)
         if additional_regularization_loss is None:
             additional_regularization_loss = logit.new_zeros(())
         regularization_loss = (
@@ -1206,7 +1093,9 @@ class LearnedSemanticMoEHead(nn.Module):
                 - expert_slot_delta[:, 5:].mean(dim=1)
             ),
             "semantic_moe_group_relationship_logit": group_relationship["logit"],
-            "semantic_moe_group_relationship_slot_delta": group_relationship["slot_delta"],
+            "semantic_moe_group_relationship_slot_delta": group_relationship[
+                "slot_delta"
+            ],
             "semantic_moe_router_probs": route["route_probs"],
             "semantic_moe_topk_indices": route["top_indices"],
             "semantic_moe_topk_weights": route["top_weights"],
@@ -1226,14 +1115,22 @@ class LearnedSemanticMoEHead(nn.Module):
             "semantic_moe_max_abs_slot_delta": logit.new_tensor(
                 float(self.max_abs_slot_delta)
             ),
-            "semantic_moe_group_relationship_l2_loss": group_relationship["coeff_l2_loss"],
-            "semantic_moe_group_relationship_coeff_norm": group_relationship["coeff_norm"],
-            "semantic_moe_group_relationship_context_norm": group_relationship["context_norm"],
+            "semantic_moe_group_relationship_l2_loss": group_relationship[
+                "coeff_l2_loss"
+            ],
+            "semantic_moe_group_relationship_coeff_norm": group_relationship[
+                "coeff_norm"
+            ],
+            "semantic_moe_group_relationship_context_norm": group_relationship[
+                "context_norm"
+            ],
             "semantic_moe_regularization_loss": regularization_loss,
             "semantic_moe_group_features_enabled": logit.new_tensor(
                 1.0 if self.use_semantic_group_features else 0.0
             ),
-            "semantic_moe_group_feature_dim": logit.new_tensor(float(self.group_feature_dim)),
+            "semantic_moe_group_feature_dim": logit.new_tensor(
+                float(self.group_feature_dim)
+            ),
             "semantic_moe_group_relationship_enabled": logit.new_tensor(
                 1.0 if self.group_relationship is not None else 0.0
             ),
@@ -1243,10 +1140,7 @@ class LearnedSemanticMoEHead(nn.Module):
         return out
 
     def _view_diagnostics(
-        self,
-        gate: dict[str, torch.Tensor],
-        *,
-        reference: torch.Tensor,
+        self, gate: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
         return {
             "semantic_moe_view_usage": gate["usage"],
@@ -1254,77 +1148,9 @@ class LearnedSemanticMoEHead(nn.Module):
             "semantic_moe_view_entropy": gate["entropy"],
             "semantic_moe_view_balance_loss": gate["balance_loss"],
             "semantic_moe_view_entropy_loss": gate["entropy_loss"],
-            "semantic_moe_convex_encoder_mix_enabled": reference.new_tensor(
-                1.0 if self.architecture == "convex_encoder_mix" else 0.0
-            ),
         }
 
-    def _fused_outputs(
-        self,
-        *,
-        champion_embedding: torch.Tensor,
-        role_embedding: torch.Tensor,
-        build_embedding: torch.Tensor,
-        fused_identity: torch.Tensor,
-        static: torch.Tensor,
-        full_game: torch.Tensor,
-        temporal: torch.Tensor,
-        confidence: torch.Tensor,
-        log_support: torch.Tensor,
-        group_features: torch.Tensor | None,
-    ) -> dict[str, torch.Tensor]:
-        group_token = self._group_context_token(group_features)
-        sidecar_token = torch.cat(
-            [static, full_game, temporal, confidence.unsqueeze(-1), log_support.unsqueeze(-1)],
-            dim=-1,
-        )
-        sidecar_factor = self.sidecar_factor(sidecar_token)
-        sidecar_factor, token_keep_fraction = self._mask_context_tokens(sidecar_factor)
-        context_features = self._context_features(sidecar_factor, confidence)
-        token = self._semantic_factor_token(
-            champion_embedding=champion_embedding,
-            role_embedding=role_embedding,
-            build_embedding=build_embedding,
-            fused_identity=fused_identity,
-            context_features=context_features,
-            group_token=group_token,
-            confidence=confidence,
-            log_support=log_support,
-        )
-        semantic_factor = self.factor(token)
-        group_relationship = self._group_relationship_outputs(
-            identity_token=self._relationship_token(
-                champion_embedding=champion_embedding,
-                role_embedding=role_embedding,
-                build_embedding=build_embedding,
-                fused_identity=fused_identity,
-                semantic_factor=semantic_factor,
-            ),
-            group_features=group_features,
-            confidence=confidence,
-        )
-        route = self._route_experts(
-            semantic_factor=semantic_factor,
-            fused_identity=fused_identity,
-            router=self.router,
-            experts=self.experts,
-        )
-        slot_delta_raw = route["slot_delta_raw"]
-        expert_slot_delta = self.response_scale * slot_delta_raw * confidence
-        slot_delta = expert_slot_delta + group_relationship["slot_delta"]
-        logit = slot_delta[:, :5].mean(dim=1) - slot_delta[:, 5:].mean(dim=1)
-        return self._moe_return(
-            logit=logit,
-            slot_delta=slot_delta,
-            expert_slot_delta=expert_slot_delta,
-            group_relationship=group_relationship,
-            route=route,
-            semantic_factor=semantic_factor,
-            token_keep_fraction=token_keep_fraction,
-            delta_l2_loss=slot_delta_raw.pow(2).mean(),
-        )
-
-    def _convex_encoder_mix_outputs(
+    def _semantic_moe_outputs(
         self,
         *,
         champion_embedding: torch.Tensor,
@@ -1356,8 +1182,12 @@ class LearnedSemanticMoEHead(nn.Module):
             confidence=confidence,
             log_support=log_support,
         )
-        stacked_factors = torch.stack([view_factors[name] for name in self.view_names], dim=2)
-        sidecar_factor = (stacked_factors * view_gate["weights"].unsqueeze(-1)).sum(dim=2)
+        stacked_factors = torch.stack(
+            [view_factors[name] for name in self.view_names], dim=2
+        )
+        sidecar_factor = (stacked_factors * view_gate["weights"].unsqueeze(-1)).sum(
+            dim=2
+        )
         context_features = self._context_features(sidecar_factor, confidence)
         token = self._semantic_factor_token(
             champion_embedding=champion_embedding,
@@ -1405,7 +1235,7 @@ class LearnedSemanticMoEHead(nn.Module):
             token_keep_fraction=token_keep_fraction,
             delta_l2_loss=slot_delta_raw.pow(2).mean(),
             additional_regularization_loss=view_regularization,
-            extra=self._view_diagnostics(view_gate, reference=logit),
+            extra=self._view_diagnostics(view_gate),
         )
 
     def _validate_sidecar(
@@ -1443,7 +1273,9 @@ class LearnedSemanticMoEHead(nn.Module):
             return loss
         final_logit = outputs.get("final_logit")
         if final_logit is None:
-            raise ValueError("outputs must include final_logit or semantic_moe_regularization_loss")
+            raise ValueError(
+                "outputs must include final_logit or semantic_moe_regularization_loss"
+            )
         return final_logit.new_zeros(())
 
     @staticmethod
@@ -1451,7 +1283,8 @@ class LearnedSemanticMoEHead(nn.Module):
         return {
             key: value
             for key, value in outputs.items()
-            if key.startswith("semantic_moe_") and key != "semantic_moe_regularization_loss"
+            if key.startswith("semantic_moe_")
+            and key != "semantic_moe_regularization_loss"
         }
 
     def forward(
@@ -1494,7 +1327,7 @@ class LearnedSemanticMoEHead(nn.Module):
             "log_support": log_support,
             "group_features": group_features,
         }
-        return self._convex_encoder_mix_outputs(**common)
+        return self._semantic_moe_outputs(**common)
 
 
 class HGNNWinModel(nn.Module):
@@ -1507,31 +1340,8 @@ class HGNNWinModel(nn.Module):
 
         self.phi = nn.ModuleDict({"1vx": PhiEncoder(c)})
         self.identity = IdentityEncoder(c.n_champions, c.n_builds, c.node_dim)
-        sidecar_input_dim = self._identity_sidecar_input_dim(c)
-        self.identity_sidecar = (
-            _mlp(
-                sidecar_input_dim + 2,
-                c.identity_encoder_sidecar_hidden,
-                c.node_dim,
-                dropout=c.identity_encoder_sidecar_dropout,
-            )
-            if sidecar_input_dim > 0
-            else None
-        )
-        if self.identity_sidecar is not None:
-            last = self.identity_sidecar[-1]
-            if isinstance(last, nn.Linear):
-                nn.init.zeros_(last.weight)
-                nn.init.zeros_(last.bias)
-        self.identity_semantic_context = (
-            IdentitySemanticContextHead(c)
-            if c.use_identity_semantic_context_head
-            else None
-        )
         self.learned_semantic_moe = (
-            LearnedSemanticMoEHead(c)
-            if c.use_learned_semantic_moe
-            else None
+            LearnedSemanticMoEHead(c) if c.use_learned_semantic_moe else None
         )
         # Zero-initialised paths over draft-safe player priors; both are no-ops
         # at init, so warm starts from player-blind checkpoints are exact.
@@ -1540,11 +1350,14 @@ class HGNNWinModel(nn.Module):
             "node",
             "both",
         }:
-            raise ValueError(
-                "player_prior_mode must be 'residual', 'node', or 'both'"
-            )
+            raise ValueError("player_prior_mode must be 'residual', 'node', or 'both'")
         self.player_prior_node = (
-            _mlp(c.player_prior_feature_dim, c.player_prior_hidden, c.edge_hidden, dropout=c.dropout)
+            _mlp(
+                c.player_prior_feature_dim,
+                c.player_prior_hidden,
+                c.edge_hidden,
+                dropout=c.dropout,
+            )
             if c.use_player_priors and c.player_prior_mode in {"node", "both"}
             else None
         )
@@ -1559,14 +1372,22 @@ class HGNNWinModel(nn.Module):
             _zero_last_linear(self.player_residual)
         # Node init fuses the multiplicative identity with the 1vX posterior (§3).
         self.node_init = _mlp(
-            c.node_dim + c.edge_hidden, c.node_init_hidden, c.node_dim, dropout=c.dropout
+            c.node_dim + c.edge_hidden,
+            c.node_init_hidden,
+            c.node_dim,
+            dropout=c.dropout,
         )
         self.node_norm = nn.LayerNorm(c.node_dim)
 
         self.attn_pool = AttnPool(c.node_dim)
         self.team_proj = nn.Linear(c.node_dim * 2, c.node_dim)
         self.team_slot_readout = (
-            _mlp(c.node_dim * 5, c.team_slot_readout_hidden, c.node_dim, dropout=c.dropout)
+            _mlp(
+                c.node_dim * 5,
+                c.team_slot_readout_hidden,
+                c.node_dim,
+                dropout=c.dropout,
+            )
             if c.team_slot_readout_hidden
             else None
         )
@@ -1599,40 +1420,12 @@ class HGNNWinModel(nn.Module):
         if self.patch_residual is not None:
             _zero_last_linear(self.patch_residual)
 
-    @staticmethod
-    def _identity_sidecar_input_dim(config: HGNNConfig) -> int:
-        dim = 0
-        if config.use_identity_static_sidecar:
-            dim += int(config.identity_static_sidecar_dim)
-        if config.use_identity_full_game_sidecar:
-            dim += int(config.identity_full_game_sidecar_dim)
-        if config.use_identity_temporal_sidecar:
-            dim += int(config.identity_temporal_sidecar_dim)
-        return dim
-
     def _readout(self, team: torch.Tensor) -> torch.Tensor:  # team: [B, 5, d]
         pooled = torch.cat([team.mean(dim=1), self.attn_pool(team)], dim=-1)
         out = self.team_proj(pooled)
         if self.team_slot_readout is not None:
             out = out + self.team_slot_readout(team.flatten(start_dim=1))
         return out
-
-    def _sidecar_block(
-        self,
-        value: torch.Tensor | None,
-        *,
-        batch_size: int,
-        dim: int,
-        reference: torch.Tensor,
-        name: str,
-    ) -> torch.Tensor:
-        if dim <= 0:
-            return reference.new_zeros((batch_size, 10, 0))
-        if value is None:
-            return reference.new_zeros((batch_size, 10, dim))
-        if value.ndim != 3 or value.shape[1] != 10 or value.shape[2] != dim:
-            raise ValueError(f"{name} must have shape [batch, 10, {dim}]")
-        return value.to(dtype=reference.dtype)
 
     def _game_feature_block(
         self,
@@ -1681,99 +1474,6 @@ class HGNNWinModel(nn.Module):
             scale = float(max_abs_logit)
             logit = scale * torch.tanh(logit / scale)
         return logit
-
-    def _sidecar_node_features(
-        self,
-        *,
-        champion_id: torch.Tensor,
-        identity_static_sidecar: torch.Tensor | None,
-        identity_full_game_sidecar: torch.Tensor | None,
-        identity_temporal_sidecar: torch.Tensor | None,
-        identity_encoder_support: torch.Tensor | None,
-    ) -> torch.Tensor | None:
-        if self.identity_sidecar is None:
-            return None
-        c = self.config
-        batch_size = int(champion_id.shape[0])
-        parts: list[torch.Tensor] = []
-        if c.use_identity_static_sidecar:
-            parts.append(
-                self._sidecar_block(
-                    identity_static_sidecar,
-                    batch_size=batch_size,
-                    dim=int(c.identity_static_sidecar_dim),
-                    reference=self.identity.champion.weight,
-                    name="identity_static_sidecar",
-                )
-            )
-        if c.use_identity_full_game_sidecar:
-            parts.append(
-                self._sidecar_block(
-                    identity_full_game_sidecar,
-                    batch_size=batch_size,
-                    dim=int(c.identity_full_game_sidecar_dim),
-                    reference=self.identity.champion.weight,
-                    name="identity_full_game_sidecar",
-                )
-            )
-        if c.use_identity_temporal_sidecar:
-            parts.append(
-                self._sidecar_block(
-                    identity_temporal_sidecar,
-                    batch_size=batch_size,
-                    dim=int(c.identity_temporal_sidecar_dim),
-                    reference=self.identity.champion.weight,
-                    name="identity_temporal_sidecar",
-                )
-            )
-        if not parts:
-            return None
-        if identity_encoder_support is None:
-            support = champion_id.new_zeros((batch_size, 10), dtype=torch.float32)
-        else:
-            if identity_encoder_support.ndim != 2 or identity_encoder_support.shape[1] != 10:
-                raise ValueError("identity_encoder_support must have shape [batch, 10]")
-            support = identity_encoder_support.to(dtype=torch.float32)
-        strength = max(float(c.identity_encoder_sidecar_support_strength), 0.0)
-        confidence = support / (support + strength + 1.0e-12)
-        log_support = torch.log1p(support.clamp_min(0.0))
-        sidecar_input = torch.cat(
-            [*parts, confidence.unsqueeze(-1), log_support.unsqueeze(-1)],
-            dim=-1,
-        )
-        return self.identity_sidecar(sidecar_input)
-
-    def _semantic_context_logit(
-        self,
-        *,
-        identity_static_sidecar: torch.Tensor | None,
-        identity_full_game_sidecar: torch.Tensor | None,
-        identity_temporal_sidecar: torch.Tensor | None,
-        identity_encoder_support: torch.Tensor | None,
-    ) -> torch.Tensor | None:
-        if self.identity_semantic_context is None:
-            return None
-        missing = [
-            name
-            for name, value in (
-                ("identity_static_sidecar", identity_static_sidecar),
-                ("identity_full_game_sidecar", identity_full_game_sidecar),
-                ("identity_temporal_sidecar", identity_temporal_sidecar),
-                ("identity_encoder_support", identity_encoder_support),
-            )
-            if value is None
-        ]
-        if missing:
-            raise ValueError(
-                "semantic context head requires all identity sidecar inputs: "
-                + ", ".join(missing)
-            )
-        return self.identity_semantic_context(
-            static=cast(torch.Tensor, identity_static_sidecar),
-            full_game=cast(torch.Tensor, identity_full_game_sidecar),
-            temporal=cast(torch.Tensor, identity_temporal_sidecar),
-            support=cast(torch.Tensor, identity_encoder_support),
-        )
 
     def _learned_semantic_moe_outputs(
         self,
@@ -1853,15 +1553,6 @@ class HGNNWinModel(nn.Module):
         # Node init: multiplicative identity (§3) fused with the 1vX posterior.
         identity_components = self.identity.components(champion_id, build_id)
         h0 = identity_components["fused"]
-        sidecar = self._sidecar_node_features(
-            champion_id=champion_id,
-            identity_static_sidecar=identity_static_sidecar,
-            identity_full_game_sidecar=identity_full_game_sidecar,
-            identity_temporal_sidecar=identity_temporal_sidecar,
-            identity_encoder_support=identity_encoder_support,
-        )
-        if sidecar is not None:
-            h0 = h0 + sidecar
         phi_node = self.phi["1vx"](
             _logit(mu_1vx, self.config.logit_clip),
             var_1vx,
@@ -1924,14 +1615,7 @@ class HGNNWinModel(nn.Module):
         else:
             player_logit = base_logit.new_zeros(base_logit.shape)
         feature_logit = loadout_logit + patch_logit + player_logit
-        context_logit = self._semantic_context_logit(
-            identity_static_sidecar=identity_static_sidecar,
-            identity_full_game_sidecar=identity_full_game_sidecar,
-            identity_temporal_sidecar=identity_temporal_sidecar,
-            identity_encoder_support=identity_encoder_support,
-        )
-        if context_logit is None:
-            context_logit = base_logit.new_zeros(base_logit.shape)
+        context_logit = base_logit.new_zeros(base_logit.shape)
         final_logit = base_logit + context_logit + feature_logit
         moe_outputs = self._learned_semantic_moe_outputs(
             identity_components=identity_components,
@@ -2002,96 +1686,13 @@ class HGNNWinModel(nn.Module):
         }
         inputs.update(optional)
         filtered = {key: value for key, value in inputs.items() if value is not None}
-        if self.config.structural_antisymmetry:
-            direct = self._forward_impl(**filtered)
-            swapped = self._forward_impl(**swap_hgnn_inputs(filtered))
-            scale = float(self.config.structural_antisymmetry_scale)
-            base_logit = scale * (direct["base_logit"] - swapped["base_logit"])
-            context_logit = scale * (direct["context_logit"] - swapped["context_logit"])
-            loadout_logit = scale * (direct["loadout_logit"] - swapped["loadout_logit"])
-            patch_logit = scale * (direct["patch_logit"] - swapped["patch_logit"])
-            player_logit = scale * (direct["player_logit"] - swapped["player_logit"])
-            feature_logit = loadout_logit + patch_logit + player_logit
-            outputs = {
-                "base_logit": base_logit,
-                "context_logit": context_logit,
-                "loadout_logit": loadout_logit,
-                "patch_logit": patch_logit,
-                "player_logit": player_logit,
-                "feature_logit": feature_logit,
-                "final_logit": base_logit + context_logit + feature_logit,
-            }
-            if "semantic_moe_logit" in direct and "semantic_moe_logit" in swapped:
-                for key in (
-                    "semantic_moe_balance_loss",
-                    "semantic_moe_entropy_loss",
-                    "semantic_moe_delta_l2_loss",
-                    "semantic_moe_slot_delta_max_abs",
-                    "semantic_moe_max_abs_slot_delta",
-                    "semantic_moe_factor_orthogonality_loss",
-                    "semantic_moe_factor_variance_loss",
-                    "semantic_moe_regularization_loss",
-                    "semantic_moe_router_entropy",
-                    "semantic_moe_factor_norm",
-                    "semantic_moe_factor_std_mean",
-                    "semantic_moe_factor_std_min",
-                    "semantic_moe_context_token_keep_fraction",
-                    "semantic_moe_expert_usage",
-                    "semantic_moe_expert_selected_fraction",
-                    "semantic_moe_group_features_enabled",
-                    "semantic_moe_group_feature_dim",
-                    "semantic_moe_group_relationship_l2_loss",
-                    "semantic_moe_group_relationship_coeff_norm",
-                    "semantic_moe_group_relationship_context_norm",
-                    "semantic_moe_group_relationship_enabled",
-                    "semantic_moe_view_entropy",
-                    "semantic_moe_view_balance_loss",
-                    "semantic_moe_view_entropy_loss",
-                    "semantic_moe_convex_encoder_mix_enabled",
-                ):
-                    if key in direct and key in swapped:
-                        outputs[key] = 0.5 * (direct[key] + swapped[key])
-                for key in (
-                    "semantic_moe_view_usage",
-                    "semantic_moe_view_selected_fraction",
-                ):
-                    if key in direct and key in swapped:
-                        outputs[key] = 0.5 * (direct[key] + swapped[key])
-                outputs.update(
-                    {
-                        "semantic_moe_logit": scale
-                        * (direct["semantic_moe_logit"] - swapped["semantic_moe_logit"]),
-                        "semantic_moe_expert_logit": scale
-                        * (
-                            direct["semantic_moe_expert_logit"]
-                            - swapped["semantic_moe_expert_logit"]
-                        ),
-                        "semantic_moe_group_relationship_logit": scale
-                        * (
-                            direct["semantic_moe_group_relationship_logit"]
-                            - swapped["semantic_moe_group_relationship_logit"]
-                        ),
-                        "semantic_moe_slot_delta": direct["semantic_moe_slot_delta"],
-                        "semantic_moe_group_relationship_slot_delta": direct[
-                            "semantic_moe_group_relationship_slot_delta"
-                        ],
-                        "semantic_moe_router_probs": direct["semantic_moe_router_probs"],
-                        "semantic_moe_topk_indices": direct["semantic_moe_topk_indices"],
-                        "semantic_moe_topk_weights": direct["semantic_moe_topk_weights"],
-                    }
-                )
-            return outputs
         return self._forward_impl(**filtered)
 
 
 def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
     raw_config = dict(payload.get("model_config", {}))
     allowed = {field.name for field in fields(HGNNConfig)}
-    config_dict = {
-        key: value
-        for key, value in raw_config.items()
-        if key in allowed
-    }
+    config_dict = {key: value for key, value in raw_config.items() if key in allowed}
     for key in (
         "build_vocab",
         "value_hidden",
@@ -2099,8 +1700,6 @@ def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
         "node_init_hidden",
         "readout_hidden",
         "team_slot_readout_hidden",
-        "identity_encoder_sidecar_hidden",
-        "semantic_context_hidden",
         "semantic_moe_factor_hidden",
         "semantic_moe_router_hidden",
         "semantic_moe_expert_hidden",
@@ -2116,12 +1715,12 @@ def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
 
 
 def hgnn_config_payload(config: HGNNConfig) -> dict[str, Any]:
-    payload = asdict(config)
-    payload.pop("semantic_moe_view_top_k", None)
-    return payload
+    return asdict(config)
 
 
-def save_hgnn_model(path: Path, model: HGNNWinModel, *, confidence_strength: float) -> None:
+def save_hgnn_model(
+    path: Path, model: HGNNWinModel, *, confidence_strength: float
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -2134,15 +1733,33 @@ def save_hgnn_model(path: Path, model: HGNNWinModel, *, confidence_strength: flo
     )
 
 
-def load_hgnn_model(path: Path, *, device: str = "cpu") -> tuple[HGNNWinModel, HGNNConfig, float]:
-    payload = cast(dict[str, Any], torch.load(path, map_location=device, weights_only=True))
+def load_hgnn_model(
+    path: Path, *, device: str = "cpu"
+) -> tuple[HGNNWinModel, HGNNConfig, float]:
+    payload = cast(
+        dict[str, Any], torch.load(path, map_location=device, weights_only=True)
+    )
     if payload.get("model_type") != "hgnn":
         raise ValueError(f"checkpoint is not an HGNN artifact: {path}")
     if "state_dict" not in payload:
         raise ValueError(f"HGNN checkpoint is missing state_dict: {path}")
     config = _config_from_payload(payload)
     model = HGNNWinModel(config).to(device)
-    model.load_state_dict(payload["state_dict"], strict=True)
+    state_dict = {
+        key: value
+        for key, value in cast(dict[str, torch.Tensor], payload["state_dict"]).items()
+        if not key.startswith(_LEGACY_STATE_PREFIXES)
+    }
+    result = model.load_state_dict(state_dict, strict=False)
+    if result.missing_keys or result.unexpected_keys:
+        details = []
+        if result.missing_keys:
+            details.append("missing=" + ", ".join(result.missing_keys))
+        if result.unexpected_keys:
+            details.append("unexpected=" + ", ".join(result.unexpected_keys))
+        raise ValueError(
+            f"HGNN checkpoint state_dict is incompatible: {'; '.join(details)}"
+        )
     model.eval()
     strength = float(payload.get("confidence_strength", 30.0))
     return model, config, strength
@@ -2152,14 +1769,17 @@ __all__ = [
     "HGNNConfig",
     "HGNNWinModel",
     "IdentityEncoder",
-    "IdentitySemanticContextHead",
     "LearnedSemanticMoEHead",
     "TEAM_PAIRS",
     "build_hgnn_inputs",
+    "expected_encoder_sidecar_dims",
     "hgnn_config_payload",
     "load_hgnn_model",
+    "model_requires_semantic_group_features",
+    "model_uses_encoder_sidecar",
     "posterior_mean_var",
     "resolve_device",
+    "runtime_unsupported_inputs",
     "save_hgnn_model",
     "support_features",
     "swap_hgnn_inputs",

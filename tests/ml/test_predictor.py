@@ -28,12 +28,14 @@ class _SemanticModel:
             n_champions=1000,
             n_builds=1,
             build_vocab=("carry",),
-            use_identity_static_sidecar=True,
-            use_identity_full_game_sidecar=True,
-            use_identity_temporal_sidecar=True,
-            use_identity_semantic_context_head=False,
+            identity_static_sidecar_dim=2,
+            identity_full_game_sidecar_dim=3,
+            identity_temporal_sidecar_dim=4,
             use_learned_semantic_moe=True,
             use_semantic_group_features=True,
+            loadout_feature_dim=0,
+            patch_feature_dim=0,
+            use_player_priors=False,
         )
         self.seen_features: torch.Tensor | None = None
 
@@ -78,6 +80,14 @@ def _patch_static_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _fake_sidecar() -> SimpleNamespace:
+    return SimpleNamespace(
+        dims=SimpleNamespace(
+            as_dict=lambda: {"static": 2, "full_game": 3, "temporal": 4, "total": 9}
+        )
+    )
+
+
 def test_predictor_supplies_semantic_group_features(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -116,6 +126,39 @@ def test_predictor_supplies_semantic_group_features(
     assert model.seen_features[0, 0, idx["physical"]].item() == pytest.approx(0.42)
     assert model.seen_features[0, 0, idx["high_hp"]].item() == 1.0
     assert model.seen_features[0, 0, idx["ranged"]].item() == 1.0
+
+
+def test_predictor_rejects_mismatched_team_assignments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_static_lookups(monkeypatch)
+    model = _SemanticModel()
+    predictor = WinRatePredictor(
+        model,
+        _priors(),
+        prior_strength=20.0,
+        smoothing_prior_strength=20.0,
+        amplification_threshold=0.0,
+        smoothing_mode="cascade",
+        prior_confidence_matchups=50.0,
+        use_final_build_labels=True,
+        draft_unknown_build_label="unknown",
+        encoder_sidecar=None,
+        semantic_context_lookup=_semantic_context_lookup(),
+        device="cpu",
+    )
+    blue = list(range(1, 6))
+    red = list(range(6, 11))
+
+    with pytest.raises(ValueError, match="blue roles must match"):
+        predictor(
+            blue,
+            red,
+            {champion: position for champion, position in zip(blue[:-1], POSITIONS)},
+            {champion: position for champion, position in zip(red, POSITIONS)},
+            {champion: 0 for champion in blue},
+            {champion: 0 for champion in red},
+        )
 
 
 def test_predictor_rejects_feature_heads_missing_from_runtime_protocol(
@@ -184,7 +227,7 @@ def test_load_predictor_loads_semantic_context_for_grouped_model(
     monkeypatch.setattr(
         predictor_module.EncoderSidecarLookup,
         "load",
-        lambda _path: None,
+        lambda _path: _fake_sidecar(),
     )
 
     def fake_load_priors() -> PriorTables:

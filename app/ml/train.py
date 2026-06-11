@@ -27,24 +27,21 @@ from app.core.logging.logger import setup_logging_config
 from app.ml.config import (
     DEFAULT_PRODUCTION_METRICS_PATH,
     DEFAULT_PRODUCTION_MODEL_PATH,
-    DEFAULT_TRAIN_BATCH_CAP,
     DatasetConfig,
     TrainConfig,
 )
-from app.ml.context_audit_lens import AuditLens
-from app.ml.context_audit_specs import (
-    audit_specs,
-    eb_shrink_targets,
-    group_audit_specs,
-)
-from app.ml.dataset import SplitData, identity_meta, load_splits
+from app.ml.dataset import SPLIT_ORDER, SplitData, identity_meta, load_splits
 from app.ml.encoder_sidecar import EncoderSidecarLookup, SidecarGatherTables
 from app.core.utils.common import resolve_device_str as resolve_device
 from app.ml.hgnn_model import (
     HGNNConfig,
     HGNNWinModel,
     build_hgnn_inputs,
+    expected_encoder_sidecar_dims,
     hgnn_config_payload,
+    model_requires_semantic_group_features,
+    model_uses_encoder_sidecar,
+    runtime_unsupported_inputs,
     save_hgnn_model,
     swap_hgnn_inputs,
 )
@@ -53,17 +50,9 @@ setup_logging_config()
 logger = logging.getLogger(__name__)
 
 EPS = 1e-12
-# Reference single-run cap for the team-swapped training loop on the local
-# RTX 5070 Ti. Use epoch timing telemetry and --train-batch-cap for candidate runs.
-HGNN_TRAIN_BATCH = DEFAULT_TRAIN_BATCH_CAP
-PRODUCTION_SEMANTIC_MOE_ARCHITECTURE = "convex_encoder_mix"
 PRODUCTION_SEMANTIC_MODEL_OVERRIDES: dict[str, Any] = {
-    "use_identity_static_sidecar": False,
-    "use_identity_full_game_sidecar": False,
-    "use_identity_temporal_sidecar": False,
     "use_learned_semantic_moe": True,
     "use_semantic_group_features": True,
-    "semantic_moe_architecture": PRODUCTION_SEMANTIC_MOE_ARCHITECTURE,
     "semantic_moe_num_experts": 128,
     "semantic_moe_top_k": 32,
 }
@@ -146,12 +135,7 @@ class _SidecarGatherer:
 
 
 def _model_uses_sidecar(config: HGNNConfig) -> bool:
-    return bool(
-        config.use_identity_static_sidecar
-        or config.use_identity_full_game_sidecar
-        or config.use_identity_temporal_sidecar
-        or config.use_learned_semantic_moe
-    )
+    return model_uses_encoder_sidecar(config)
 
 
 def _build_sidecar_gatherer(
@@ -173,7 +157,20 @@ def _build_sidecar_gatherer(
                 "or rebuild the compact cache with the artifact recorded in its meta."
             )
         path = Path(recorded)
-    tables = EncoderSidecarLookup.load(path).gather_tables(
+    lookup = EncoderSidecarLookup.load(path)
+    expected_dims = expected_encoder_sidecar_dims(config)
+    actual_dims = lookup.dims.as_dict()
+    mismatches = [
+        f"{name}: checkpoint={expected} sidecar={actual_dims.get(name)}"
+        for name, expected in expected_dims.items()
+        if int(expected) != int(actual_dims.get(name, -1))
+    ]
+    if mismatches:
+        raise ValueError(
+            "Encoder sidecar artifact dimensions do not match the HGNN config: "
+            + ", ".join(mismatches)
+        )
+    tables = lookup.gather_tables(
         build_vocab=list(config.build_vocab),
         n_champions=int(config.n_champions),
         n_builds=int(config.n_builds),
@@ -213,16 +210,9 @@ def _drop_unused_model_arrays(
     config: HGNNConfig,
 ) -> SplitData:
     """Null out optional sidecar arrays when the configured model ignores them."""
-    sidecar_enabled = (
-        config.use_identity_static_sidecar
-        or config.use_identity_full_game_sidecar
-        or config.use_identity_temporal_sidecar
-        or config.use_learned_semantic_moe
-    )
-    semantic_group_features_enabled = bool(
-        config.use_learned_semantic_moe and config.use_semantic_group_features
-    )
-    requires_all_sidecars = bool(config.use_learned_semantic_moe)
+    sidecar_enabled = model_uses_encoder_sidecar(config)
+    semantic_group_features_enabled = model_requires_semantic_group_features(config)
+    requires_all_sidecars = sidecar_enabled
     if requires_all_sidecars:
         sidecar_names = (
             "identity_static_sidecar",
@@ -258,15 +248,9 @@ def _drop_unused_model_arrays(
                     "semantic MoE head requires identity_encoder_support [games, 10]"
                 )
     drop: dict[str, bool] = {
-        "identity_static_sidecar": not (
-            config.use_identity_static_sidecar or requires_all_sidecars
-        ),
-        "identity_full_game_sidecar": not (
-            config.use_identity_full_game_sidecar or requires_all_sidecars
-        ),
-        "identity_temporal_sidecar": not (
-            config.use_identity_temporal_sidecar or requires_all_sidecars
-        ),
+        "identity_static_sidecar": not requires_all_sidecars,
+        "identity_full_game_sidecar": not requires_all_sidecars,
+        "identity_temporal_sidecar": not requires_all_sidecars,
         "identity_encoder_support": not sidecar_enabled,
         "semantic_group_features": not semantic_group_features_enabled,
         "loadout_features": int(config.loadout_feature_dim) <= 0,
@@ -281,7 +265,12 @@ def _drop_unused_model_arrays(
         ),
     }
     if config.use_player_priors:
-        required = ["player_rate", "player_cnt", "player_champ_rate", "player_champ_cnt"]
+        required = [
+            "player_rate",
+            "player_cnt",
+            "player_champ_rate",
+            "player_champ_cnt",
+        ]
         if int(config.player_prior_feature_dim) > 8:
             required.append("player_role_cnt")
         for name in required:
@@ -350,18 +339,6 @@ def _validate_split_targets(splits: dict[str, SplitData]) -> None:
             )
 
 
-def _binary_auc(scores: np.ndarray, targets: np.ndarray) -> float:
-    n_pos = int(targets.sum())
-    n_neg = int(targets.size - n_pos)
-    if n_pos == 0 or n_neg == 0:
-        return float("nan")
-    order = np.argsort(scores)
-    ranks = np.empty_like(order, dtype=np.float64)
-    ranks[order] = np.arange(1, scores.size + 1, dtype=np.float64)
-    sum_pos_ranks = ranks[targets > 0.5].sum()
-    return float((sum_pos_ranks - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
-
-
 def _nll(scores: np.ndarray, targets: np.ndarray) -> float:
     if scores.size == 0:
         return float("nan")
@@ -369,66 +346,9 @@ def _nll(scores: np.ndarray, targets: np.ndarray) -> float:
     return float(-np.mean(targets * np.log(p) + (1.0 - targets) * np.log(1.0 - p)))
 
 
-def _ece(scores: np.ndarray, targets: np.ndarray, n_bins: int = 15) -> float:
-    """Equal-width expected calibration error for binary probabilities."""
-    if scores.size == 0:
-        return float("nan")
-    p = np.clip(scores.astype(np.float64), 0.0, 1.0)
-    y = (targets > 0.5).astype(np.float64)
-    bin_idx = np.minimum((p * n_bins).astype(np.int64), n_bins - 1)
-    counts = np.bincount(bin_idx, minlength=n_bins)
-    populated = counts > 0
-    conf = (
-        np.bincount(bin_idx, weights=p, minlength=n_bins)[populated] / counts[populated]
-    )
-    acc = (
-        np.bincount(bin_idx, weights=y, minlength=n_bins)[populated] / counts[populated]
-    )
-    return float(np.sum(counts[populated] / p.size * np.abs(conf - acc)))
-
-
-def _sigmoid_np(logits: np.ndarray, *, temperature: float = 1.0) -> np.ndarray:
-    scale = max(float(temperature), EPS)
-    z = np.clip(logits.astype(np.float64, copy=False) / scale, -60.0, 60.0)
+def _sigmoid_np(logits: np.ndarray) -> np.ndarray:
+    z = np.clip(logits.astype(np.float64, copy=False), -60.0, 60.0)
     return (1.0 / (1.0 + np.exp(-z))).astype(np.float64, copy=False)
-
-
-def _logit_nll(
-    logits: np.ndarray, targets: np.ndarray, *, temperature: float = 1.0
-) -> float:
-    if logits.size == 0:
-        return float("nan")
-    scale = max(float(temperature), EPS)
-    z = logits.astype(np.float64, copy=False) / scale
-    y = targets.astype(np.float64, copy=False)
-    return float(np.mean(np.logaddexp(0.0, z) - y * z))
-
-
-def _fit_temperature(logits: np.ndarray, targets: np.ndarray) -> float:
-    """Fit one scalar temperature on the selection split's logits only.
-
-    This is deliberately report-only: saved checkpoints and predictor outputs
-    continue to use the raw logits/probabilities unless a future runtime plan
-    explicitly opts into calibration.
-    """
-    if logits.size == 0:
-        return 1.0
-    x = logits.astype(np.float64, copy=False)
-    y = targets.astype(np.float64, copy=False)
-    if not np.isfinite(x).all() or not np.isfinite(y).all():
-        return 1.0
-
-    def best_on(grid: np.ndarray) -> float:
-        losses = np.array([_logit_nll(x, y, temperature=float(t)) for t in grid])
-        return float(grid[int(np.nanargmin(losses))])
-
-    coarse = np.exp(np.linspace(math.log(0.05), math.log(10.0), 161))
-    best = best_on(coarse)
-    half_step = (math.log(10.0) - math.log(0.05)) / 160.0
-    fine = np.exp(
-        np.linspace(math.log(best) - half_step, math.log(best) + half_step, 81)
-    )
-    return best_on(fine)
 
 
 def _seed_torch(seed: int, *, device: str) -> None:
@@ -551,30 +471,12 @@ def _evaluate_predictions(
 ) -> dict[str, float | int]:
     targets = split.blue_win.astype(np.float64, copy=False)
     if targets.size == 0:
-        return {
-            "n": 0,
-            "accuracy": float("nan"),
-            "auc": float("nan"),
-            "nll": float("nan"),
-            "ece": float("nan"),
-            "brier": float("nan"),
-        }
+        return {"n": 0, "accuracy": float("nan"), "nll": float("nan")}
     return {
         "n": int(targets.size),
         "accuracy": float(np.mean((scores >= 0.5) == (targets > 0.5))),
-        "auc": _binary_auc(scores, targets),
         "nll": _nll(scores, targets),
-        "ece": _ece(scores, targets),
-        "brier": float(np.mean((scores - targets) ** 2)),
     }
-
-
-SUPPORT_BUCKETS: tuple[tuple[str, float, float], ...] = (
-    ("zero", 0.0, 0.0),
-    ("low_1_4", 1.0, 4.0),
-    ("medium_5_49", 5.0, 49.0),
-    ("high_50_plus", 50.0, math.inf),
-)
 
 
 def _resolve_hgnn_overrides_from_meta(
@@ -587,268 +489,6 @@ def _resolve_hgnn_overrides_from_meta(
             continue
         raise ValueError(f"{key} does not support auto HGNN override resolution")
     return resolved
-
-
-def _metric_values(scores: np.ndarray, targets: np.ndarray) -> dict[str, float | int]:
-    if targets.size == 0:
-        return {
-            "n": 0,
-            "auc": float("nan"),
-            "nll": float("nan"),
-            "ece": float("nan"),
-            "brier": float("nan"),
-            "model_mean": float("nan"),
-            "label_mean": float("nan"),
-            "calibration_gap": float("nan"),
-        }
-    model_mean = float(np.mean(scores))
-    label_mean = float(np.mean(targets))
-    return {
-        "n": int(targets.size),
-        "auc": _binary_auc(scores, targets),
-        "nll": _nll(scores, targets),
-        "ece": _ece(scores, targets),
-        "brier": float(np.mean((scores - targets) ** 2)),
-        "model_mean": model_mean,
-        "label_mean": label_mean,
-        "calibration_gap": model_mean - label_mean,
-    }
-
-
-def _min_non_missing_support(counts: np.ndarray) -> np.ndarray:
-    positive = np.where(counts > 0.0, counts, np.inf)
-    out = positive.min(axis=1)
-    return np.where(np.isinf(out), 0.0, out)
-
-
-def _bucket_rows(
-    values: np.ndarray,
-    scores: np.ndarray,
-    targets: np.ndarray,
-) -> dict[str, dict[str, float | int]]:
-    rows: dict[str, dict[str, float | int]] = {}
-    for bucket, lo, hi in SUPPORT_BUCKETS:
-        if math.isinf(hi):
-            mask = values >= lo
-        elif lo == hi:
-            mask = values == lo
-        else:
-            mask = (values >= lo) & (values <= hi)
-        bucket_scores = scores[mask]
-        bucket_targets = targets[mask]
-        row = _metric_values(bucket_scores, bucket_targets)
-        row["mean_support"] = (
-            float(np.mean(values[mask])) if np.any(mask) else float("nan")
-        )
-        rows[bucket] = row
-    return rows
-
-
-def _support_bucket_metrics(scores: np.ndarray, split: SplitData) -> dict[str, object]:
-    targets = split.blue_win.astype(np.float64, copy=False)
-    out: dict[str, object] = {
-        "overall": _metric_values(scores, targets),
-    }
-    prior_support = _prior_1vx_support_metrics(scores, split)
-    if prior_support is not None:
-        out["prior_1vx_support"] = prior_support
-    return out
-
-
-PRIOR_1VX_SUPPORT_RISK_BUCKETS: tuple[str, ...] = (
-    "zero_player",
-    "min_1_4",
-    "min_5_49",
-    "min_50_plus",
-)
-
-
-def _prior_1vx_support_arrays(
-    split: SplitData,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    if split.p1_cnt is None:
-        return None
-    support = np.asarray(split.p1_cnt, dtype=np.float64)
-    if support.ndim != 2 or support.shape[0] != split.blue_win.size:
-        raise ValueError("p1_cnt must have shape [games, players] for diagnostics")
-    mean_support = support.mean(axis=1)
-    min_support = _min_non_missing_support(support)
-    zero_players = (support <= 0.0).sum(axis=1).astype(np.float64, copy=False)
-    return mean_support, min_support, zero_players
-
-
-def _prior_1vx_support_bucket_ids(split: SplitData) -> np.ndarray | None:
-    arrays = _prior_1vx_support_arrays(split)
-    if arrays is None:
-        return None
-    _, min_support, zero_players = arrays
-    bucket = np.full(min_support.shape, 3, dtype=np.int64)
-    has_zero = zero_players > 0.0
-    bucket[has_zero] = 0
-    no_zero = ~has_zero
-    bucket[no_zero & (min_support < 5.0)] = 1
-    bucket[no_zero & (min_support >= 5.0) & (min_support < 50.0)] = 2
-    return bucket
-
-
-def _prior_support_risk_bucket_rows(
-    bucket_ids: np.ndarray,
-    scores: np.ndarray,
-    targets: np.ndarray,
-    *,
-    mean_support: np.ndarray,
-    min_support: np.ndarray,
-    zero_players: np.ndarray,
-) -> dict[str, dict[str, float | int]]:
-    rows: dict[str, dict[str, float | int]] = {}
-    for idx, label in enumerate(PRIOR_1VX_SUPPORT_RISK_BUCKETS):
-        mask = bucket_ids == idx
-        row = _metric_values(scores[mask], targets[mask])
-        row["mean_1vx_support"] = (
-            float(np.mean(mean_support[mask])) if np.any(mask) else float("nan")
-        )
-        row["min_1vx_support"] = (
-            float(np.mean(min_support[mask])) if np.any(mask) else float("nan")
-        )
-        row["mean_zero_1vx_players"] = (
-            float(np.mean(zero_players[mask])) if np.any(mask) else float("nan")
-        )
-        rows[label] = row
-    return rows
-
-
-def _prior_1vx_support_metrics(
-    scores: np.ndarray,
-    split: SplitData,
-) -> dict[str, object] | None:
-    arrays = _prior_1vx_support_arrays(split)
-    if arrays is None:
-        return None
-    mean_support, min_support, zero_players = arrays
-    targets = split.blue_win.astype(np.float64, copy=False)
-    bucket_ids = _prior_1vx_support_bucket_ids(split)
-    if bucket_ids is None:
-        return None
-    return {
-        "mean_support_bucket": _bucket_rows(mean_support, scores, targets),
-        "min_support_bucket": _bucket_rows(min_support, scores, targets),
-        "risk_bucket": _prior_support_risk_bucket_rows(
-            bucket_ids,
-            scores,
-            targets,
-            mean_support=mean_support,
-            min_support=min_support,
-            zero_players=zero_players,
-        ),
-    }
-
-
-def _select_threshold(scores: np.ndarray, targets: np.ndarray) -> tuple[float, float]:
-    if scores.size == 0:
-        return 0.5, float("nan")
-    y = targets > 0.5
-    grid = np.linspace(0.30, 0.70, 401)
-    acc = ((scores[None, :] >= grid[:, None]) == y[None, :]).mean(axis=1)
-    best = int(np.argmax(acc))
-    return float(grid[best]), float(acc[best])
-
-
-def _threshold_accuracy(
-    scores: np.ndarray, targets: np.ndarray, threshold: float
-) -> float:
-    if scores.size == 0:
-        return float("nan")
-    return float(np.mean((scores >= threshold) == (targets > 0.5)))
-
-
-def _std_or_nan(values: np.ndarray) -> float:
-    if values.size == 0:
-        return float("nan")
-    return float(np.std(values.astype(np.float64, copy=False), ddof=0))
-
-
-def _logit_diagnostics(outputs: dict[str, np.ndarray]) -> dict[str, float]:
-    return {
-        "base_logit_std": _std_or_nan(outputs["base_logit"]),
-        "context_logit_std": _std_or_nan(outputs["context_logit"]),
-        "final_logit_std": _std_or_nan(outputs["final_logit"]),
-    }
-
-
-def _semantic_moe_diagnostics(
-    outputs: dict[str, np.ndarray],
-) -> dict[str, object] | None:
-    if "semantic_moe_expert_usage" not in outputs:
-        return None
-    diagnostics: dict[str, object] = {
-        "expert_usage": outputs["semantic_moe_expert_usage"],
-        "expert_selected_fraction": outputs["semantic_moe_expert_selected_fraction"],
-    }
-    if "semantic_moe_view_usage" in outputs:
-        diagnostics["view_usage"] = outputs["semantic_moe_view_usage"]
-    if "semantic_moe_view_selected_fraction" in outputs:
-        diagnostics["view_selected_fraction"] = outputs[
-            "semantic_moe_view_selected_fraction"
-        ]
-    scalar_keys = (
-        "semantic_moe_router_entropy",
-        "semantic_moe_factor_norm",
-        "semantic_moe_balance_loss",
-        "semantic_moe_entropy_loss",
-        "semantic_moe_factor_orthogonality_loss",
-        "semantic_moe_factor_variance_loss",
-        "semantic_moe_factor_std_mean",
-        "semantic_moe_factor_std_min",
-        "semantic_moe_context_token_keep_fraction",
-        "semantic_moe_delta_l2_loss",
-        "semantic_moe_slot_delta_max_abs",
-        "semantic_moe_max_abs_slot_delta",
-        "semantic_moe_group_relationship_l2_loss",
-        "semantic_moe_group_relationship_coeff_norm",
-        "semantic_moe_group_relationship_context_norm",
-        "semantic_moe_group_relationship_enabled",
-        "semantic_moe_regularization_loss",
-        "semantic_moe_group_features_enabled",
-        "semantic_moe_group_feature_dim",
-        "semantic_moe_view_entropy",
-        "semantic_moe_view_balance_loss",
-        "semantic_moe_view_entropy_loss",
-        "semantic_moe_convex_encoder_mix_enabled",
-        "semantic_moe_full_game_slot_delta_mean_abs",
-        "semantic_moe_temporal_slot_delta_mean_abs",
-    )
-    for key in scalar_keys:
-        if key in outputs:
-            diagnostics[key.removeprefix("semantic_moe_")] = float(outputs[key])
-    if "router_entropy" in diagnostics and "expert_usage" in diagnostics:
-        usage = np.asarray(diagnostics["expert_usage"], dtype=np.float64)
-        selected_fraction = np.asarray(
-            diagnostics["expert_selected_fraction"],
-            dtype=np.float64,
-        )
-        selected_per_slot = float(np.sum(selected_fraction))
-        if selected_per_slot > 1.0:
-            diagnostics["router_entropy_fraction_of_topk_max"] = float(
-                diagnostics["router_entropy"]
-            ) / math.log(selected_per_slot)
-        diagnostics["expert_usage_min"] = (
-            float(np.min(usage)) if usage.size else float("nan")
-        )
-        diagnostics["expert_usage_max"] = (
-            float(np.max(usage)) if usage.size else float("nan")
-        )
-    return diagnostics
-
-
-def _attach_output_diagnostics(
-    split_metrics: dict[str, dict[str, object]],
-    prediction_outputs: dict[str, dict[str, np.ndarray]],
-) -> None:
-    for split_name, outputs in prediction_outputs.items():
-        split_metrics[split_name]["logit_diagnostics"] = _logit_diagnostics(outputs)
-        semantic_moe = _semantic_moe_diagnostics(outputs)
-        if semantic_moe is not None:
-            split_metrics[split_name]["semantic_moe_diagnostics"] = semantic_moe
 
 
 def _validate_train_config(train_cfg: TrainConfig) -> None:
@@ -870,8 +510,6 @@ def _validate_train_config(train_cfg: TrainConfig) -> None:
         raise ValueError(
             "freeze_warm_start_loaded_parameters requires warm_start_model_path"
         )
-    if train_cfg.semantic_context_metric_min_count < 1:
-        raise ValueError("semantic_context_metric_min_count must be >= 1")
 
 
 def _same_output_path(left: Path, right: Path) -> bool:
@@ -894,6 +532,25 @@ def _validate_train_output_paths(train_cfg: TrainConfig) -> None:
             f"({', '.join(blocked)}). Use experiment output paths or pass "
             "--allow-production-artifact-overwrite for an explicit promotion run."
         )
+
+
+def _validate_serving_artifact_contract(
+    train_cfg: TrainConfig,
+    model_config: HGNNConfig,
+) -> None:
+    if not _same_output_path(train_cfg.model_path, DEFAULT_PRODUCTION_MODEL_PATH):
+        return
+    unsupported = runtime_unsupported_inputs(model_config)
+    if not unsupported:
+        return
+    raise ValueError(
+        "The default production model path is the RL serving artifact, but this "
+        "HGNN config requires runtime inputs the current predictor does not "
+        "supply: "
+        + ", ".join(unsupported)
+        + ". Save this broad offline checkpoint to an experiment path, or train "
+        "a serving-compatible config before promoting."
+    )
 
 
 def _parse_int_tuple(value: str) -> tuple[int, ...]:
@@ -1002,411 +659,35 @@ def _predict_hgnn_logits(
     device: str,
     gatherer: _SidecarGatherer | None = None,
 ) -> np.ndarray:
-    return _predict_hgnn_outputs(
-        model,
-        split,
-        batch_size=batch_size,
-        strength=strength,
-        device=device,
-        gatherer=gatherer,
-    )["final_logit"]
-
-
-def _predict_hgnn_outputs(
-    model: HGNNWinModel,
-    split: RawTensorSplit,
-    *,
-    batch_size: int,
-    strength: float,
-    device: str,
-    gatherer: _SidecarGatherer | None = None,
-) -> dict[str, np.ndarray]:
+    was_training = model.training
     model.eval()
-    out: dict[str, list[np.ndarray]] = {
-        "base_logit": [],
-        "context_logit": [],
-        "loadout_logit": [],
-        "patch_logit": [],
-        "feature_logit": [],
-        "final_logit": [],
-        "focus_side_probability": [],
-    }
-    weighted_stats: dict[str, tuple[torch.Tensor, int]] = {}
-    semantic_moe_stat_keys = {
-        "semantic_moe_expert_usage",
-        "semantic_moe_expert_selected_fraction",
-        "semantic_moe_router_entropy",
-        "semantic_moe_factor_norm",
-        "semantic_moe_balance_loss",
-        "semantic_moe_entropy_loss",
-        "semantic_moe_factor_orthogonality_loss",
-        "semantic_moe_factor_variance_loss",
-        "semantic_moe_factor_std_mean",
-        "semantic_moe_factor_std_min",
-        "semantic_moe_context_token_keep_fraction",
-        "semantic_moe_delta_l2_loss",
-        "semantic_moe_slot_delta_max_abs",
-        "semantic_moe_max_abs_slot_delta",
-        "semantic_moe_group_relationship_l2_loss",
-        "semantic_moe_group_relationship_coeff_norm",
-        "semantic_moe_group_relationship_context_norm",
-        "semantic_moe_group_relationship_enabled",
-        "semantic_moe_regularization_loss",
-        "semantic_moe_group_features_enabled",
-        "semantic_moe_group_feature_dim",
-        "semantic_moe_view_usage",
-        "semantic_moe_view_selected_fraction",
-        "semantic_moe_view_entropy",
-        "semantic_moe_view_balance_loss",
-        "semantic_moe_view_entropy_loss",
-        "semantic_moe_convex_encoder_mix_enabled",
-        "semantic_moe_full_game_slot_delta_mean_abs",
-        "semantic_moe_temporal_slot_delta_mean_abs",
-    }
-
-    def add_weighted_stat(key: str, value: torch.Tensor, weight: int) -> None:
-        detached = value.detach().to(device="cpu", dtype=torch.float64)
-        current = weighted_stats.get(key)
-        weighted = detached * float(weight)
-        if current is None:
-            weighted_stats[key] = (weighted, weight)
-        else:
-            total, seen = current
-            weighted_stats[key] = (total + weighted, seen + weight)
-
-    with torch.no_grad():
-        n_rows = split.blue_win.numel()
-        for start in range(0, n_rows, batch_size):
-            raw_batch = _raw_split_to_device(
-                _raw_batch(split, slice(start, start + batch_size)),
-                device=device,
-            )
-            inputs = _hgnn_inputs_from_raw(
-                raw_batch, strength=strength, device=device, gatherer=gatherer
-            )
-            outputs = model(**inputs)
-            focus_side_probability = _focus_side_probabilities_from_outputs(outputs)
-            for key in (
-                "base_logit",
-                "context_logit",
-                "loadout_logit",
-                "patch_logit",
-                "feature_logit",
-                "final_logit",
-            ):
-                value = outputs[key]
-                out[key].append(value.detach().cpu().numpy())
-            out["focus_side_probability"].append(
-                focus_side_probability.detach().cpu().numpy()
-            )
-            batch_weight = int(raw_batch.blue_win.numel())
-            for key in semantic_moe_stat_keys:
-                value = outputs.get(key)
-                if value is None:
-                    continue
-                add_weighted_stat(key, value, batch_weight)
-    result = {
-        key: np.concatenate(values).astype(np.float64) for key, values in out.items()
-    }
-    for key, (total, seen) in weighted_stats.items():
-        result[key] = (total / max(seen, 1)).numpy().astype(np.float64)
-    return result
-
-
-def _focus_side_logits_from_outputs(
-    outputs: dict[str, torch.Tensor],
-    *,
-    include_semantic_delta: bool = True,
-) -> torch.Tensor:
-    slot_delta = outputs.get("semantic_moe_slot_delta")
-    if slot_delta is None:
-        logits = outputs["final_logit"].view(-1, 1)
-        return torch.cat([logits.expand(-1, 5), -logits.expand(-1, 5)], dim=1)
-
-    base_logit = outputs["base_logit"]
-    context_logit = outputs["context_logit"]
-    semantic_moe_logit = outputs.get("semantic_moe_logit")
-    if semantic_moe_logit is None:
-        semantic_moe_logit = base_logit.new_zeros(base_logit.shape)
-    feature_logit = outputs.get("feature_logit")
-    if feature_logit is None:
-        feature_logit = base_logit.new_zeros(base_logit.shape)
-    shared_logit = base_logit + context_logit - semantic_moe_logit + feature_logit
-    if not include_semantic_delta:
-        return torch.cat(
-            [shared_logit[:, None].expand(-1, 5), -shared_logit[:, None].expand(-1, 5)],
-            dim=1,
-        )
-    blue_delta = slot_delta[:, :5]
-    red_delta = slot_delta[:, 5:]
-    blue_focus_logit = (
-        shared_logit[:, None]
-        + blue_delta
-        - red_delta.mean(
-            dim=1,
-            keepdim=True,
-        )
-    )
-    red_focus_logit = (
-        -shared_logit[:, None]
-        + red_delta
-        - blue_delta.mean(
-            dim=1,
-            keepdim=True,
-        )
-    )
-    return torch.cat([blue_focus_logit, red_focus_logit], dim=1)
-
-
-def _focus_side_probabilities_from_outputs(
-    outputs: dict[str, torch.Tensor],
-) -> torch.Tensor:
-    return torch.sigmoid(_focus_side_logits_from_outputs(outputs))
-
-
-def _side_probabilities_np(scores: np.ndarray) -> np.ndarray:
-    array = np.asarray(scores, dtype=np.float64)
-    if array.ndim == 2:
-        if array.shape[1] != 10:
-            raise ValueError("side probability arrays must have shape [games, 10]")
-        return array
-    blue = array.reshape(-1, 1)
-    return np.concatenate(
-        [np.repeat(blue, 5, axis=1), np.repeat(1.0 - blue, 5, axis=1)],
-        axis=1,
-    )
-
-
-def _side_labels_np(labels: np.ndarray) -> np.ndarray:
-    blue = np.asarray(labels, dtype=np.float64).reshape(-1, 1)
-    return np.concatenate(
-        [np.repeat(blue, 5, axis=1), np.repeat(1.0 - blue, 5, axis=1)],
-        axis=1,
-    )
-
-
-def _semantic_context_gap_metrics(
-    scores: np.ndarray,
-    split: SplitData,
-    *,
-    build_vocab: tuple[str, ...],
-    min_count: int = 2048,
-) -> dict[str, float | int]:
-    min_count = max(int(min_count), 1)
-    if split.context_raw is None or split.champion_id is None or split.build_id is None:
-        return {
-            "context_gap_mse": float("nan"),
-            "context_mean_abs_gap": float("nan"),
-            "context_max_abs_gap": float("nan"),
-            "context_populated_bins": 0,
-            "context_median_n": float("nan"),
-            "context_min_n": 0,
-            "context_support_min_count": min_count,
-            "context_support_weighted_gap_mse": float("nan"),
-            "context_support_weighted_mean_abs_gap": float("nan"),
-            "context_high_support_gap_mse": float("nan"),
-            "context_high_support_mean_abs_gap": float("nan"),
-            "context_high_support_p95_abs_gap": float("nan"),
-            "context_high_support_max_abs_gap": float("nan"),
-            "context_high_support_populated_bins": 0,
-        }
-    lens = AuditLens(
-        champion_id=split.champion_id,
-        build_id=split.build_id,
-        context_raw=split.context_raw,
-        build_vocab=build_vocab,
-    )
-    predictions = _side_probabilities_np(scores)
-    targets = _side_labels_np(split.blue_win)
-    gaps: list[float] = []
-    counts: list[int] = []
-    for spec in audit_specs():
-        focus = lens.focus_mask(spec)
-        axis = lens.axis(spec.axis)
-        for bin_spec in spec.bins:
-            mask = focus & bin_spec.predicate(axis)
-            count = int(mask.sum())
-            if count <= 0:
-                continue
-            gaps.append(float(np.mean(predictions[mask]) - np.mean(targets[mask])))
-            counts.append(count)
-    if not gaps:
-        return {
-            "context_gap_mse": float("nan"),
-            "context_mean_abs_gap": float("nan"),
-            "context_max_abs_gap": float("nan"),
-            "context_populated_bins": 0,
-            "context_median_n": float("nan"),
-            "context_min_n": 0,
-            "context_support_min_count": min_count,
-            "context_support_weighted_gap_mse": float("nan"),
-            "context_support_weighted_mean_abs_gap": float("nan"),
-            "context_high_support_gap_mse": float("nan"),
-            "context_high_support_mean_abs_gap": float("nan"),
-            "context_high_support_p95_abs_gap": float("nan"),
-            "context_high_support_max_abs_gap": float("nan"),
-            "context_high_support_populated_bins": 0,
-        }
-    gap_array = np.asarray(gaps, dtype=np.float64) * 100.0
-    count_array = np.asarray(counts, dtype=np.float64)
-    total_count = float(np.sum(count_array))
-    high_support = count_array >= float(min_count)
-    high_support_gaps = gap_array[high_support]
-    return {
-        "context_gap_mse": float(np.mean(gap_array**2)),
-        "context_mean_abs_gap": float(np.mean(np.abs(gap_array))),
-        "context_max_abs_gap": float(np.max(np.abs(gap_array))),
-        "context_populated_bins": int(gap_array.size),
-        "context_median_n": float(np.median(count_array)),
-        "context_min_n": int(np.min(count_array)),
-        "context_support_min_count": min_count,
-        "context_support_weighted_gap_mse": float(
-            np.sum(count_array * (gap_array**2)) / total_count
-        ),
-        "context_support_weighted_mean_abs_gap": float(
-            np.sum(count_array * np.abs(gap_array)) / total_count
-        ),
-        "context_high_support_gap_mse": (
-            float(np.mean(high_support_gaps**2))
-            if high_support_gaps.size
-            else float("nan")
-        ),
-        "context_high_support_mean_abs_gap": (
-            float(np.mean(np.abs(high_support_gaps)))
-            if high_support_gaps.size
-            else float("nan")
-        ),
-        "context_high_support_p95_abs_gap": (
-            float(np.percentile(np.abs(high_support_gaps), 95))
-            if high_support_gaps.size
-            else float("nan")
-        ),
-        "context_high_support_max_abs_gap": (
-            float(np.max(np.abs(high_support_gaps)))
-            if high_support_gaps.size
-            else float("nan")
-        ),
-        "context_high_support_populated_bins": int(high_support_gaps.size),
-    }
-
-
-def _semantic_group_eb_gap_metrics(
-    scores: np.ndarray,
-    split: SplitData,
-    *,
-    build_vocab: tuple[str, ...],
-) -> dict[str, float | int]:
-    if split.context_raw is None or split.champion_id is None or split.build_id is None:
-        return {
-            "group_n_bins": 0,
-            "group_median_n": float("nan"),
-            "group_min_n": 0,
-            "group_raw_gap_mse": float("nan"),
-            "group_raw_floor": float("nan"),
-            "group_eb_gap_mse": float("nan"),
-            "group_eb_floor": float("nan"),
-            "group_systematic_gap_mse": float("nan"),
-            "group_systematic_gap_mse_clipped": float("nan"),
-            "group_eb_mean_abs_gap": float("nan"),
-            "group_eb_max_abs_gap": float("nan"),
-        }
-    lens = AuditLens(
-        champion_id=split.champion_id,
-        build_id=split.build_id,
-        context_raw=split.context_raw,
-        build_vocab=build_vocab,
-    )
-    predictions = _side_probabilities_np(scores)
-    targets = _side_labels_np(split.blue_win)
-    raw_gaps: list[float] = []
-    eb_gaps: list[float] = []
-    sampling_vars: list[float] = []
-    eb_vars: list[float] = []
-    counts_all: list[int] = []
-    for spec in group_audit_specs():
-        focus = lens.focus_mask(spec)
-        axis = lens.axis(spec.axis)
-        counts: list[int] = []
-        empirical: list[float] = []
-        hgnn: list[float] = []
-        for bin_spec in spec.bins:
-            mask = focus & bin_spec.predicate(axis)
-            count = int(mask.sum())
-            if count <= 0:
-                continue
-            counts.append(count)
-            empirical.append(float(np.mean(targets[mask])))
-            hgnn.append(float(np.mean(predictions[mask])))
-        if not counts:
-            continue
-        count_array = np.asarray(counts, dtype=np.float64)
-        empirical_array = np.asarray(empirical, dtype=np.float64)
-        hgnn_array = np.asarray(hgnn, dtype=np.float64)
-        eb_target, eb_var = eb_shrink_targets(count_array, empirical_array)
-        raw_gap = (hgnn_array - empirical_array) * 100.0
-        eb_gap = (hgnn_array - eb_target) * 100.0
-        sampling_var = empirical_array * (1.0 - empirical_array) / count_array
-        raw_gaps.extend(raw_gap.tolist())
-        eb_gaps.extend(eb_gap.tolist())
-        sampling_vars.extend((sampling_var * 1.0e4).tolist())
-        eb_vars.extend((eb_var * 1.0e4).tolist())
-        counts_all.extend(counts)
-    if not eb_gaps:
-        return {
-            "group_n_bins": 0,
-            "group_median_n": float("nan"),
-            "group_min_n": 0,
-            "group_raw_gap_mse": float("nan"),
-            "group_raw_floor": float("nan"),
-            "group_eb_gap_mse": float("nan"),
-            "group_eb_floor": float("nan"),
-            "group_systematic_gap_mse": float("nan"),
-            "group_systematic_gap_mse_clipped": float("nan"),
-            "group_eb_mean_abs_gap": float("nan"),
-            "group_eb_max_abs_gap": float("nan"),
-        }
-    raw_gap_array = np.asarray(raw_gaps, dtype=np.float64)
-    eb_gap_array = np.asarray(eb_gaps, dtype=np.float64)
-    sampling_var_array = np.asarray(sampling_vars, dtype=np.float64)
-    eb_var_array = np.asarray(eb_vars, dtype=np.float64)
-    return {
-        "group_n_bins": int(eb_gap_array.size),
-        "group_median_n": float(np.median(counts_all)),
-        "group_min_n": int(min(counts_all)),
-        "group_raw_gap_mse": float(np.mean(raw_gap_array**2)),
-        "group_raw_floor": float(np.mean(sampling_var_array)),
-        "group_eb_gap_mse": float(np.mean(eb_gap_array**2)),
-        "group_eb_floor": float(np.mean(eb_var_array)),
-        "group_systematic_gap_mse": float(
-            np.mean(eb_gap_array**2) - np.mean(eb_var_array)
-        ),
-        "group_systematic_gap_mse_clipped": float(
-            np.mean(np.maximum(0.0, eb_gap_array**2 - eb_var_array))
-        ),
-        "group_eb_mean_abs_gap": float(np.mean(np.abs(eb_gap_array))),
-        "group_eb_max_abs_gap": float(np.max(np.abs(eb_gap_array))),
-    }
-
-
-def _predict_hgnn(
-    model: HGNNWinModel,
-    split: RawTensorSplit,
-    *,
-    batch_size: int,
-    strength: float,
-    device: str,
-    gatherer: _SidecarGatherer | None = None,
-) -> np.ndarray:
-    return _sigmoid_np(
-        _predict_hgnn_logits(
-            model,
-            split,
-            batch_size=batch_size,
-            strength=strength,
-            device=device,
-            gatherer=gatherer,
-        )
-    )
+    logits: list[np.ndarray] = []
+    try:
+        with torch.no_grad():
+            n_rows = split.blue_win.numel()
+            for start in range(0, n_rows, batch_size):
+                raw_batch = _raw_split_to_device(
+                    _raw_batch(split, slice(start, start + batch_size)),
+                    device=device,
+                )
+                inputs = _hgnn_inputs_from_raw(
+                    raw_batch, strength=strength, device=device, gatherer=gatherer
+                )
+                outputs = model(**inputs)
+                logits.append(
+                    outputs["final_logit"]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .reshape(-1)
+                    .astype(np.float64, copy=False)
+                )
+    finally:
+        if was_training:
+            model.train()
+    if not logits:
+        return np.empty(0, dtype=np.float64)
+    return np.concatenate(logits).astype(np.float64, copy=False)
 
 
 def _warm_start_hgnn_model(
@@ -1517,18 +798,16 @@ def train(
         encoder_sidecar_path=dataset_cfg.encoder_sidecar_path,
         overrides=model_overrides,
     )
+    _validate_serving_artifact_contract(train_cfg, model_config)
 
-    load_semantic_group_features = bool(
-        model_config.use_learned_semantic_moe
-        and model_config.use_semantic_group_features
-    )
+    load_semantic_group_features = model_requires_semantic_group_features(model_config)
     loaded_splits = {
         name: _limit_split(split, dataset_cfg.max_games)
         for name, split in load_splits(
             dataset_cfg,
             require_counts=True,
             load_semantic_group_features=load_semantic_group_features,
-            load_context_raw=load_semantic_group_features,
+            load_context_raw=False,
         ).items()
     }
     # Compact caches omit per-game sidecar arrays; build the on-device gather
@@ -1551,7 +830,7 @@ def train(
     raw_cache_device = "cpu" if train_cfg.raw_tensor_cache_device == "cpu" else device
     tensor_splits = {
         name: _cache_raw_tensor_split(name, splits[name], device=raw_cache_device)
-        for name in ("train", "test")
+        for name in SPLIT_ORDER
     }
 
     model = HGNNWinModel(model_config).to(device)
@@ -1578,10 +857,8 @@ def train(
     best_state = copy.deepcopy(model.state_dict())
     best_test_nll = math.inf
     best_checkpoint_test_nll = math.inf
-    best_checkpoint_test_ece = math.inf
     best_checkpoint_accuracy = -math.inf
     best_epoch = 0
-    best_threshold = 0.5
     stale_epochs = 0
     history: list[dict[str, float | int]] = []
 
@@ -1604,7 +881,7 @@ def train(
             torch.cuda.synchronize()
 
     if train_cfg.warm_start_model_path is not None:
-        test_outputs = _predict_hgnn_outputs(
+        test_logits = _predict_hgnn_logits(
             model,
             tensor_splits["test"],
             batch_size=train_cfg.batch_size,
@@ -1612,52 +889,18 @@ def train(
             device=device,
             gatherer=gatherer,
         )
-        test_logits = test_outputs["final_logit"]
         test_predictions = _sigmoid_np(test_logits)
         test_metrics = _evaluate_predictions(test_predictions, splits["test"])
-        if load_semantic_group_features:
-            test_metrics.update(
-                _semantic_context_gap_metrics(
-                    test_outputs["focus_side_probability"],
-                    splits["test"],
-                    build_vocab=tuple(model_config.build_vocab),
-                    min_count=train_cfg.semantic_context_metric_min_count,
-                )
-            )
-            test_metrics.update(
-                _semantic_group_eb_gap_metrics(
-                    test_outputs["focus_side_probability"],
-                    splits["test"],
-                    build_vocab=tuple(model_config.build_vocab),
-                )
-            )
-        test_threshold, test_threshold_accuracy = _select_threshold(
-            test_predictions,
-            splits["test"].blue_win,
-        )
         best_test_nll = float(test_metrics["nll"])
         best_checkpoint_test_nll = float(test_metrics["nll"])
-        best_checkpoint_test_ece = float(test_metrics["ece"])
         best_checkpoint_accuracy = float(test_metrics["accuracy"])
         best_epoch = 0
-        best_threshold = test_threshold
         best_state = copy.deepcopy(model.state_dict())
-        if "context_gap_mse" in test_metrics:
-            logger.info(
-                "epoch=0 warm_start test_nll=%.5f test_context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f",
-                test_metrics["nll"],
-                test_metrics["context_gap_mse"],
-                test_metrics["context_mean_abs_gap"],
-                test_metrics["context_max_abs_gap"],
-            )
-        else:
-            logger.info(
-                "epoch=0 warm_start test_nll=%.5f test_acc=%.4f test_thr=%.3f test_thr_acc=%.4f",
-                test_metrics["nll"],
-                test_metrics["accuracy"],
-                test_threshold,
-                test_threshold_accuracy,
-            )
+        logger.info(
+            "epoch=0 warm_start test_nll=%.5f test_acc=%.4f",
+            test_metrics["nll"],
+            test_metrics["accuracy"],
+        )
 
     for epoch in range(1, train_cfg.max_epochs + 1):
         synchronize_training_device()
@@ -1699,9 +942,7 @@ def train(
             swapped_semantic_moe_regularization_loss = (
                 model.semantic_moe_regularization_loss(swapped_outputs)
             )
-            (
-                0.5 * (swapped_loss + swapped_semantic_moe_regularization_loss)
-            ).backward()
+            (0.5 * (swapped_loss + swapped_semantic_moe_regularization_loss)).backward()
             loss = 0.5 * (direct_loss.detach() + swapped_loss.detach())
             semantic_moe_regularization_loss = 0.5 * (
                 direct_semantic_moe_regularization_loss.detach()
@@ -1722,7 +963,7 @@ def train(
         synchronize_training_device()
         train_seconds = time.perf_counter() - train_started
         test_started = time.perf_counter()
-        test_outputs = _predict_hgnn_outputs(
+        test_logits = _predict_hgnn_logits(
             model,
             tensor_splits["test"],
             batch_size=train_cfg.batch_size,
@@ -1731,102 +972,26 @@ def train(
             gatherer=gatherer,
         )
         synchronize_training_device()
-        test_logits = test_outputs["final_logit"]
         test_predictions = _sigmoid_np(test_logits)
         train_nll = train_loss_sum / max(train_seen, 1)
         train_semantic_moe_regularization_loss = (
             train_semantic_moe_regularization_loss_sum / max(train_seen, 1)
         )
         test_metrics = _evaluate_predictions(test_predictions, splits["test"])
-        if load_semantic_group_features:
-            test_metrics.update(
-                _semantic_context_gap_metrics(
-                    test_outputs["focus_side_probability"],
-                    splits["test"],
-                    build_vocab=tuple(model_config.build_vocab),
-                    min_count=train_cfg.semantic_context_metric_min_count,
-                )
-            )
-            test_metrics.update(
-                _semantic_group_eb_gap_metrics(
-                    test_outputs["focus_side_probability"],
-                    splits["test"],
-                    build_vocab=tuple(model_config.build_vocab),
-                )
-            )
         test_seconds = time.perf_counter() - test_started
         epoch_seconds = time.perf_counter() - epoch_started
         train_rows_per_second = (train_seen / 2.0) / max(train_seconds, EPS)
         train_epoch_games_seen = int(train_seen // 2)
         train_augmented_samples_per_second = train_seen / max(train_seconds, EPS)
         test_nll = float(test_metrics["nll"])
-        test_threshold, test_threshold_accuracy = _select_threshold(
-            test_predictions,
-            splits["test"].blue_win,
-        )
         checkpoint_accuracy = float(test_metrics["accuracy"])
         history_row: dict[str, float | int] = {
             "epoch": epoch,
             "train_nll": train_nll,
             "test_nll": test_nll,
             "test_accuracy": float(test_metrics["accuracy"]),
-            "test_auc": float(test_metrics["auc"]),
-            "test_ece": float(test_metrics["ece"]),
-            "test_threshold": test_threshold,
-            "test_threshold_accuracy": test_threshold_accuracy,
             "checkpoint_accuracy": checkpoint_accuracy,
-            "train_seconds": train_seconds,
-            "test_seconds": test_seconds,
-            "epoch_seconds": epoch_seconds,
-            "train_rows_per_second": train_rows_per_second,
-            "train_epoch_games_seen": train_epoch_games_seen,
-            "train_epoch_max_games": 0
-            if train_epoch_max_games is None
-            else int(train_epoch_max_games),
-            "train_augmented_samples_per_second": train_augmented_samples_per_second,
-            "train_batch_size": train_batch_size,
         }
-        if "context_gap_mse" in test_metrics:
-            history_row["test_context_gap_mse"] = float(test_metrics["context_gap_mse"])
-            history_row["test_context_mean_abs_gap"] = float(
-                test_metrics["context_mean_abs_gap"]
-            )
-            history_row["test_context_max_abs_gap"] = float(
-                test_metrics["context_max_abs_gap"]
-            )
-            history_row["test_context_support_weighted_gap_mse"] = float(
-                test_metrics["context_support_weighted_gap_mse"]
-            )
-            history_row["test_context_support_weighted_mean_abs_gap"] = float(
-                test_metrics["context_support_weighted_mean_abs_gap"]
-            )
-            history_row["test_context_high_support_gap_mse"] = float(
-                test_metrics["context_high_support_gap_mse"]
-            )
-            history_row["test_context_high_support_p95_abs_gap"] = float(
-                test_metrics["context_high_support_p95_abs_gap"]
-            )
-            history_row["test_context_high_support_max_abs_gap"] = float(
-                test_metrics["context_high_support_max_abs_gap"]
-            )
-            history_row["test_context_high_support_populated_bins"] = int(
-                test_metrics["context_high_support_populated_bins"]
-            )
-        if "group_systematic_gap_mse" in test_metrics:
-            history_row["test_group_eb_gap_mse"] = float(test_metrics["group_eb_gap_mse"])
-            history_row["test_group_eb_floor"] = float(test_metrics["group_eb_floor"])
-            history_row["test_group_floor_normalized_eb_gap"] = float(
-                test_metrics["group_eb_gap_mse"]
-            ) / max(float(test_metrics["group_eb_floor"]), EPS)
-            history_row["test_group_systematic_gap_mse"] = float(
-                test_metrics["group_systematic_gap_mse"]
-            )
-            history_row["test_group_systematic_gap_mse_clipped"] = float(
-                test_metrics["group_systematic_gap_mse_clipped"]
-            )
-            history_row["test_group_eb_mean_abs_gap"] = float(
-                test_metrics["group_eb_mean_abs_gap"]
-            )
         if semantic_moe_enabled:
             history_row["train_semantic_moe_regularization_loss"] = (
                 train_semantic_moe_regularization_loss
@@ -1834,43 +999,20 @@ def train(
         history.append(history_row)
         if semantic_moe_enabled:
             logger.info(
-                "epoch=%s train_nll=%.5f semantic_moe_reg=%.5f test_nll=%.5f test_acc=%.4f test_thr=%.3f test_thr_acc=%.4f",
+                "epoch=%s train_nll=%.5f semantic_moe_reg=%.5f test_nll=%.5f test_acc=%.4f",
                 epoch,
                 train_nll,
                 train_semantic_moe_regularization_loss,
                 test_nll,
                 test_metrics["accuracy"],
-                test_threshold,
-                test_threshold_accuracy,
             )
         else:
             logger.info(
-                "epoch=%s train_nll=%.5f test_nll=%.5f test_acc=%.4f test_thr=%.3f test_thr_acc=%.4f",
+                "epoch=%s train_nll=%.5f test_nll=%.5f test_acc=%.4f",
                 epoch,
                 train_nll,
                 test_nll,
                 test_metrics["accuracy"],
-                test_threshold,
-                test_threshold_accuracy,
-            )
-        if "context_gap_mse" in test_metrics:
-            logger.info(
-                "epoch=%s test_context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f high_support_max_abs=%.3f high_support_bins=%s",
-                epoch,
-                test_metrics["context_gap_mse"],
-                test_metrics["context_mean_abs_gap"],
-                test_metrics["context_max_abs_gap"],
-                test_metrics["context_high_support_max_abs_gap"],
-                test_metrics["context_high_support_populated_bins"],
-            )
-        if "group_systematic_gap_mse" in test_metrics:
-            logger.info(
-                "epoch=%s test_group_systematic_gap_mse=%.4f eb_mse=%.4f mean_abs=%.3f max_abs=%.3f",
-                epoch,
-                test_metrics["group_systematic_gap_mse"],
-                test_metrics["group_eb_gap_mse"],
-                test_metrics["group_eb_mean_abs_gap"],
-                test_metrics["group_eb_max_abs_gap"],
             )
         logger.info(
             "epoch=%s timing train_seconds=%.2f test_seconds=%.2f epoch_seconds=%.2f train_games=%s train_rows_per_s=%.1f train_augmented_samples_per_s=%.1f batch_size=%s",
@@ -1888,9 +1030,7 @@ def train(
         if checkpoint_accuracy > best_checkpoint_accuracy:
             best_checkpoint_accuracy = checkpoint_accuracy
             best_checkpoint_test_nll = test_nll
-            best_checkpoint_test_ece = float(test_metrics["ece"])
             best_epoch = epoch
-            best_threshold = test_threshold
             best_state = copy.deepcopy(model.state_dict())
             stale_epochs = 0
         else:
@@ -1901,10 +1041,9 @@ def train(
     model.load_state_dict(best_state)
     save_hgnn_model(train_cfg.model_path, model, confidence_strength=strength)
 
-    prediction_split_names = ("train", "test")
-    prediction_tensor_splits = dict(tensor_splits)
-    prediction_outputs = {
-        split_name: _predict_hgnn_outputs(
+    prediction_split_names = SPLIT_ORDER
+    prediction_logits = {
+        split_name: _predict_hgnn_logits(
             model,
             tensor_split,
             batch_size=train_cfg.batch_size,
@@ -1912,61 +1051,16 @@ def train(
             device=device,
             gatherer=gatherer,
         )
-        for split_name, tensor_split in prediction_tensor_splits.items()
+        for split_name, tensor_split in tensor_splits.items()
     }
-    prediction_logits = {
-        split_name: outputs["final_logit"]
-        for split_name, outputs in prediction_outputs.items()
-    }
-    temperature = _fit_temperature(prediction_logits["test"], splits["test"].blue_win)
     predictions = {
         split_name: _sigmoid_np(logits)
-        for split_name, logits in prediction_logits.items()
-    }
-    calibrated_predictions = {
-        split_name: _sigmoid_np(logits, temperature=temperature)
         for split_name, logits in prediction_logits.items()
     }
     split_metrics = {
         split_name: _evaluate_predictions(predictions[split_name], splits[split_name])
         for split_name in prediction_split_names
     }
-    if load_semantic_group_features:
-        for split_name in prediction_split_names:
-            split_metrics[split_name].update(
-                _semantic_context_gap_metrics(
-                    prediction_outputs[split_name]["focus_side_probability"],
-                    splits[split_name],
-                    build_vocab=tuple(model_config.build_vocab),
-                    min_count=train_cfg.semantic_context_metric_min_count,
-                )
-            )
-            split_metrics[split_name].update(
-                _semantic_group_eb_gap_metrics(
-                    prediction_outputs[split_name]["focus_side_probability"],
-                    splits[split_name],
-                    build_vocab=tuple(model_config.build_vocab),
-                )
-            )
-    for split_name in prediction_split_names:
-        split_metrics[split_name]["threshold_accuracy"] = _threshold_accuracy(
-            predictions[split_name],
-            splits[split_name].blue_win,
-            best_threshold,
-        )
-        split_metrics[split_name]["support_buckets"] = _support_bucket_metrics(
-            predictions[split_name],
-            splits[split_name],
-        )
-        calibrated = _evaluate_predictions(
-            calibrated_predictions[split_name], splits[split_name]
-        )
-        calibrated["support_buckets"] = _support_bucket_metrics(
-            calibrated_predictions[split_name],
-            splits[split_name],
-        )
-        split_metrics[split_name]["temperature_scaled"] = calibrated
-    _attach_output_diagnostics(split_metrics, prediction_outputs)
     metrics = {
         "model_type": "hgnn",
         "dataset_config": asdict(dataset_cfg),
@@ -1979,14 +1073,7 @@ def train(
         "selection_split": "test",
         "best_test_nll": best_test_nll,
         "best_checkpoint_test_nll": best_checkpoint_test_nll,
-        "best_checkpoint_test_ece": best_checkpoint_test_ece,
         "best_checkpoint_accuracy": best_checkpoint_accuracy,
-        "decision_threshold": best_threshold,
-        "temperature_scaling": {
-            "temperature": temperature,
-            "fit_split": "test",
-            "report_only": True,
-        },
         "elapsed_seconds": time.monotonic() - started,
         "history": history,
         "evaluated_splits": list(prediction_split_names),
@@ -2000,58 +1087,13 @@ def train(
     for split_name in prediction_split_names:
         m = metrics[split_name]
         if isinstance(m, dict):
-            logit_diagnostics = m.get("logit_diagnostics", {})
             logger.info(
-                "%s n=%s acc=%.4f thr_acc=%.4f auc=%.4f nll=%.4f ece=%.4f brier=%.4f base_logit_std=%.4f context_logit_std=%.4f final_logit_std=%.4f",
+                "%s n=%s acc=%.4f nll=%.4f",
                 split_name,
                 m["n"],
                 m["accuracy"],
-                m["threshold_accuracy"],
-                m["auc"],
                 m["nll"],
-                m["ece"],
-                m["brier"],
-                logit_diagnostics.get("base_logit_std", float("nan")),
-                logit_diagnostics.get("context_logit_std", float("nan")),
-                logit_diagnostics.get("final_logit_std", float("nan")),
             )
-            if "context_gap_mse" in m:
-                logger.info(
-                    "%s context_gap_mse=%.4f mean_abs=%.3f max_abs=%.3f support_weighted_mse=%.4f high_support_max_abs=%.3f high_support_bins=%s populated_bins=%s",
-                    split_name,
-                    m["context_gap_mse"],
-                    m["context_mean_abs_gap"],
-                    m["context_max_abs_gap"],
-                    m["context_support_weighted_gap_mse"],
-                    m["context_high_support_max_abs_gap"],
-                    m["context_high_support_populated_bins"],
-                    m["context_populated_bins"],
-                )
-            if "group_systematic_gap_mse" in m:
-                logger.info(
-                    "%s group_systematic_gap_mse=%.4f eb_mse=%.4f mean_abs=%.3f max_abs=%.3f bins=%s",
-                    split_name,
-                    m["group_systematic_gap_mse"],
-                    m["group_eb_gap_mse"],
-                    m["group_eb_mean_abs_gap"],
-                    m["group_eb_max_abs_gap"],
-                    m["group_n_bins"],
-                )
-            semantic_moe = m.get("semantic_moe_diagnostics")
-            if isinstance(semantic_moe, dict):
-                logger.info(
-                    "%s semantic_moe usage=%s selected=%s router_entropy=%.4f factor_orthogonality=%.6f factor_variance=%.6f factor_std_mean=%.4f factor_std_min=%.4f token_keep=%.4f reg=%.6f",
-                    split_name,
-                    _json_value(semantic_moe.get("expert_usage", [])),
-                    _json_value(semantic_moe.get("expert_selected_fraction", [])),
-                    semantic_moe.get("router_entropy", float("nan")),
-                    semantic_moe.get("factor_orthogonality_loss", float("nan")),
-                    semantic_moe.get("factor_variance_loss", float("nan")),
-                    semantic_moe.get("factor_std_mean", float("nan")),
-                    semantic_moe.get("factor_std_min", float("nan")),
-                    semantic_moe.get("context_token_keep_fraction", float("nan")),
-                    semantic_moe.get("regularization_loss", float("nan")),
-                )
 
     return train_cfg.model_path
 
@@ -2059,8 +1101,6 @@ def train(
 def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     """HGNNConfig overrides exposed by the training CLI."""
     return {
-        "structural_antisymmetry": args.structural_antisymmetry,
-        "structural_antisymmetry_scale": args.structural_antisymmetry_scale,
         "use_learned_semantic_moe": args.use_learned_semantic_moe,
         "semantic_moe_num_experts": args.semantic_moe_num_experts,
         "semantic_moe_top_k": args.semantic_moe_top_k,
@@ -2070,7 +1110,6 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "semantic_moe_expert_hidden": args.semantic_moe_expert_hidden,
         "semantic_moe_dropout": args.semantic_moe_dropout,
         "semantic_moe_context_token_dropout": args.semantic_moe_context_token_dropout,
-        "semantic_moe_architecture": args.semantic_moe_architecture,
         "semantic_moe_view_gate_hidden": args.semantic_moe_view_gate_hidden,
         "semantic_moe_view_router_noise": args.semantic_moe_view_router_noise,
         "semantic_moe_view_balance_weight": args.semantic_moe_view_balance_weight,
@@ -2181,8 +1220,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
     parser.add_argument(
         "--max-grad-norm", type=float, default=train_defaults.max_grad_norm
     )
-    parser.add_argument("--structural-antisymmetry", action="store_true")
-    parser.add_argument("--structural-antisymmetry-scale", type=float, default=0.5)
     parser.add_argument(
         "--use-learned-semantic-moe",
         action=argparse.BooleanOptionalAction,
@@ -2231,12 +1268,6 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
         "--semantic-moe-context-token-dropout",
         type=float,
         default=model_defaults.semantic_moe_context_token_dropout,
-    )
-    parser.add_argument(
-        "--semantic-moe-architecture",
-        choices=("convex_encoder_mix",),
-        default=str(production_model_defaults["semantic_moe_architecture"]),
-        help="Production semantic MoE architecture.",
     )
     parser.add_argument(
         "--semantic-moe-view-gate-hidden",

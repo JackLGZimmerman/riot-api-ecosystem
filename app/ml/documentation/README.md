@@ -9,9 +9,8 @@ inputs have been removed from the HGNN contract.
 
 The current identity-signal surface is the frozen identity-encoder sidecar
 artifact at `app/ml/data/semantic_identity_sidecar_compact.npz`. Production
-consumes all three sidecar blocks through
-`semantic_moe_architecture="convex_encoder_mix"`; the older node-init sidecar
-MLPs remain disabled by default. See
+consumes all three sidecar blocks through the learned semantic MoE; the older
+node-init sidecar MLPs were removed. See
 [HGNN_CURRENT.md](HGNN_CURRENT.md#identity-encoder-sidecars).
 
 Build-intent work is tracked separately in
@@ -26,7 +25,7 @@ cache/prior arrays
 -> posterior and support features
 -> champion/role/build identity + 1vX node prior
 -> Loadout + patch-only Temporal residual heads
--> static/full-game/temporal sidecars into convex semantic MoE
+-> static/full-game/temporal sidecars into learned semantic MoE
 -> blue/red mean + attention team readout
 -> final logit
 -> sigmoid = P(blue wins)
@@ -41,11 +40,9 @@ uv run python -m app.ml.train \
 ```
 
 Training tensor-caches the train and test splits, evaluates test every epoch,
-and selects the best checkpoint by raw test accuracy. Test is the
-model-selection split — checkpoint selection, decision threshold, and
-report-only temperature scaling are all fit on it — not a final untouched
-holdout. Add `--allow-production-artifact-overwrite` only for an explicit
-promotion run.
+selects the best checkpoint by raw test accuracy, and writes lean accuracy/NLL
+metrics. Test is the model-selection split, not a final untouched holdout. Add
+`--allow-production-artifact-overwrite` only for an explicit promotion run.
 
 Training writes:
 
@@ -84,24 +81,21 @@ caches with a validation split must be rebuilt:
 | `player_champ_rate.npy`, `player_champ_cnt.npy` | `[games, 10]` | optional per-player/champion priors; disabled in the production model until serving supplies player features |
 | `blue_win.npy` | `[games]` | target label |
 
-The default model path now points at the promoted `convex_encoder_mix` semantic
-MoE checkpoint copied into `app/ml/data/hgnn_production_model.pt`.
+The default model path now points at the promoted learned semantic MoE
+checkpoint copied into `app/ml/data/hgnn_production_model.pt`.
 
 ## Identity Semantic Context
 
 `HGNNConfig.use_learned_semantic_moe=True` enables the production side-logit over
-the frozen static, full-game, and temporal identity sidecars. The promoted
-architecture is `convex_encoder_mix`, selected because it kept all three encoder
-views present while producing the lowest validation group-EB semantic gap in the
-architecture matrix. The older identity semantic context head remains a
-model-level research path only; `train.py` production testing uses the learned
-semantic MoE route.
+the frozen static, full-game, and temporal identity sidecars. The maintained path
+keeps all three encoder views present through the learned semantic MoE and
+compact group features; older direct context heads and node-init sidecar MLPs
+have been removed from the production surface.
 
 ## Training
 
 `app/ml/train.py` trains one production model shape with AdamW, team-swap
-augmentation, test-split temperature diagnostics, and raw test-accuracy
-checkpointing.
+augmentation, raw test-accuracy checkpointing, and accuracy/NLL reporting.
 
 Each batch is trained twice: original blue/red order with label `y`, and a
 team-swapped mirror with label `1 - y`.

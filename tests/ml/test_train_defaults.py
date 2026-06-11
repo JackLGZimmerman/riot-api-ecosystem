@@ -16,12 +16,17 @@ from app.ml.config import (
 from app.ml.semantic_group_features import (
     SEMANTIC_GROUP_FEATURE_DIM,
 )
-from app.ml.hgnn_model import HGNNConfig, hgnn_config_payload
+from app.ml.hgnn_model import (
+    HGNNConfig,
+    HGNNWinModel,
+    hgnn_config_payload,
+    load_hgnn_model,
+)
 from app.ml.train import (
-    PRODUCTION_SEMANTIC_MOE_ARCHITECTURE,
     _freeze_warm_start_loaded_parameters,
     _hgnn_config_from_meta,
     _batch_indices,
+    _validate_serving_artifact_contract,
     _validate_train_output_paths,
     _warm_start_hgnn_model,
     production_semantic_model_overrides,
@@ -70,30 +75,71 @@ def test_production_defaults_use_all_identity_encoders() -> None:
     assert cfg.identity_static_sidecar_dim == 16
     assert cfg.identity_full_game_sidecar_dim == 64
     assert cfg.identity_temporal_sidecar_dim == 64
-    assert cfg.use_identity_static_sidecar is False
-    assert cfg.use_identity_full_game_sidecar is False
-    assert cfg.use_identity_temporal_sidecar is False
     assert cfg.use_learned_semantic_moe is True
     assert cfg.use_semantic_group_features is True
     assert cfg.semantic_moe_num_experts == 128
     assert cfg.semantic_moe_top_k == 32
     assert cfg.semantic_group_feature_dim == SEMANTIC_GROUP_FEATURE_DIM
-    assert cfg.semantic_moe_architecture == PRODUCTION_SEMANTIC_MOE_ARCHITECTURE
 
 
 def test_training_refuses_production_artifact_paths_without_promotion_flag() -> None:
     with pytest.raises(ValueError, match="overwrite production artifacts"):
         _validate_train_output_paths(TrainConfig())
 
-    _validate_train_output_paths(
-        TrainConfig(allow_production_artifact_overwrite=True)
-    )
+    _validate_train_output_paths(TrainConfig(allow_production_artifact_overwrite=True))
 
 
-def test_config_payload_omits_deprecated_view_top_k() -> None:
+def test_config_payload_omits_removed_legacy_knobs() -> None:
     payload = hgnn_config_payload(HGNNConfig())
 
     assert "semantic_moe_view_top_k" not in payload
+    assert "semantic_moe_architecture" not in payload
+    assert "use_identity_static_sidecar" not in payload
+    assert "use_identity_semantic_context_head" not in payload
+
+
+def test_hgnn_loader_ignores_removed_legacy_state_keys(tmp_path) -> None:
+    model = HGNNWinModel(HGNNConfig(n_champions=10, n_builds=3))
+    state_dict = dict(model.state_dict())
+    state_dict["learned_semantic_moe.sidecar_factor.0.weight"] = torch.zeros(1)
+    path = tmp_path / "legacy.pt"
+    torch.save(
+        {
+            "model_type": "hgnn",
+            "model_config": {
+                **hgnn_config_payload(model.config),
+                "semantic_moe_architecture": "convex_encoder_mix",
+                "use_identity_static_sidecar": False,
+            },
+            "confidence_strength": 30.0,
+            "state_dict": state_dict,
+        },
+        path,
+    )
+
+    loaded, config, strength = load_hgnn_model(path)
+
+    assert isinstance(loaded, HGNNWinModel)
+    assert config.n_champions == 10
+    assert strength == pytest.approx(30.0)
+
+
+def test_serving_artifact_path_rejects_runtime_unsupported_heads() -> None:
+    broad = HGNNConfig(loadout_feature_dim=10, patch_feature_dim=2)
+
+    with pytest.raises(ValueError, match="production model path"):
+        _validate_serving_artifact_contract(
+            TrainConfig(allow_production_artifact_overwrite=True),
+            broad,
+        )
+
+    _validate_serving_artifact_contract(
+        TrainConfig(
+            model_path=DEFAULT_PRODUCTION_MODEL_PATH.with_name("candidate.pt"),
+            allow_production_artifact_overwrite=True,
+        ),
+        broad,
+    )
 
 
 def test_batch_indices_can_cap_train_rows_per_epoch() -> None:

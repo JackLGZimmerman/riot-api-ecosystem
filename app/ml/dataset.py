@@ -78,8 +78,12 @@ def identity_meta(cfg: DatasetConfig) -> dict:
         identity["identity_encoder_sidecar"] = meta["identity_encoder_sidecar"]
     features = meta.get("production_features")
     if isinstance(features, dict):
-        loadout_names = tuple(str(name) for name in features.get("loadout_feature_names", ()))
-        patch_names = tuple(str(name) for name in features.get("patch_feature_names", ()))
+        loadout_names = tuple(
+            str(name) for name in features.get("loadout_feature_names", ())
+        )
+        patch_names = tuple(
+            str(name) for name in features.get("patch_feature_names", ())
+        )
         identity["loadout_feature_names"] = loadout_names
         identity["patch_feature_names"] = patch_names
         identity["loadout_feature_dim"] = len(loadout_names)
@@ -109,8 +113,7 @@ def _split_order(meta: dict) -> tuple[str, str]:
     order = tuple(str(name) for name in raw)
     if sorted(order) != sorted(SPLIT_ORDER):
         raise ValueError(
-            "Cache split_order is invalid; expected train and test. "
-            "Rebuild the cache."
+            "Cache split_order is invalid; expected train and test. Rebuild the cache."
         )
     return (order[0], order[1])
 
@@ -127,13 +130,7 @@ def _split_ranges(meta: dict, n_games: int) -> dict[str, tuple[int, int]]:
     counts = _split_counts(meta, n_games)
     raw_ranges = meta.get("split_ranges")
     if raw_ranges is None:
-        offset = 0
-        ranges: dict[str, tuple[int, int]] = {}
-        for split_name in _split_order(meta):
-            count = counts[split_name]
-            ranges[split_name] = (offset, offset + count)
-            offset += count
-        return {name: ranges[name] for name in SPLIT_ORDER}
+        raise ValueError("Cache split_ranges metadata is missing; rebuild the cache.")
     if not isinstance(raw_ranges, dict):
         raise ValueError("Cache split_ranges metadata is invalid; rebuild the cache.")
 
@@ -157,7 +154,9 @@ def _split_ranges(meta: dict, n_games: int) -> dict[str, tuple[int, int]]:
     offset = 0
     for lo, hi, _split_name in sorted(covered):
         if lo != offset:
-            raise ValueError("Cache split ranges do not cover n_games; rebuild the cache.")
+            raise ValueError(
+                "Cache split ranges do not cover n_games; rebuild the cache."
+            )
         offset = hi
     if offset != n_games:
         raise ValueError("Cache split ranges do not cover n_games; rebuild the cache.")
@@ -246,12 +245,16 @@ def load_splits(
     if load_semantic_group_features:
         identity = meta.get("identity")
         if not isinstance(identity, dict) or "build_vocab" not in identity:
-            raise ValueError("Cache metadata is missing identity.build_vocab; rebuild the cache.")
+            raise ValueError(
+                "Cache metadata is missing identity.build_vocab; rebuild the cache."
+            )
         try:
-            arrays["semantic_group_features"] = materialize_semantic_group_feature_cache(
-                cache_dir=cfg.cache_dir,
-                n_games=n,
-                build_vocab=tuple(identity["build_vocab"]),
+            arrays["semantic_group_features"] = (
+                materialize_semantic_group_feature_cache(
+                    cache_dir=cfg.cache_dir,
+                    n_games=n,
+                    build_vocab=tuple(identity["build_vocab"]),
+                )
             )
         except ValueError as exc:
             if semantic_group_feature_dim is None:

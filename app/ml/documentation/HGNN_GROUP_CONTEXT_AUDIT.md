@@ -14,7 +14,7 @@ This audit re-cuts the context examples onto deterministic build/role groups, th
 - Prediction cache regenerated from `app/ml/data/hgnn_production_model.pt` into `app/ml/data/audit_focus_side_probability.npy`.
 - Semantic group feature schema: v2, 25 compact per-slot features.
 
-The promoted production checkpoint uses `semantic_moe_architecture = convex_encoder_mix`, `semantic_moe_num_experts = 128`, `semantic_moe_top_k = 32`, `use_learned_semantic_moe = true`, `use_semantic_group_features = true`, and `semantic_identity_sidecar_compact.npz`.
+The promoted production checkpoint uses `semantic_moe_num_experts = 128`, `semantic_moe_top_k = 32`, `use_learned_semantic_moe = true`, `use_semantic_group_features = true`, and `semantic_identity_sidecar_compact.npz`.
 
 ## Production Result (51 groups, 219 populated bins)
 
@@ -59,9 +59,12 @@ Rows are sorted by debiased `systematic_gap_mse`; `EB gap` is HGNN minus EB targ
 
 ## High-Support Empirical Group Catalog
 
-This table excerpts the top 45 group rows from the 60 selected group trajectories in `/tmp/hgnn_context_discovery_v2.json`; ranking is by validation discovery score after dedupe and axis caps.
+This table excerpts the top 45 historical validation group rows from the 60
+selected group trajectories in `/tmp/hgnn_context_discovery_v2.json`; ranking is
+by validation discovery score after dedupe and axis caps. Rerun the audit on
+`test` for the current v32 test-only protocol.
 
-| Example | Axis | val n | min bin n | Stable emp effect | Stable HGNN effect | Stable slope gap | Mean abs gap | Test effect |
+| Example | Axis | historical val n | min bin n | Stable emp effect | Stable HGNN effect | Stable slope gap | Mean abs gap | Test effect |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | attack_damage all roles group | enemy marksman build count | 212,774 | 8,519 | -7.3 pp | -4.3 pp | +2.9 pp | 1.0 pp | N/A |
 | lethality JUNGLE group | ally scaling | 62,511 | 7,119 | +7.3 pp | +6.2 pp | -1.1 pp | 0.7 pp | +6.4 pp |
@@ -244,7 +247,7 @@ uv run python -m app.ml.context_examples_audit \
   --model-path app/ml/data/hgnn_production_model.pt \
   --encoder-sidecar-path app/ml/data/semantic_identity_sidecar_compact.npz \
   --prediction-cache app/ml/data/audit_focus_side_probability.npy \
-  --audit-split val \
+  --audit-split test \
   --output /tmp/hgnn_context_examples_probe.md \
   --json-output /tmp/hgnn_context_examples_probe.json \
   --refresh-predictions \

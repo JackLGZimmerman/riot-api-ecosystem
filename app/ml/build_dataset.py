@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -16,6 +17,7 @@ from app.ml.cache_layout import (
     CACHE_FORMAT,
     CACHE_META_FILE,
     DISK_DTYPES,
+    PLAYER_ARRAY_NAMES,
     array_paths,
     sidecar_array_paths,
 )
@@ -35,6 +37,37 @@ SPLIT_ORDER = ("train", "test")
 setup_logging_config()
 logger = logging.getLogger(__name__)
 
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+def _sql_ident(value: str) -> str:
+    if not _IDENTIFIER_RE.match(value):
+        raise ValueError(f"unsafe ClickHouse identifier: {value!r}")
+    return value
+
+
+def _sql_str(value: str) -> str:
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _player_prior_selects(enabled: bool) -> str:
+    if enabled:
+        return f"""
+    {_player("win_rate", "toFloat32(0.5)")} AS pl_raw,
+    {_player("matchups", "toUInt32(0)")} AS pl_cnt,
+    {_player_champ("win_rate", "toFloat32(0.5)")} AS plc_raw,
+    {_player_champ("matchups", "toUInt32(0)")} AS plc_cnt,
+    {_player_role("matchups", "toUInt32(0)")} AS plr_cnt,
+"""
+    return """
+    arrayMap(k -> toFloat32(0.5), solo_keys) AS pl_raw,
+    arrayMap(k -> toUInt32(0), solo_keys) AS pl_cnt,
+    arrayMap(k -> toFloat32(0.5), solo_keys) AS plc_raw,
+    arrayMap(k -> toUInt32(0), solo_keys) AS plc_cnt,
+    arrayMap(k -> toUInt32(0), solo_keys) AS plr_cnt,
+"""
+
+
 def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
     """Subtract each train game's own outcome from its in-sample priors, in place.
 
@@ -45,11 +78,17 @@ def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
     blue_win = raw["blue_win"]
     red_win = 1.0 - blue_win
     own = np.concatenate(
-        [np.broadcast_to(blue_win[:, None], (blue_win.size, 5)),
-         np.broadcast_to(red_win[:, None], (blue_win.size, 5))], axis=1
+        [
+            np.broadcast_to(blue_win[:, None], (blue_win.size, 5)),
+            np.broadcast_to(red_win[:, None], (blue_win.size, 5)),
+        ],
+        axis=1,
     )
 
-    for rate_key, cnt_key in (("p1_raw", "p1_cnt"), ("pl_raw", "pl_cnt"), ("plc_raw", "plc_cnt")):
+    prior_pairs = [("p1_raw", "p1_cnt")]
+    if "pl_raw" in raw and "pl_cnt" in raw:
+        prior_pairs.extend([("pl_raw", "pl_cnt"), ("plc_raw", "plc_cnt")])
+    for rate_key, cnt_key in prior_pairs:
         count = raw[cnt_key]
         loo_count = count - 1.0
         loo_wins = np.rint(raw[rate_key] * count) - own
@@ -57,7 +96,8 @@ def _leave_one_out(raw: dict[str, np.ndarray]) -> None:
         raw[rate_key] = np.where(safe, loo_wins / np.where(safe, loo_count, 1.0), 0.5)
         raw[cnt_key] = np.maximum(loo_count, 0.0)
     # Count-only role experience: each train game counts itself once.
-    raw["plr_cnt"] = np.maximum(raw["plr_cnt"] - 1.0, 0.0)
+    if "plr_cnt" in raw:
+        raw["plr_cnt"] = np.maximum(raw["plr_cnt"] - 1.0, 0.0)
 
 
 def _solo(attr: str, default: str) -> str:
@@ -95,11 +135,7 @@ SELECT
     {_solo("matchups", "toUInt32(0)")} AS p1_cnt,
     arrayMap(k -> toInt16(k.1), solo_keys) AS champion_id,
     arrayMap(k -> toInt16(if(indexOf({{build_vocab}}, toString(k.3)) = 0, {{n_builds}}, indexOf({{build_vocab}}, toString(k.3)) - 1)), solo_keys) AS build_id,
-    {_player("win_rate", "toFloat32(0.5)")} AS pl_raw,
-    {_player("matchups", "toUInt32(0)")} AS pl_cnt,
-    {_player_champ("win_rate", "toFloat32(0.5)")} AS plc_raw,
-    {_player_champ("matchups", "toUInt32(0)")} AS plc_cnt,
-    {_player_role("matchups", "toUInt32(0)")} AS plr_cnt,
+{{player_prior_selects}}
     matchid
 FROM (
     SELECT
@@ -110,7 +146,7 @@ FROM (
         arrayConcat(blue_key_players, red_key_players) AS solo_keys,
         arrayMap(p -> toString(tupleElement(p, 4)), arrayConcat(blue_players, red_players)) AS player_keys
     FROM {{table}}
-    WHERE split = '{{split}}' AND matchid > '{{last_matchid}}'
+    WHERE split = {{split}} AND matchid > {{last_matchid}}
     ORDER BY matchid
     LIMIT {{chunk}}
 )
@@ -119,38 +155,61 @@ ORDER BY matchid
 
 
 def _split_counts(cfg: DatasetConfig) -> dict[str, int]:
+    if cfg.max_games is not None:
+        raise ValueError(
+            "DatasetConfig.max_games is not supported for cache builds under the "
+            "per-patch train/test protocol; build the full cache and use "
+            "TrainConfig.train_epoch_max_games for smoke training."
+        )
+    player_pivot_table = _sql_ident(cfg.player_pivot_table)
     rows = get_client().query(
         f"""
         SELECT split, count()
-        FROM {cfg.player_pivot_table}
+        FROM {player_pivot_table}
         WHERE split IN ('train', 'test')
         GROUP BY split
         """
     )
     available = {str(split): int(count) for split, count in rows.result_rows}
-    if cfg.max_games is None:
-        return {
-            "train": available.get("train", 0),
-            "test": available.get("test", 0),
-        }
-
-    n_test = round(cfg.max_games * cfg.test_fraction)
-    n_train = cfg.max_games - n_test
     return {
-        "train": min(n_train, available.get("train", 0)),
-        "test": min(n_test, available.get("test", 0)),
+        "train": available.get("train", 0),
+        "test": available.get("test", 0),
     }
 
 
-def _open_arrays(n_games: int, cache_dir: Path) -> dict[str, np.ndarray]:
+def _array_names(*, include_player_priors: bool) -> tuple[str, ...]:
+    return tuple(
+        name
+        for name in ARRAY_SHAPES
+        if include_player_priors or name not in PLAYER_ARRAY_NAMES
+    )
+
+
+def _open_arrays(
+    n_games: int,
+    cache_dir: Path,
+    *,
+    include_player_priors: bool,
+) -> dict[str, np.ndarray]:
     paths = array_paths(cache_dir)
     arrays: dict[str, np.ndarray] = {}
-    for name, path in paths.items():
+    for name in _array_names(include_player_priors=include_player_priors):
+        path = paths[name]
         shape = (n_games, *ARRAY_SHAPES[name])
         arrays[name] = np.lib.format.open_memmap(
             path, mode="w+", dtype=DISK_DTYPES[name], shape=shape
         )
     return arrays
+
+
+def _remove_stale_optional_arrays(
+    cache_dir: Path, *, include_player_priors: bool
+) -> None:
+    if include_player_priors:
+        return
+    paths = array_paths(cache_dir)
+    for name in PLAYER_ARRAY_NAMES:
+        paths[name].unlink(missing_ok=True)
 
 
 def _remove_stale_sidecar_arrays(cache_dir: Path) -> None:
@@ -165,9 +224,16 @@ def _remove_stale_sidecar_arrays(cache_dir: Path) -> None:
 
 # Outer-SELECT columns of _CHUNK_QUERY_TEMPLATE, by position (matchid trails them).
 _RAW_COLUMNS = (
-    "blue_win", "p1_raw", "p1_cnt",
-    "champion_id", "build_id",
-    "pl_raw", "pl_cnt", "plc_raw", "plc_cnt", "plr_cnt",
+    "blue_win",
+    "p1_raw",
+    "p1_cnt",
+    "champion_id",
+    "build_id",
+    "pl_raw",
+    "pl_cnt",
+    "plc_raw",
+    "plc_cnt",
+    "plr_cnt",
 )
 
 _CHUNK_SIZE = 50_000
@@ -181,9 +247,10 @@ def _identity_meta(cfg: DatasetConfig) -> tuple[int, list[str]]:
     the model reserves one extra row in each table for unknown ids at inference.
     """
     client = get_client()
+    solo_prior_table = _sql_ident(cfg.solo_prior_table)
     if cfg.use_final_build_labels:
         max_champ = client.query(
-            f"SELECT toInt32(max(championid)) FROM {cfg.solo_prior_table} WHERE split = 'train'"
+            f"SELECT toInt32(max(championid)) FROM {solo_prior_table} WHERE split = 'train'"
         ).result_rows[0][0]
     else:
         rows = client.query(
@@ -191,7 +258,7 @@ def _identity_meta(cfg: DatasetConfig) -> tuple[int, list[str]]:
             SELECT
                 toInt32(max(championid)) AS max_championid,
                 countIf(build = {{label:String}}) AS no_build_rows
-            FROM {cfg.solo_prior_table}
+            FROM {solo_prior_table}
             WHERE split = 'train'
             """,
             parameters={"label": cfg.draft_unknown_build_label},
@@ -206,7 +273,7 @@ def _identity_meta(cfg: DatasetConfig) -> tuple[int, list[str]]:
             )
         return int(max_champ) + 1, [cfg.draft_unknown_build_label]
     builds = client.query(
-        f"SELECT DISTINCT build FROM {cfg.solo_prior_table} WHERE split = 'train' ORDER BY build"
+        f"SELECT DISTINCT build FROM {solo_prior_table} WHERE split = 'train' ORDER BY build"
     ).result_rows
     return int(max_champ) + 1, [str(b[0]) for b in builds]
 
@@ -227,22 +294,38 @@ def _smoothed_features(
         )
 
     win_rate = smooth(raw["p1_raw"], raw["p1_cnt"], cfg.smoothing_prior_mean)
+    features = {
+        "blue_win": raw["blue_win"],
+        "win_rate": win_rate.astype(DISK_DTYPES["win_rate"], copy=False),
+        "p1_cnt": raw["p1_cnt"].astype(DISK_DTYPES["p1_cnt"], copy=False),
+        "champion_id": raw["champion_id"].astype(
+            DISK_DTYPES["champion_id"], copy=False
+        ),
+        "build_id": raw["build_id"].astype(DISK_DTYPES["build_id"], copy=False),
+    }
+    if not cfg.include_player_priors:
+        return features
+
     player_rate = smooth(raw["pl_raw"], raw["pl_cnt"], cfg.smoothing_prior_mean)
     # Nested EB: the per-(player, champion) rate shrinks toward the player's
     # own smoothed overall rate, not the global mean.
     player_champ_rate = smooth(raw["plc_raw"], raw["plc_cnt"], player_rate)
-    return {
-        "blue_win": raw["blue_win"],
-        "win_rate": win_rate.astype(DISK_DTYPES["win_rate"], copy=False),
-        "p1_cnt": raw["p1_cnt"].astype(DISK_DTYPES["p1_cnt"], copy=False),
-        "champion_id": raw["champion_id"].astype(DISK_DTYPES["champion_id"], copy=False),
-        "build_id": raw["build_id"].astype(DISK_DTYPES["build_id"], copy=False),
-        "player_rate": player_rate.astype(DISK_DTYPES["player_rate"], copy=False),
-        "player_cnt": raw["pl_cnt"].astype(DISK_DTYPES["player_cnt"], copy=False),
-        "player_champ_rate": player_champ_rate.astype(DISK_DTYPES["player_champ_rate"], copy=False),
-        "player_champ_cnt": raw["plc_cnt"].astype(DISK_DTYPES["player_champ_cnt"], copy=False),
-        "player_role_cnt": raw["plr_cnt"].astype(DISK_DTYPES["player_role_cnt"], copy=False),
-    }
+    features.update(
+        {
+            "player_rate": player_rate.astype(DISK_DTYPES["player_rate"], copy=False),
+            "player_cnt": raw["pl_cnt"].astype(DISK_DTYPES["player_cnt"], copy=False),
+            "player_champ_rate": player_champ_rate.astype(
+                DISK_DTYPES["player_champ_rate"], copy=False
+            ),
+            "player_champ_cnt": raw["plc_cnt"].astype(
+                DISK_DTYPES["player_champ_cnt"], copy=False
+            ),
+            "player_role_cnt": raw["plr_cnt"].astype(
+                DISK_DTYPES["player_role_cnt"], copy=False
+            ),
+        }
+    )
+    return features
 
 
 def _fetch_chunk_rows(query: str, attempts: int = 4) -> list:
@@ -255,7 +338,9 @@ def _fetch_chunk_rows(query: str, attempts: int = 4) -> list:
         except StreamFailureError:
             if attempt == attempts:
                 raise
-            logger.warning("StreamFailureError on chunk fetch (attempt %d), reconnecting", attempt)
+            logger.warning(
+                "StreamFailureError on chunk fetch (attempt %d), reconnecting", attempt
+            )
             client = getattr(_local, "client", None)
             if client is not None:
                 try:
@@ -280,13 +365,14 @@ def _stream_split(
     while remaining > 0:
         chunk = min(_CHUNK_SIZE, remaining)
         query = _CHUNK_QUERY_TEMPLATE.format(
-            table=cfg.player_pivot_table,
-            solo_prior_dict=cfg.solo_prior_dict,
-            player_prior_dict=cfg.player_prior_dict,
-            player_champ_prior_dict=cfg.player_champ_prior_dict,
-            player_role_prior_dict=cfg.player_role_prior_dict,
-            split=split,
-            last_matchid=last_matchid,
+            table=_sql_ident(cfg.player_pivot_table),
+            solo_prior_dict=_sql_ident(cfg.solo_prior_dict),
+            player_prior_dict=_sql_ident(cfg.player_prior_dict),
+            player_champ_prior_dict=_sql_ident(cfg.player_champ_prior_dict),
+            player_role_prior_dict=_sql_ident(cfg.player_role_prior_dict),
+            player_prior_selects=_player_prior_selects(cfg.include_player_priors),
+            split=_sql_str(split),
+            last_matchid=_sql_str(last_matchid),
             chunk=chunk,
             build_vocab=build_vocab_sql,
             n_builds=n_builds,
@@ -381,6 +467,7 @@ def _write_meta(
                     "interaction_loo": cfg.interaction_loo,
                     "use_final_build_labels": cfg.use_final_build_labels,
                     "draft_unknown_build_label": cfg.draft_unknown_build_label,
+                    "include_player_priors": cfg.include_player_priors,
                 },
                 "sources": {
                     "player_pivot_table": cfg.player_pivot_table,
@@ -413,13 +500,21 @@ def build(cfg: DatasetConfig | None = None) -> Path:
         else None
     )
     _remove_stale_sidecar_arrays(cfg.cache_dir)
-    arrays = _open_arrays(n_games, cfg.cache_dir)
+    _remove_stale_optional_arrays(
+        cfg.cache_dir,
+        include_player_priors=cfg.include_player_priors,
+    )
+    arrays = _open_arrays(
+        n_games,
+        cfg.cache_dir,
+        include_player_priors=cfg.include_player_priors,
+    )
     n_builds = len(build_vocab)
-    build_vocab_sql = "[" + ",".join(f"'{b}'" for b in build_vocab) + "]"
+    build_vocab_sql = "[" + ",".join(_sql_str(b) for b in build_vocab) + "]"
     key_build_expr = (
         "toString(tupleElement(p, 3))"
         if cfg.use_final_build_labels
-        else f"'{cfg.draft_unknown_build_label}'"
+        else _sql_str(cfg.draft_unknown_build_label)
     )
     logger.info(
         "Building cache: games=%d splits=%s n_champions=%d n_builds=%d",
@@ -480,10 +575,17 @@ def _parse_args() -> DatasetConfig:
         default=defaults.encoder_sidecar_path,
         help="Frozen three-encoder sidecar artifact to record in cache metadata.",
     )
+    parser.add_argument(
+        "--include-player-priors",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.include_player_priors,
+        help="Build experimental player-prior arrays. Disabled for production caches.",
+    )
     args = parser.parse_args()
     return DatasetConfig(
         cache_dir=args.cache_dir,
         max_games=args.max_games,
+        include_player_priors=args.include_player_priors,
         encoder_sidecar_path=args.encoder_sidecar_path,
     )
 

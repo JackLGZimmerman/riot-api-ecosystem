@@ -21,8 +21,12 @@ from app.ml.semantic_group_features import (
 from app.ml.hgnn_model import (
     HGNNWinModel,
     build_hgnn_inputs,
+    expected_encoder_sidecar_dims,
     load_hgnn_model,
+    model_requires_semantic_group_features,
+    model_uses_encoder_sidecar,
     resolve_device,
+    runtime_unsupported_inputs,
 )
 from app.core.utils.smoothing import smooth_rate_by_mode
 
@@ -50,31 +54,8 @@ def _team_tuples(
     return tuples
 
 
-def _model_requires_encoder_sidecar(model: HGNNWinModel) -> bool:
-    config = model.config
-    return bool(
-        config.use_identity_static_sidecar
-        or config.use_identity_full_game_sidecar
-        or config.use_identity_temporal_sidecar
-        or config.use_identity_semantic_context_head
-        or config.use_learned_semantic_moe
-    )
-
-
-def _unsupported_runtime_features(model: HGNNWinModel) -> list[str]:
-    config = model.config
-    missing: list[str] = []
-    if int(getattr(config, "loadout_feature_dim", 0)) > 0:
-        missing.append("loadout_features")
-    if int(getattr(config, "patch_feature_dim", 0)) > 0:
-        missing.append("patch_features")
-    if bool(getattr(config, "use_player_priors", False)):
-        missing.append("player_prior_features")
-    return missing
-
-
 def _validate_runtime_feature_contract(model: HGNNWinModel) -> None:
-    missing = _unsupported_runtime_features(model)
+    missing = runtime_unsupported_inputs(model.config)
     if not missing:
         return
     raise ValueError(
@@ -84,6 +65,45 @@ def _validate_runtime_feature_contract(model: HGNNWinModel) -> None:
         + ". Use a predictor protocol that passes those feature tensors, or "
         "serve a checkpoint trained without those heads."
     )
+
+
+def _validate_sidecar_dims(model: HGNNWinModel, sidecar: EncoderSidecarLookup) -> None:
+    expected = expected_encoder_sidecar_dims(model.config)
+    actual = sidecar.dims.as_dict()
+    mismatches = [
+        f"{name}: checkpoint={expected_dim} sidecar={actual.get(name)}"
+        for name, expected_dim in expected.items()
+        if int(expected_dim) != int(actual.get(name, -1))
+    ]
+    if mismatches:
+        raise ValueError(
+            "Encoder sidecar artifact dimensions do not match the HGNN checkpoint: "
+            + ", ".join(mismatches)
+        )
+
+
+def _validate_team_assignment(
+    side: str,
+    team: list[int],
+    roles: dict[int, str],
+    builds: dict[int, int],
+) -> None:
+    champions = set(team)
+    if len(champions) != len(team):
+        raise ValueError(f"{side} team contains duplicate champion ids")
+    for label, keys in (("roles", set(roles)), ("builds", set(builds))):
+        if keys != champions:
+            missing = sorted(champions.difference(keys))
+            extra = sorted(keys.difference(champions))
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if extra:
+                details.append(f"extra={extra}")
+            raise ValueError(
+                f"{side} {label} must match the supplied team champions"
+                + (": " + ", ".join(details) if details else "")
+            )
 
 
 class WinRatePredictor:
@@ -128,7 +148,7 @@ class WinRatePredictor:
         self.champion_ids: tuple[int, ...] = tuple(sorted({c for c, _, _ in priors.p1}))
         self._semantic_hp_lookup: np.ndarray | None
         self._semantic_range_lookup: np.ndarray | None
-        if model.config.use_semantic_group_features:
+        if model_requires_semantic_group_features(model.config):
             if self._semantic_context_lookup is None:
                 raise ValueError(
                     "HGNN checkpoint requires semantic context lookup for "
@@ -171,7 +191,8 @@ class WinRatePredictor:
         blue_builds: dict[int, int],
         red_builds: dict[int, int],
     ) -> float:
-        del blue_team, red_team
+        _validate_team_assignment("blue", blue_team, blue_roles, blue_builds)
+        _validate_team_assignment("red", red_team, red_roles, red_builds)
         forced_build = (
             None if self._use_final_build_labels else self._draft_unknown_build_label
         )
@@ -203,7 +224,7 @@ class WinRatePredictor:
             dtype=np.int64,
         )
         semantic_group_features = None
-        if self._model.config.use_semantic_group_features:
+        if model_requires_semantic_group_features(self._model.config):
             if self._semantic_context_lookup is None:
                 raise ValueError("semantic context lookup is required")
             context_raw = self._semantic_context_lookup.lookup(tuples).reshape(
@@ -256,19 +277,18 @@ def load_predictor(
     device = resolve_device(cfg.device)
     model, _, prior_strength = load_hgnn_model(cfg.model_path, device=device)
     _validate_runtime_feature_contract(model)
-    requires_semantic_context = bool(model.config.use_semantic_group_features)
-    requires_encoder_sidecar = _model_requires_encoder_sidecar(model)
+    requires_semantic_context = model_requires_semantic_group_features(model.config)
+    requires_encoder_sidecar = model_uses_encoder_sidecar(model.config)
     if requires_encoder_sidecar and dataset_cfg.encoder_sidecar_path is None:
         raise ValueError(
             "HGNN checkpoint requires identity encoder sidecars, but "
             "DatasetConfig.encoder_sidecar_path is not set"
         )
 
-    encoder_sidecar = (
-        EncoderSidecarLookup.load(dataset_cfg.encoder_sidecar_path)
-        if requires_encoder_sidecar and dataset_cfg.encoder_sidecar_path is not None
-        else None
-    )
+    encoder_sidecar = None
+    if requires_encoder_sidecar and dataset_cfg.encoder_sidecar_path is not None:
+        encoder_sidecar = EncoderSidecarLookup.load(dataset_cfg.encoder_sidecar_path)
+        _validate_sidecar_dims(model, encoder_sidecar)
     semantic_context_lookup = (
         load_semantic_context_raw_lookup() if requires_semantic_context else None
     )

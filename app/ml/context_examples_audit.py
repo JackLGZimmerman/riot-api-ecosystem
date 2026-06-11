@@ -24,7 +24,12 @@ from app.ml.config import DatasetConfig
 from app.ml.context_audit_lens import AuditLens
 from app.ml.context_audit_specs import AuditSpec, BinSpec, audit_specs
 from app.ml.dataset import SPLIT_ORDER, SplitData, identity_meta, load_splits
-from app.ml.hgnn_model import HGNNWinModel, build_hgnn_inputs, load_hgnn_model, resolve_device
+from app.ml.hgnn_model import (
+    HGNNWinModel,
+    build_hgnn_inputs,
+    load_hgnn_model,
+    resolve_device,
+)
 from app.ml.semantic_group_features import (
     BURST_DAMAGE_THRESHOLD,
     FOCUS_HP_LOW_THRESHOLD,
@@ -40,7 +45,9 @@ from app.ml.train import _SidecarGatherer, _build_sidecar_gatherer, _model_uses_
 
 DEFAULT_CONTEXT_CACHE_DIR = Path("app/ml/data/cache")
 DEFAULT_MODEL_CACHE_DIR = Path("app/ml/data/experiments/semantic_context_compact_cache")
-DEFAULT_MODEL_PATH = Path("app/ml/data/experiments/semantic_context_compact_run/model.pt")
+DEFAULT_MODEL_PATH = Path(
+    "app/ml/data/experiments/semantic_context_compact_run/model.pt"
+)
 DEFAULT_OUTPUT_PATH = Path("app/ml/documentation/HGNN_CONTEXT_EXAMPLES_AUDIT.md")
 DEFAULT_PREDICTION_CACHE = Path(
     "app/ml/data/experiments/semantic_context_compact_run/audit_final_blue_probability.npy"
@@ -85,27 +92,16 @@ def _audit_split_range(meta: dict, audit_split: str) -> tuple[int, int]:
         )
 
     raw_ranges = meta.get("split_ranges")
-    if isinstance(raw_ranges, dict) and audit_split in raw_ranges:
-        raw = raw_ranges[audit_split]
-        if isinstance(raw, dict):
-            return int(raw["start"]), int(raw["stop"])
-        if isinstance(raw, (list, tuple)) and len(raw) == 2:
-            return int(raw[0]), int(raw[1])
-        raise ValueError("Cache split range is invalid; rebuild the cache.")
-
-    counts = meta.get("splits")
-    if not isinstance(counts, dict):
-        raise ValueError("Cache metadata is missing split counts; rebuild the cache.")
-    order = tuple(str(name) for name in meta.get("split_order", SPLIT_ORDER))
-    if sorted(order) != sorted(SPLIT_ORDER):
-        raise ValueError("Cache split_order is invalid; rebuild the cache.")
-    offset = 0
-    for split_name in order:
-        count = int(counts[split_name])
-        if split_name == audit_split:
-            return offset, offset + count
-        offset += count
-    raise ValueError(f"Cache metadata is missing {audit_split!r}; rebuild the cache.")
+    if not isinstance(raw_ranges, dict) or audit_split not in raw_ranges:
+        raise ValueError(
+            "Cache metadata is missing explicit split_ranges; rebuild the cache."
+        )
+    raw = raw_ranges[audit_split]
+    if isinstance(raw, dict):
+        return int(raw["start"]), int(raw["stop"])
+    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+        return int(raw[0]), int(raw[1])
+    raise ValueError("Cache split range is invalid; rebuild the cache.")
 
 
 def _select_audit_probabilities(
@@ -198,7 +194,9 @@ class AuditData:
         audit_split: str = "all",
     ) -> None:
         self.cache_dir = context_cache_dir
-        meta = json.loads((context_cache_dir / "cache_meta.json").read_text(encoding="utf-8"))
+        meta = json.loads(
+            (context_cache_dir / "cache_meta.json").read_text(encoding="utf-8")
+        )
         self.total_games = int(meta["n_games"])
         split_lo, split_hi = _audit_split_range(meta, audit_split)
         self.game_slice = slice(split_lo, split_hi)
@@ -217,10 +215,18 @@ class AuditData:
             )
         self.audit_split = audit_split
         self.build_vocab = tuple(meta["identity"]["build_vocab"])
-        self.blue_win = np.load(context_cache_dir / "blue_win.npy", mmap_mode="r")[self.game_slice]
-        self.champion_id = np.load(context_cache_dir / "champion_id.npy", mmap_mode="r")[self.game_slice]
-        self.build_id = np.load(context_cache_dir / "build_id.npy", mmap_mode="r")[self.game_slice]
-        self.context_raw = np.load(context_cache_dir / "identity_context_raw.npy", mmap_mode="r")[self.game_slice]
+        self.blue_win = np.load(context_cache_dir / "blue_win.npy", mmap_mode="r")[
+            self.game_slice
+        ]
+        self.champion_id = np.load(
+            context_cache_dir / "champion_id.npy", mmap_mode="r"
+        )[self.game_slice]
+        self.build_id = np.load(context_cache_dir / "build_id.npy", mmap_mode="r")[
+            self.game_slice
+        ]
+        self.context_raw = np.load(
+            context_cache_dir / "identity_context_raw.npy", mmap_mode="r"
+        )[self.game_slice]
         self.blue_probability = np.asarray(selected_probability, dtype=np.float64)
         self._hp_lookup, self._range_lookup = _static_lookups()
         self._lens = AuditLens(
@@ -271,7 +277,9 @@ class AuditData:
 
 
 def evaluate_specs(data: AuditData, specs: Sequence[AuditSpec]) -> tuple[AuditRow, ...]:
-    return evaluate_specs_with_bootstrap(data, specs, bootstrap_samples=0, bootstrap_seed=0)
+    return evaluate_specs_with_bootstrap(
+        data, specs, bootstrap_samples=0, bootstrap_seed=0
+    )
 
 
 def evaluate_specs_with_bootstrap(
@@ -307,7 +315,9 @@ def evaluate_specs_with_bootstrap(
             correct = (bin_predictions >= 0.5).astype(np.float64) == bin_labels
             # Perfect calibration of this bin: shift predictions so the bin mean
             # matches the empirical WR, keeping the within-bin ranking, re-threshold.
-            calibrated_correct = (bin_predictions - gap >= 0.5).astype(np.float64) == bin_labels
+            calibrated_correct = (bin_predictions - gap >= 0.5).astype(
+                np.float64
+            ) == bin_labels
             bins.append(
                 AuditBin(
                     label=bin_spec.label,
@@ -319,7 +329,9 @@ def evaluate_specs_with_bootstrap(
                     gap_ci95_high=ci_high,
                     bootstrap_samples=bootstrap_samples,
                     accuracy=_mean_or_nan(correct.astype(np.float64)),
-                    calibrated_accuracy=_mean_or_nan(calibrated_correct.astype(np.float64)),
+                    calibrated_accuracy=_mean_or_nan(
+                        calibrated_correct.astype(np.float64)
+                    ),
                 )
             )
         rows.append(AuditRow(spec=spec, bins=tuple(bins)))
@@ -365,7 +377,9 @@ def predict_blue_probabilities(
     device = resolve_device(device)
     model, config, strength = load_hgnn_model(model_path, device=device)
     model.eval()
-    dataset_cfg = DatasetConfig(cache_dir=cache_dir, encoder_sidecar_path=encoder_sidecar_path)
+    dataset_cfg = DatasetConfig(
+        cache_dir=cache_dir, encoder_sidecar_path=encoder_sidecar_path
+    )
     load_semantic_group_features = bool(
         config.use_learned_semantic_moe and config.use_semantic_group_features
     )
@@ -417,27 +431,45 @@ def _predict_split(
                 None
                 if gatherer is None or split.identity_static_sidecar is not None
                 else gatherer.gather(
-                    torch.as_tensor(np.array(champion_id, copy=True), dtype=torch.long, device=device),
-                    torch.as_tensor(np.array(build_id, copy=True), dtype=torch.long, device=device),
+                    torch.as_tensor(
+                        np.array(champion_id, copy=True),
+                        dtype=torch.long,
+                        device=device,
+                    ),
+                    torch.as_tensor(
+                        np.array(build_id, copy=True), dtype=torch.long, device=device
+                    ),
                 )
             )
             if gathered_sidecar is None:
                 identity_static_sidecar = (
-                    None if split.identity_static_sidecar is None else split.identity_static_sidecar[rows]
+                    None
+                    if split.identity_static_sidecar is None
+                    else split.identity_static_sidecar[rows]
                 )
                 identity_full_game_sidecar = (
-                    None if split.identity_full_game_sidecar is None else split.identity_full_game_sidecar[rows]
+                    None
+                    if split.identity_full_game_sidecar is None
+                    else split.identity_full_game_sidecar[rows]
                 )
                 identity_temporal_sidecar = (
-                    None if split.identity_temporal_sidecar is None else split.identity_temporal_sidecar[rows]
+                    None
+                    if split.identity_temporal_sidecar is None
+                    else split.identity_temporal_sidecar[rows]
                 )
                 identity_encoder_support = (
-                    None if split.identity_encoder_support is None else split.identity_encoder_support[rows]
+                    None
+                    if split.identity_encoder_support is None
+                    else split.identity_encoder_support[rows]
                 )
             else:
                 identity_static_sidecar = gathered_sidecar["identity_static_sidecar"]
-                identity_full_game_sidecar = gathered_sidecar["identity_full_game_sidecar"]
-                identity_temporal_sidecar = gathered_sidecar["identity_temporal_sidecar"]
+                identity_full_game_sidecar = gathered_sidecar[
+                    "identity_full_game_sidecar"
+                ]
+                identity_temporal_sidecar = gathered_sidecar[
+                    "identity_temporal_sidecar"
+                ]
                 identity_encoder_support = gathered_sidecar["identity_encoder_support"]
             inputs = build_hgnn_inputs(
                 champion_id=champion_id,
@@ -470,7 +502,9 @@ def _predict_split(
     return np.concatenate(out, axis=0)
 
 
-def _focus_side_probabilities_from_outputs(outputs: dict[str, torch.Tensor]) -> torch.Tensor:
+def _focus_side_probabilities_from_outputs(
+    outputs: dict[str, torch.Tensor],
+) -> torch.Tensor:
     slot_delta = outputs.get("semantic_moe_slot_delta")
     if slot_delta is None:
         blue = torch.sigmoid(outputs["final_logit"]).view(-1, 1)
@@ -487,13 +521,21 @@ def _focus_side_probabilities_from_outputs(outputs: dict[str, torch.Tensor]) -> 
     shared_logit = base_logit + context_logit - semantic_moe_logit + feature_logit
     blue_delta = slot_delta[:, :5]
     red_delta = slot_delta[:, 5:]
-    blue_focus_logit = shared_logit[:, None] + blue_delta - red_delta.mean(
-        dim=1,
-        keepdim=True,
+    blue_focus_logit = (
+        shared_logit[:, None]
+        + blue_delta
+        - red_delta.mean(
+            dim=1,
+            keepdim=True,
+        )
     )
-    red_focus_logit = -shared_logit[:, None] + red_delta - blue_delta.mean(
-        dim=1,
-        keepdim=True,
+    red_focus_logit = (
+        -shared_logit[:, None]
+        + red_delta
+        - blue_delta.mean(
+            dim=1,
+            keepdim=True,
+        )
     )
     return torch.cat(
         [torch.sigmoid(blue_focus_logit), torch.sigmoid(red_focus_logit)],
@@ -822,9 +864,13 @@ def gap_summary(rows: Sequence[AuditBin]) -> dict[str, float | int]:
     gaps = np.asarray([row.gap for row in populated], dtype=np.float64)
     counts = np.asarray([row.n for row in populated], dtype=np.float64)
     accuracies = np.asarray([row.accuracy for row in populated], dtype=np.float64)
-    calibrated = np.asarray([row.calibrated_accuracy for row in populated], dtype=np.float64)
+    calibrated = np.asarray(
+        [row.calibrated_accuracy for row in populated], dtype=np.float64
+    )
     total_n = float(counts.sum())
-    accuracy = float(np.sum(counts * accuracies) / total_n) if total_n > 0 else float("nan")
+    accuracy = (
+        float(np.sum(counts * accuracies) / total_n) if total_n > 0 else float("nan")
+    )
     # Accuracy if every bin were perfectly calibrated (mean shifted to the empirical
     # WR) while keeping the model's within-bin ranking -- the true accuracy impact.
     calibrated_accuracy = (
@@ -842,9 +888,7 @@ def gap_summary(rows: Sequence[AuditBin]) -> dict[str, float | int]:
             else float("nan")
         ),
         "support_weighted_gap_mse": (
-            float(np.sum(counts * (gaps**2)) / total_n)
-            if total_n > 0
-            else float("nan")
+            float(np.sum(counts * (gaps**2)) / total_n) if total_n > 0 else float("nan")
         ),
         "accuracy": accuracy,
         "calibrated_accuracy": calibrated_accuracy,
@@ -880,7 +924,9 @@ def audit_json_payload(
         "prediction_cache": None if prediction_cache is None else str(prediction_cache),
         "flagged_audit_titles": sorted(FLAGGED_AUDIT_TITLES),
         "splits": {},
-        "split_summaries": [_split_summary_payload(summary) for summary in split_summaries],
+        "split_summaries": [
+            _split_summary_payload(summary) for summary in split_summaries
+        ],
     }
     split_payloads: dict[str, object] = {}
     for split, rows in rows_by_split.items():
@@ -891,12 +937,7 @@ def audit_json_payload(
             ),
             "flagged_summary": _gap_summary_payload(
                 gap_summary(
-                    [
-                        bin_row
-                        for row in rows
-                        if row.is_flagged
-                        for bin_row in row.bins
-                    ]
+                    [bin_row for row in rows if row.is_flagged for bin_row in row.bins]
                 )
             ),
             "rows": row_payloads,
@@ -907,7 +948,9 @@ def audit_json_payload(
 
 def write_audit_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _row_payload(row: AuditRow) -> dict[str, object]:
@@ -915,18 +958,12 @@ def _row_payload(row: AuditRow) -> dict[str, object]:
     first, last = _declared_endpoint_bins(row.bins)
     declared_empirical_effect = (
         last.empirical_wr - first.empirical_wr
-        if first is not None
-        and last is not None
-        and first.n > 0
-        and last.n > 0
+        if first is not None and last is not None and first.n > 0 and last.n > 0
         else float("nan")
     )
     declared_hgnn_effect = (
         last.hgnn_wr - first.hgnn_wr
-        if first is not None
-        and last is not None
-        and first.n > 0
-        and last.n > 0
+        if first is not None and last is not None and first.n > 0 and last.n > 0
         else float("nan")
     )
     diagnostics = _row_diagnostics(
@@ -985,9 +1022,7 @@ def _row_diagnostics(
     counts = np.asarray([row.n for row in populated], dtype=np.float64)
     gaps = np.asarray([row.gap for row in populated], dtype=np.float64)
     total_n = float(counts.sum())
-    level_gap = (
-        float(np.sum(counts * gaps) / total_n) if total_n > 0 else float("nan")
-    )
+    level_gap = float(np.sum(counts * gaps) / total_n) if total_n > 0 else float("nan")
     slope_gap = (
         float(hgnn_endpoint_effect - endpoint_effect)
         if math.isfinite(hgnn_endpoint_effect) and math.isfinite(endpoint_effect)
@@ -1098,7 +1133,9 @@ def _effect_shrinkage_ratio(hgnn_effect: float, empirical_effect: float) -> floa
     return float(hgnn_effect / empirical_effect)
 
 
-def _declared_endpoint_bins(rows: Sequence[AuditBin]) -> tuple[AuditBin | None, AuditBin | None]:
+def _declared_endpoint_bins(
+    rows: Sequence[AuditBin],
+) -> tuple[AuditBin | None, AuditBin | None]:
     if not rows:
         return None, None
     return rows[0], rows[-1]
@@ -1179,11 +1216,15 @@ def _format_audit_table(row: AuditRow) -> list[str]:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--context-cache-dir", type=Path, default=DEFAULT_CONTEXT_CACHE_DIR)
+    parser.add_argument(
+        "--context-cache-dir", type=Path, default=DEFAULT_CONTEXT_CACHE_DIR
+    )
     parser.add_argument("--model-cache-dir", type=Path, default=DEFAULT_MODEL_CACHE_DIR)
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--encoder-sidecar-path", type=Path, default=None)
-    parser.add_argument("--prediction-cache", type=Path, default=DEFAULT_PREDICTION_CACHE)
+    parser.add_argument(
+        "--prediction-cache", type=Path, default=DEFAULT_PREDICTION_CACHE
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     parser.add_argument(
         "--json-output",
@@ -1211,7 +1252,9 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    meta = json.loads((args.context_cache_dir / "cache_meta.json").read_text(encoding="utf-8"))
+    meta = json.loads(
+        (args.context_cache_dir / "cache_meta.json").read_text(encoding="utf-8")
+    )
     n_games = int(meta["n_games"])
     probabilities = load_or_predict_blue_probabilities(
         model_path=args.model_path,

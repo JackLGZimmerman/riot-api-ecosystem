@@ -126,13 +126,14 @@ the full `n_b × n_r` matrix.
 ## Reward
 
 Zero at every intermediate step. At the terminal step,
-`resolve_rewards` builds the full `P(blue|cfg_blue, cfg_red)` matrix
-and aggregates per `reward_mode`:
+`resolve_rewards` builds the full `P(blue|cfg_blue, cfg_red)` matrix and a
+joint distribution from the blue/red config `probability` values, then
+aggregates per `reward_mode`:
 
 | Mode | `p_blue_win` for blue | `p_blue_win` for red |
 | --- | --- | --- |
-| `expected_value` | `mean(win_matrix)` | `mean(win_matrix)` |
-| `risk_adjusted` | `mean − λ·std` | `mean + λ·std` |
+| `expected_value` | weighted mean | weighted mean |
+| `risk_adjusted` | weighted mean − λ·weighted std | weighted mean + λ·weighted std |
 | `worst_case` | `min(win_matrix)` | `max(win_matrix)` |
 
 Final reward per side:

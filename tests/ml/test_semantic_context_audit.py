@@ -27,9 +27,6 @@ from app.ml.semantic_context_audit import (
     render_model_alignment_audit,
     side_row_focus_probabilities,
 )
-from app.ml.train import (
-    _focus_side_probabilities_from_outputs as _train_focus_side_probabilities_from_outputs,
-)
 
 
 def test_side_row_focus_probabilities_mirror_red_side_predictions() -> None:
@@ -376,9 +373,6 @@ def test_context_examples_audit_focus_probabilities_use_slot_deltas() -> None:
     }
 
     audit_focused = _focus_side_probabilities_from_outputs(with_feature_logit)
-    train_focused = _train_focus_side_probabilities_from_outputs(with_feature_logit)
-
-    assert torch.allclose(audit_focused, train_focused)
     assert not torch.allclose(
         audit_focused,
         _focus_side_probabilities_from_outputs(without_feature_logit),

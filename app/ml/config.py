@@ -36,6 +36,9 @@ class DatasetConfig:
     solo_prior_table: str = SOLO_PRIOR_TABLE
     solo_prior_dict: str = SOLO_PRIOR_DICT
     # Draft-safe per-player priors (train-window overall, per-champion, per-role).
+    # Disabled for production cache builds unless an explicit player-prior
+    # experiment needs the extra arrays.
+    include_player_priors: bool = False
     player_prior_dict: str = PLAYER_PRIOR_DICT
     player_champ_prior_dict: str = PLAYER_CHAMP_PRIOR_DICT
     player_role_prior_dict: str = PLAYER_ROLE_PRIOR_DICT
@@ -103,7 +106,3 @@ class TrainConfig:
     # Production artifact paths are the load/serve defaults, not routine train
     # outputs. Promotion runs must opt in before overwriting them.
     allow_production_artifact_overwrite: bool = False
-    # Validation/reporting lens for context-gap checkpoint metrics. This keeps
-    # low-support champion slices visible in the raw audit while letting model
-    # selection target bins with enough support to make a 2-3pp max meaningful.
-    semantic_context_metric_min_count: int = 2048

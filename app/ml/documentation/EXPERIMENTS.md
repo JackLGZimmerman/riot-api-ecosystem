@@ -349,7 +349,7 @@ metadata and split sizes.
 ### Rolled Split Test Plan
 
 Execution note, 2026-06-10: the rolled-split production recipe was evaluated
-with the active defaults from `HGNN_CURRENT.md`: `convex_encoder_mix` 128x32,
+with the active defaults from `HGNN_CURRENT.md`: learned semantic MoE 128x32,
 compact sidecar, semantic group features, batch `16384`, validation-accuracy
 checkpoint selection, and seeds `4` and `5`. The from-scratch round and
 warm-start round were both rejected for promotion under the pre-registered
@@ -366,7 +366,7 @@ than carried over mechanically.
    against the older Apr-22/S16.8 boundary by accident.
 2. Run a smoke train on seed `4` with the existing production recipe:
    1vX prior, champion/build identity embeddings, Loadout, patch-only Temporal,
-   compact sidecar, semantic group features, and `convex_encoder_mix` 128x32.
+   compact sidecar, semantic group features, and learned semantic MoE 128x32.
    Verify cache loading, sidecar gather, metric writing, and no-group ablation
    evaluation before spending full training time.
 3. If the smoke is clean, run the full production recipe on seed `4` plus at

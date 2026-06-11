@@ -252,9 +252,9 @@ features.
 Minimum local tests:
 
 ```bash
-uv run pytest tests/ml/test_build_profiles.py
-uv run pytest tests/ml/test_dataset.py tests/ml/test_predictor.py
-uv run pytest tests/rl/test_pool.py tests/rl/test_reward.py tests/rl/test_env.py
+uv run pytest tests/ml/test_dataset.py tests/ml/test_predictor.py tests/ml/test_train_defaults.py
+uv run pytest tests/ml/test_train_calibration.py tests/ml/test_encoder_sidecar.py
+uv run pytest tests/rl/test_reward.py
 ```
 
 Final verification:

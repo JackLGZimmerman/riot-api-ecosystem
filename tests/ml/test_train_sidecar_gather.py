@@ -157,18 +157,15 @@ def test_train_gathers_sidecar_for_learned_moe_from_artifact_without_per_game_ar
     assert metrics["selection_split"] == "test"
     assert "val" not in metrics
     assert "semantic_moe_view_top_k" not in metrics["model_config"]
+    assert "decision_threshold" not in metrics
+    assert "temperature_scaling" not in metrics
+    assert "best_checkpoint_test_ece" not in metrics
     for split_name in ("train", "test"):
-        logit_diagnostics = metrics[split_name]["logit_diagnostics"]
-        assert set(logit_diagnostics) == {
-            "base_logit_std",
-            "context_logit_std",
-            "final_logit_std",
-        }
-        moe_diagnostics = metrics[split_name]["semantic_moe_diagnostics"]
-        assert len(moe_diagnostics["expert_usage"]) == 3
-        assert len(moe_diagnostics["expert_selected_fraction"]) == 3
-        assert "router_entropy" in moe_diagnostics
-        assert "regularization_loss" in moe_diagnostics
+        assert set(metrics[split_name]) == {"n", "accuracy", "nll"}
+        assert "support_buckets" not in metrics[split_name]
+        assert "temperature_scaled" not in metrics[split_name]
+        assert "logit_diagnostics" not in metrics[split_name]
+        assert "semantic_moe_diagnostics" not in metrics[split_name]
 
 
 def test_train_gathers_sidecar_and_semantic_group_features_from_compact_cache(
@@ -219,6 +216,4 @@ def test_train_gathers_sidecar_and_semantic_group_features_from_compact_cache(
 
     metrics = json.loads(metrics_path.read_text())
     for split_name in ("train", "test"):
-        moe_diagnostics = metrics[split_name]["semantic_moe_diagnostics"]
-        assert moe_diagnostics["group_features_enabled"] == 1.0
-        assert moe_diagnostics["group_feature_dim"] > 0
+        assert set(metrics[split_name]) == {"n", "accuracy", "nll"}

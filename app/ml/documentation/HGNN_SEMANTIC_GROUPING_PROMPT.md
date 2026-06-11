@@ -70,8 +70,8 @@ Current production state:
 
 - Production model: `1vX + champion/build + Loadout + patch Temporal +
   all-encoder semantic MoE`.
-- Semantic path: `convex_encoder_mix`, 128 experts, `top_k=32`, all three frozen
-  identity sidecars, and compact semantic group features.
+- Semantic path: learned semantic MoE with 128 experts, `top_k=32`, all three
+  frozen identity sidecars, and compact semantic group features.
 - Production checkpoint: `app/ml/data/hgnn_production_model.pt`.
 - Current held-out production metrics are about `57.89%` validation accuracy,
   `57.38%` test accuracy, `0.672978` validation NLL, and `0.675965` test NLL.

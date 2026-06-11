@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import Any
 
 import numpy as np
 
-from app.ml.config import DatasetConfig
+from app.ml.config import PLAYER_PIVOT_TABLE, DatasetConfig
 from database.clickhouse.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ MIN_LOADOUT_N = 100
 MIN_DEEP_N = 100
 MIN_PATCH_N = 50
 TMP_TABLE_PREFIX = "game_data_filtered.hgnn_prod_loadout_patch"
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 SPLIT_DB_NAMES = {
     "train": "train",
@@ -51,6 +53,20 @@ SPLIT_DB_NAMES = {
 
 def _sql_str(value: str) -> str:
     return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _sql_ident(value: str) -> str:
+    if not _IDENTIFIER_RE.match(value):
+        raise ValueError(f"unsafe ClickHouse identifier: {value!r}")
+    return value
+
+
+def _validate_source_contract(cfg: DatasetConfig) -> None:
+    if cfg.player_pivot_table != PLAYER_PIVOT_TABLE:
+        raise ValueError(
+            "Loadout/patch feature extraction is tied to the production "
+            f"population {PLAYER_PIVOT_TABLE!r}; got {cfg.player_pivot_table!r}."
+        )
 
 
 def _ch_logit(expr: str) -> str:
@@ -241,7 +257,7 @@ GROUP BY championid, teamposition, stat_offense, stat_flex, stat_defense
 def _selected_sql(cfg: DatasetConfig, split: str, limit: int) -> str:
     return f"""
 SELECT matchid, blue_win
-FROM {cfg.player_pivot_table}
+FROM {_sql_ident(cfg.player_pivot_table)}
 WHERE split = {_sql_str(split)}
 ORDER BY matchid
 LIMIT {int(limit)}
@@ -287,7 +303,9 @@ def _feature_query(
         f"({_ch_logit('patch_blue_wr_adj')} - {_ch_logit('0.5')}) "
         f"* patch_blue_n_adj / (patch_blue_n_adj + {SUPPORT_STRENGTH}), 0.0)"
     )
-    spell_delta = _delta_sql("spell_wr_adj", "spell_n_adj", "base_wr_adj", MIN_LOADOUT_N)
+    spell_delta = _delta_sql(
+        "spell_wr_adj", "spell_n_adj", "base_wr_adj", MIN_LOADOUT_N
+    )
     broad_delta = _delta_sql("broad_wr_adj", "broad_n_adj", "base_wr_adj", MIN_DEEP_N)
     full_delta = _delta_sql("full_wr_adj", "full_n_adj", "broad_or_base_wr", MIN_DEEP_N)
     secondary_delta = _delta_sql(
@@ -365,18 +383,18 @@ FROM (
       *,
       {base_n} AS base_n_adj,
       {base_wr} AS base_wr_adj,
-      {adj_n('patch_blue_n_raw')} AS patch_blue_n_adj,
-      {adj_wr('patch_blue_wr_raw', 'patch_blue_n_raw', 'blue_win')} AS patch_blue_wr_adj,
-      {adj_n('spell_n_raw')} AS spell_n_adj,
-      {adj_wr('spell_wr_raw', 'spell_n_raw')} AS spell_wr_adj,
-      {adj_n('broad_n_raw')} AS broad_n_adj,
-      {adj_wr('broad_wr_raw', 'broad_n_raw')} AS broad_wr_adj,
-      {adj_n('full_n_raw')} AS full_n_adj,
-      {adj_wr('full_wr_raw', 'full_n_raw')} AS full_wr_adj,
-      {adj_n('secondary_n_raw')} AS secondary_n_adj,
-      {adj_wr('secondary_wr_raw', 'secondary_n_raw')} AS secondary_wr_adj,
-      {adj_n('shard_n_raw')} AS shard_n_adj,
-      {adj_wr('shard_wr_raw', 'shard_n_raw')} AS shard_wr_adj
+      {adj_n("patch_blue_n_raw")} AS patch_blue_n_adj,
+      {adj_wr("patch_blue_wr_raw", "patch_blue_n_raw", "blue_win")} AS patch_blue_wr_adj,
+      {adj_n("spell_n_raw")} AS spell_n_adj,
+      {adj_wr("spell_wr_raw", "spell_n_raw")} AS spell_wr_adj,
+      {adj_n("broad_n_raw")} AS broad_n_adj,
+      {adj_wr("broad_wr_raw", "broad_n_raw")} AS broad_wr_adj,
+      {adj_n("full_n_raw")} AS full_n_adj,
+      {adj_wr("full_wr_raw", "full_n_raw")} AS full_wr_adj,
+      {adj_n("secondary_n_raw")} AS secondary_n_adj,
+      {adj_wr("secondary_wr_raw", "secondary_n_raw")} AS secondary_wr_adj,
+      {adj_n("shard_n_raw")} AS shard_n_adj,
+      {adj_wr("shard_wr_raw", "shard_n_raw")} AS shard_wr_adj
     FROM (
       SELECT
         s.matchid AS matchid,
@@ -515,6 +533,7 @@ def write_loadout_patch_feature_arrays(
     missing = sorted(name for name in required if name not in arrays)
     if missing:
         raise ValueError("feature arrays are missing: " + ", ".join(missing))
+    _validate_source_contract(cfg)
     client = get_client()
     tables = _prepare_aggregate_tables(client, _tmp_suffix())
     try:
@@ -535,14 +554,18 @@ def write_loadout_patch_feature_arrays(
                     f"patch={patch.shape[0]} loadout={loadout.shape[0]} expected={count}"
                 )
             cached_labels = arrays["blue_win"][offset : offset + count]
-            if not np.array_equal(labels.astype(np.uint8), cached_labels.astype(np.uint8)):
+            if not np.array_equal(
+                labels.astype(np.uint8), cached_labels.astype(np.uint8)
+            ):
                 raise RuntimeError(
                     f"{split_name} loadout/patch labels do not align with cache labels"
                 )
             arrays["patch_features"][offset : offset + count] = patch
             arrays["loadout_features"][offset : offset + count] = loadout
             offset += count
-            logger.info("Wrote split %s loadout/patch features: %d games", split_name, count)
+            logger.info(
+                "Wrote split %s loadout/patch features: %d games", split_name, count
+            )
     finally:
         _drop_aggregate_tables(client, tables)
     for name in ("patch_features", "loadout_features"):

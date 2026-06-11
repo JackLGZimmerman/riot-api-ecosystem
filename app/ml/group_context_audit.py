@@ -47,7 +47,7 @@ class GroupBin:
     hgnn_wr: float
     eb_target: float
     sampling_var: float  # pp^2, variance of raw empirical estimate
-    eb_var: float        # pp^2, residual variance of the EB target estimate
+    eb_var: float  # pp^2, residual variance of the EB target estimate
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ def _empirical_bayes_row(bins: list[tuple[str, int, float, float]]) -> list[Grou
         return []
     n_arr = np.array([n for _, n, _, _ in pop], dtype=np.float64)
     p_arr = np.array([e for _, _, e, _ in pop], dtype=np.float64)
-    s2 = p_arr * (1.0 - p_arr) / n_arr                  # per-bin sampling variance
+    s2 = p_arr * (1.0 - p_arr) / n_arr  # per-bin sampling variance
     eb, eb_var = eb_shrink_targets(n_arr, p_arr)
     out: list[GroupBin] = []
     for i, (lab, n, e, h) in enumerate(pop):
@@ -123,7 +123,9 @@ def summarize(rows: list[GroupRow]) -> dict[str, float]:
         "eb_floor": float(np.mean(eb_var)),
         # debiased systematic component (subtract the EB target's own variance)
         "systematic_gap_mse": float(np.mean(eb_gap**2) - np.mean(eb_var)),
-        "systematic_gap_mse_clipped": float(np.mean(np.maximum(0.0, eb_gap**2 - eb_var))),
+        "systematic_gap_mse_clipped": float(
+            np.mean(np.maximum(0.0, eb_gap**2 - eb_var))
+        ),
         "eb_mean_abs_gap": float(np.mean(np.abs(eb_gap))),
         "eb_max_abs_gap": float(np.max(np.abs(eb_gap))),
     }
@@ -141,13 +143,21 @@ def drift_decomposition(
     train = {
         (r.spec.title, b.label): b.eb_target
         for r in build_group_rows(
-            AuditData(context_cache_dir=cache_dir, blue_probability=blue_probability, audit_split="train"),
+            AuditData(
+                context_cache_dir=cache_dir,
+                blue_probability=blue_probability,
+                audit_split="train",
+            ),
             specs,
         )
         for b in r.bins
     }
     test_rows = build_group_rows(
-        AuditData(context_cache_dir=cache_dir, blue_probability=blue_probability, audit_split="test"),
+        AuditData(
+            context_cache_dir=cache_dir,
+            blue_probability=blue_probability,
+            audit_split="test",
+        ),
         specs,
     )
     drifts = [
@@ -169,7 +179,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--context-cache-dir", type=Path, default=DEFAULT_CONTEXT_CACHE_DIR)
     ap.add_argument("--prediction-cache", type=Path, default=DEFAULT_PREDICTION_CACHE)
-    ap.add_argument("--per-row", action="store_true", help="print per-row EB gap detail")
+    ap.add_argument(
+        "--per-row", action="store_true", help="print per-row EB gap detail"
+    )
     ap.add_argument(
         "--json-output",
         type=Path,
@@ -230,7 +242,7 @@ def main() -> None:
                         )
                     )
             top_rows = sorted(detail, reverse=True)[:15]
-            payload["val_top_systematic_rows"] = [
+            payload["test_top_systematic_rows"] = [
                 {
                     "systematic_gap_mse": float(sysv),
                     "title": title,
@@ -244,7 +256,9 @@ def main() -> None:
                 for sysv, title, lab, n, e, eb, h, g in top_rows
             ]
             for sysv, title, lab, n, e, eb, h, g in top_rows:
-                print(f"    {sysv:7.2f}  {title[:42]:42} [{lab:>10}] n={n:>7} emp={e*100:5.1f} eb={eb*100:5.1f} hgnn={h*100:5.1f} gap={g:+5.1f}")
+                print(
+                    f"    {sysv:7.2f}  {title[:42]:42} [{lab:>10}] n={n:>7} emp={e * 100:5.1f} eb={eb * 100:5.1f} hgnn={h * 100:5.1f} gap={g:+5.1f}"
+                )
 
     print()
     drift = drift_decomposition(

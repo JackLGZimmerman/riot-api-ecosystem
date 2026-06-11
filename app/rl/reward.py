@@ -70,6 +70,24 @@ class RoleBuildOptimizer(Protocol):
     ) -> OptimizationResult: ...
 
 
+def _normalized_config_weights(
+    configs: list[RoleBuildConfig],
+    *,
+    side: str,
+) -> np.ndarray:
+    weights = np.asarray([cfg.probability for cfg in configs], dtype=np.float64)
+    if not np.isfinite(weights).all() or np.any(weights < 0.0):
+        raise ValueError(
+            f"{side} role/build probabilities must be finite and non-negative"
+        )
+    total = float(weights.sum())
+    if total <= 0.0:
+        raise ValueError(
+            f"{side} role/build probabilities must sum to a positive value"
+        )
+    return weights / total
+
+
 def make_pool_sampler(
     pool: ChampionPool,
     top_k_build_configs: int,
@@ -178,12 +196,15 @@ def resolve_rewards(
                 )
             )
 
+    blue_weights = _normalized_config_weights(blue_configs, side="blue")
+    red_weights = _normalized_config_weights(red_configs, side="red")
+    joint_weights = np.outer(blue_weights, red_weights)
     if reward_mode == "expected_value":
-        m = float(win_matrix.mean())
+        m = float(np.sum(win_matrix * joint_weights))
         p_for_blue, p_for_red = m, m
     elif reward_mode == "risk_adjusted":
-        m = float(win_matrix.mean())
-        s = float(win_matrix.std())
+        m = float(np.sum(win_matrix * joint_weights))
+        s = float(np.sqrt(np.sum(joint_weights * (win_matrix - m) ** 2)))
         p_for_blue = m - risk_lambda * s
         p_for_red = m + risk_lambda * s
     elif reward_mode == "worst_case":

@@ -6,7 +6,9 @@ This audit joins the empirical focus-side context examples to the trained semant
 
 ## Scope And Threshold Definitions
 
-- Context source: `app/ml/data/cache` side-row arrays, `val` split only.
+- Context source: historical `app/ml/data/cache` side-row arrays, `val` split
+  only. Rerun with `--audit-split test` for the current v32 test-only audit
+  protocol.
 - HGNN model: `app/ml/data/hgnn_production_model.pt`.
 - HGNN cache: `app/ml/data/cache`.
 - Encoder sidecar artifact: `app/ml/data/semantic_identity_sidecar_compact.npz`.
@@ -1082,7 +1084,8 @@ Immobile siege ADC punished by multiple burst and dive threats.
 
 ## Fixed Fixture Overall Summary
 
-Detailed audit tables above are rendered from the `val` split.
+Detailed audit tables above are historical validation fixtures rendered from
+the `val` split.
 
 | Tests | Populated bins | Mean abs gap | Max abs gap | Gap MSE | Accuracy | Acc if calibrated | Calibration lift |
 |---:|---:|---:|---:|---:|---:|---:|---:|
@@ -1107,7 +1110,7 @@ uv run python -m app.ml.context_examples_audit \
   --model-path app/ml/data/hgnn_production_model.pt \
   --encoder-sidecar-path app/ml/data/semantic_identity_sidecar_compact.npz \
   --prediction-cache app/ml/data/audit_focus_side_probability.npy \
-  --audit-split val \
+  --audit-split test \
   --output /tmp/hgnn_context_examples_probe.md \
   --json-output /tmp/hgnn_context_examples_probe.json \
   --refresh-predictions \

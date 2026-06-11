@@ -1,4 +1,6 @@
-"""Gymnasium RL environment for League of Legends tournament drafting."""
+"""RL tools for League of Legends tournament drafting."""
+
+from importlib import import_module
 
 from app.rl.alpha_net import AlphaNetConfig, AlphaZeroNet, auto_device
 from app.rl.draft import (
@@ -7,7 +9,6 @@ from app.rl.draft import (
     DraftStep,
     Side,
 )
-from app.rl.env import DraftEnv, DraftEnvConfig
 from app.rl.mcts import MCTS, DraftState, MCTSConfig, visit_policy
 from app.rl.policy import MaskedPolicy, PolicyConfig, encode_obs, obs_dim
 from app.rl.pool import (
@@ -29,6 +30,16 @@ from app.rl.reward import (
     resolve_rewards,
 )
 from app.rl.selfplay import EpisodeSamples, play_episode
+
+
+def __getattr__(name: str):
+    if name in {"DraftEnv", "DraftEnvConfig"}:
+        module = import_module("app.rl.env")
+        value = getattr(module, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "ActionType",

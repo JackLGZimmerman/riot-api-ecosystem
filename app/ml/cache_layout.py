@@ -76,6 +76,16 @@ ARRAY_SHAPES = {
     "player_role_cnt": (N_PLAYERS_PER_GAME,),
 }
 
+PLAYER_ARRAY_NAMES = frozenset(
+    {
+        "player_rate",
+        "player_cnt",
+        "player_champ_rate",
+        "player_champ_cnt",
+        "player_role_cnt",
+    }
+)
+
 SIDECAR_ARRAY_FILES = {
     "identity_static_sidecar": IDENTITY_STATIC_SIDECAR_FILE,
     "identity_full_game_sidecar": IDENTITY_FULL_GAME_SIDECAR_FILE,

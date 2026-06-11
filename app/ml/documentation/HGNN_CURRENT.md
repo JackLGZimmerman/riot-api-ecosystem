@@ -6,10 +6,10 @@ Split-protocol change, 2026-06-11: `ml_game_split` labels are now per-patch
 chronological 80/20 train/test — games are partitioned by `(season, patch)`,
 ordered by game start, and each patch's first 80% goes to train with the
 remainder to test. There is no validation split anymore; the test split is the
-model-selection split (checkpoint selection, decision threshold, and
-report-only temperature scaling are all fit on it), not a final untouched
-holdout. The cache format bumped to `npy-memmap-v32`; older validation-bearing
-caches (including the v30 counts referenced below) must be rebuilt. This
+model-selection split for checkpoint selection and accuracy/NLL reporting, not
+a final untouched holdout. The cache format bumped to `npy-memmap-v32`; older
+validation-bearing caches (including the v30 counts referenced below) must be
+rebuilt. This
 implements the rolled-boundary lever by making same-patch history available to
 train-side priors and features before each patch's scored tail.
 
@@ -57,11 +57,9 @@ head, the promoted learned semantic MoE over all three frozen identity encoders
 classification-derived semantic, profile, and context inputs are no longer part
 of `build_hgnn_inputs()` or `HGNNWinModel.forward()`.
 
-The promoted semantic path is `convex_encoder_mix`: it consumes the static,
-full-game, and temporal sidecar latents through the learned MoE plus compact
-semantic group features. Production capacity is 128 experts with `top_k=32`.
-The older node-init sidecar MLP flags remain off by default so the production
-shape matches the tested architecture. See
+The promoted semantic path is the fixed learned MoE over static, full-game, and
+temporal sidecar latents plus compact semantic group features. Production
+capacity is 128 experts with `top_k=32`. See
 [Identity Encoder Sidecars](#identity-encoder-sidecars).
 
 Serving through `app.ml.predictor.load_predictor()` is intentionally narrower
@@ -75,7 +73,7 @@ cache 1vX priors + support
 -> posterior node features
 -> champion/build identity embeddings
 -> production Loadout head + patch-only Temporal head
--> frozen static/full-game/temporal sidecars into convex semantic MoE
+-> frozen static/full-game/temporal sidecars into learned semantic MoE
 -> blue/red team readout
 -> final logit
 -> sigmoid = P(blue wins)
@@ -84,10 +82,10 @@ cache 1vX priors + support
 Direct 1v1/2vX champion matchup and synergy relationship integrations have been
 removed from the model contract, cache layout, priors, and predictor; they are
 no longer part of `build_hgnn_inputs()` or `HGNNWinModel.forward()`. Older local
-cache directories may still contain ignored relationship `.npy` files, but v30
+cache directories may still contain ignored relationship `.npy` files, but v32
 production loading does not declare or consume them. Loadout and patch-only
 Temporal are no longer tracked as ablation families in this document; they are
-part of the default production model when the v30 cache provides
+part of the default production model when the v32 cache provides
 `loadout_features.npy` and `patch_features.npy`.
 
 ## Production Status
@@ -124,15 +122,14 @@ longer exposes a dense/sparse dispatch flag.
 
 Setup: v30 production cache, compact identity encoder sidecar artifact,
 production loadout head, bounded patch-only temporal head, learned semantic MoE
-with `convex_encoder_mix`, `semantic_moe_num_experts=128`,
-`semantic_moe_top_k=32`, compact semantic group features, raw `val_accuracy`
-checkpointing, `batch_size=16384`, `max_epochs=40`, `patience=5`, learning rate
-`1e-4`, seed `4`, and frozen loaded parameters from the previous production
-warm start.
+with `semantic_moe_num_experts=128`, `semantic_moe_top_k=32`, compact semantic
+group features, raw `val_accuracy` checkpointing, `batch_size=16384`,
+`max_epochs=40`, `patience=5`, learning rate `1e-4`, seed `4`, and frozen loaded
+parameters from the previous production warm start.
 
 | Production model | Raw validation accuracy | Raw test accuracy | Validation NLL | Test NLL |
 | --- | ---: | ---: | ---: | ---: |
-| 1vX + champion/build + Loadout + patch Temporal + all-encoder semantic MoE (`convex_encoder_mix`, 128x32) | **57.8854%** | **57.3796%** | **0.672978** | **0.675965** |
+| 1vX + champion/build + Loadout + patch Temporal + all-encoder semantic MoE (128x32) | **57.8854%** | **57.3796%** | **0.672978** | **0.675965** |
 | Previous semantic production: same path with 8x2 MoE | `57.8896%` | `57.2993%` | `0.673184` | `0.676212` |
 | Previous production baseline: 1vX + champion/build + Loadout + patch-only Temporal | `57.6828%` | `57.0163%` | `n/a` | `n/a` |
 
@@ -169,7 +166,7 @@ labels/margins and are not accepted pregame validation results.
 
 ```mermaid
 flowchart TD
-    cache["v30 production cache"] --> ids["champion/build ids"]
+    cache["v32 production cache"] --> ids["champion/build ids"]
     cache --> prior["1vX prior + support"]
     cache --> loadout["Loadout features<br/>spells + rune page + stat shards"]
     cache --> patch["Patch-only Temporal<br/>season/patch blue-side drift"]
@@ -184,30 +181,27 @@ flowchart TD
     tensor_batch --> nodes["Identity embeddings + 1vX posterior node features"]
     tensor_batch --> loadout_logit["production loadout_logit"]
     tensor_batch --> patch_logit["production patch_logit<br/>bounded max abs 0.15"]
-    tensor_batch -.-> context["Identity semantic context head<br/>own / ally / enemy summaries"]
     tensor_batch -.-> moe["Learned semantic MoE head<br/>sidecar factors + top-k experts"]
     nodes --> readout["Mean + attention team readout"]
     readout --> base["base_logit"]
-    context -.->|use_identity_semantic_context_head=True| context_logit["context_logit"]
     moe -.->|use_learned_semantic_moe=True| context_logit
-    base --> final["final_logit = base_logit + loadout_logit + patch_logit + optional context_logit"]
+    base --> final["final_logit = base_logit + loadout_logit + patch_logit + context_logit"]
     context_logit --> final
     loadout_logit --> final
     patch_logit --> final
     final --> prob["sigmoid = P(blue wins)"]
-    final -.-> diagnostics["Calibration and support metrics"]
-    moe -.-> diagnostics
+    prob --> metrics["accuracy / NLL metrics"]
 ```
 
 ## Identity Encoder Sidecars
 
-Three standalone identity autoencoders produce latents that can be injected as
-node-level sidecars in `HGNNWinModel`. The sidecar artifact is one row per
+Three standalone identity autoencoders produce latents consumed by the learned
+semantic MoE. The sidecar artifact is one row per
 `(champion, role, build)` identity; the static block is champion-level and is
 joined/repeated onto those rows, while full-game and temporal latents are native
 to the full identity grain.
 
-The latents are **not** materialised per game-slot. The cache (`v30`) records the
+The latents are **not** materialised per game-slot. The cache (`v32`) records the
 artifact path/dims only; `app/ml/train.py` builds an on-device gather table
 (`EncoderSidecarLookup.gather_tables`) and gathers `(batch, 10, dim)` blocks per
 batch from `champion_id`/`build_id` — the static block is keyed by champion. This
@@ -215,28 +209,15 @@ collapses the sidecar cache from tens of GB to the few-MB frozen artifact. The
 draft-time predictor already gathered the same way. Legacy caches that still hold
 per-game sidecar arrays continue to load and are used directly.
 
-| Sidecar | Encoder module | Node-init sidecar flag (default `False`) |
+| Sidecar | Encoder module | Maintained consumer |
 | --- | --- | --- |
-| Static | [classification/static_identity_encoder.py](../../classification/static_identity_encoder.py) | `use_identity_static_sidecar` |
-| Full-game | [classification/full_game_encoder.py](../../classification/full_game_encoder.py) | `use_identity_full_game_sidecar` |
-| Temporal | [classification/temporal_autoencoder.py](../../classification/temporal_autoencoder.py) | `use_identity_temporal_sidecar` |
+| Static | [classification/static_identity_encoder.py](../../classification/static_identity_encoder.py) | Learned semantic MoE |
+| Full-game | [classification/full_game_encoder.py](../../classification/full_game_encoder.py) | Learned semantic MoE |
+| Temporal | [classification/temporal_autoencoder.py](../../classification/temporal_autoencoder.py) | Learned semantic MoE |
 
-The node-init sidecar MLP is support-gated and zero-initialised, so an unwired
-or low-support latent is a no-op on the production node init. Those three
-node-init flags remain off by default. The promoted production path consumes the
-same static/full-game/temporal latents inside the learned semantic MoE instead.
-
-`HGNNConfig.use_identity_semantic_context_head=True` enables a separate
-zero-initialised context logit over the frozen static, full-game, and temporal
-blocks. For each slot it projects the concatenated latents, builds support-
-weighted **mean** summaries of the other four allies and five enemies plus
-**extremity (max)** summaries, scores the shared `own / ally / enemy`
-interaction, and adds `context_logit` to `base_logit`. The max summaries preserve
-convex composition signal ("3 burst threats") that mean pooling averages away. A
-learned scalar `context_scale` (init 1.0, a no-op at init because the score head
-is zero-initialised) lets the optimiser grow the context correction, countering
-the systematic effect-shrinkage seen in the audit. The model returns all three
-columns: `base_logit`, `context_logit`, and `final_logit`.
+The old node-init sidecar MLP flags and separate identity semantic context head
+were removed from the maintained HGNN surface. Checkpoint loading filters those
+legacy state keys so current artifacts can migrate onto the leaner model.
 
 Production testing now treats semantic gap checks as diagnostics rather than
 training objectives. The retired ranking and calibration-loss runners are not
@@ -244,13 +225,13 @@ part of the maintained `train.py` surface.
 
 `HGNNConfig.use_learned_semantic_moe=True` enables the learned mixture-of-experts
 context path over the same required sidecar inputs plus the champion, role,
-build, and fused identity embeddings. Production defaults enable this path with
-`semantic_moe_architecture="convex_encoder_mix"`. It builds support/log-support
-sidecar tokens, derives own / ally / enemy / extremity factors, routes each slot
-through top-k experts (production default 32 of 128), support-gates
+build, and fused identity embeddings. This is now the only maintained semantic
+sidecar architecture. It builds support/log-support sidecar tokens, derives own /
+ally / enemy / extremity factors, routes each slot through top-k experts
+(production default 32 of 128), support-gates
 zero-initialised slot deltas, and adds `semantic_moe_logit` into `context_logit`.
-Production training consumes `semantic_moe_regularization_loss` and reports
-router usage, entropy, factor diversity, token-dropout, and delta diagnostics.
+Production training consumes `semantic_moe_regularization_loss`; the maintained
+train metrics stay focused on accuracy and NLL.
 
 When `use_semantic_group_features=True`, the learned MoE also receives the
 compact semantic group feature tensor from `app/ml/semantic_group_features.py`.
@@ -272,27 +253,27 @@ now audited with focus-side probabilities rather than one repeated match-level
 probability. Blue slots are scored in the blue frame; red slots are scored in the
 mirrored red frame. These audits are validation diagnostics for the promoted
 production checkpoint at `app/ml/data/hgnn_production_model.pt`, copied from the
-seed-4 `convex_encoder_mix` architecture run. On the checked-in focus-slot
-context audit it reports validation Gap MSE `5.39 pp^2`, mean absolute gap
-`1.69 pp`, and max absolute gap `10.12 pp`; the lower-variance group EB audit is
-the semantic promotion selector.
+seed-4 128x32 learned semantic MoE run. On the checked-in focus-slot context
+audit it reports validation Gap MSE `5.39 pp^2`, mean absolute gap `1.69 pp`,
+and max absolute gap `10.12 pp`; the lower-variance group EB audit is the
+semantic promotion selector.
 
-### Semantic Architecture
+### Semantic MoE Contract
 
-The production semantic MoE architecture is fixed to `convex_encoder_mix`.
+The production semantic MoE path is no longer configurable by architecture name.
 Rejected architecture ablations are not part of the maintained production
 surface. A production-aligned seed-trio rerun on 2026-06-06 found no replacement
 that improved both held-out accuracy and context calibration strongly enough to
-promote, so the service path remains the compact sidecar plus
-`convex_encoder_mix` recipe documented above.
+promote, so the service path remains the compact sidecar plus learned MoE recipe
+documented above.
 
 ### Retired Expert-Grid Ablation Outcomes
 
 Temporary MoE expert-count / `top_k` runners, report helpers, generated
 checkpoints, and parser tests were removed from the maintained workspace on
 2026-06-07 after their outcomes were captured here. These runs were research
-ablations only; after review, the production recipe was promoted to
-`convex_encoder_mix` with 128 experts and `top_k=32`.
+ablations only; after review, the production recipe was fixed at 128 experts and
+`top_k=32`.
 
 The seed-4 sweeps varied only `semantic_moe_num_experts` and
 `semantic_moe_top_k`, using the compact identity sidecar, frozen production warm
@@ -352,32 +333,12 @@ That sparse-dispatch implementation, its CLI flag, runner/report helpers,
 tests, and generated experiment outputs have been removed. Production retains
 the standard dense MoE execution path with 128 experts and `top_k=32`.
 
-### Semantic Context Plan
+### Semantic MoE Plan
 
 ```mermaid
 flowchart TD
-    sidecars["static + full-game + temporal latents<br/>[game, 10, dim]"] --> proj["identity-context projection<br/>LayerNorm -> 96-d semantic vector"]
     support["identity_encoder_support"] --> gate["support confidence + log support"]
-
-    proj --> own["focus identity z_i"]
-    proj --> allies["same-team latent summary<br/>excluding focus slot"]
-    proj --> enemies["enemy-team latent summary"]
-
-    gate --> allies
-    gate --> enemies
-    gate --> score
-
-    own --> score["shared context interaction<br/>own / ally / enemy"]
-    allies --> score
-    enemies --> score
-
-    score --> blue["blue slot context scores"]
-    score --> red["red slot context scores"]
-    blue --> diff["mean blue - mean red"]
-    red --> diff
-    diff --> identity_context["identity_context_logit"]
-
-    sidecars --> sidecar_token["MoE sidecar token<br/>latents + confidence + log support"]
+    sidecars["static + full-game + temporal latents<br/>[game, 10, dim]"] --> sidecar_token["MoE sidecar token<br/>latents + confidence + log support"]
     support --> sidecar_token
     sidecar_token --> sidecar_factor["sidecar factor MLP<br/>token dropout"]
     sidecar_factor --> moe_context["MoE own / ally / enemy / max factors"]
@@ -389,34 +350,30 @@ flowchart TD
     factor --> experts["zero-initialised expert deltas"]
     router --> moe_slots["support-gated slot deltas"]
     experts --> moe_slots
-    moe_slots --> moe_logit["semantic_moe_logit<br/>mean blue - mean red"]
-    moe_slots -.-> moe_diag["MoE balance / entropy / factor diagnostics"]
+    moe_slots --> context["context_logit = semantic_moe_logit<br/>mean blue - mean red"]
 
     production["production logit<br/>base + loadout + patch"] --> final["final_logit = production_logit + context_logit"]
-    identity_context --> context["optional context_logit = identity_context + semantic_moe_logit"]
-    moe_logit --> context
     context --> final
 
     final --> audit["HGNN_CONTEXT_EXAMPLES_AUDIT<br/>empirical WR vs predicted WR by threshold"]
-    moe_diag -.-> audit
 ```
 
 ## Maintained Surfaces
 
 | File | Purpose |
 | --- | --- |
-| [../hgnn_model.py](../hgnn_model.py) | HGNN model, input builder, swap invariants, and optional semantic/context heads. |
+| [../hgnn_model.py](../hgnn_model.py) | HGNN model, input builder, swap invariants, and maintained residual/semantic MoE heads. |
 | [../encoder_sidecar.py](../encoder_sidecar.py) | Identity-encoder latent loading, per-game lookup, and dedup gather tables. |
 | [../loadout_patch_features.py](../loadout_patch_features.py) | Production train-only loadout priors and patch-only temporal feature extraction. |
 | [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and sidecar metadata. |
 | [../dataset.py](../dataset.py) | Cache loader and split dataclass. |
-| [../train.py](../train.py) | Production training, test-split selection, and semantic gap diagnostics. |
+| [../train.py](../train.py) | Production training, test-split selection, and accuracy/NLL metrics. |
 | [../predictor.py](../predictor.py) | Draft-time runtime bridge. |
 
 ## Throughput Default
 
-Use `--batch-size 16384` for the current `convex_encoder_mix` 128x32 HGNN
-recipe unless the experiment is explicitly a throughput/allocator sweep. Batch
+Use `--batch-size 16384` for the current 128x32 HGNN recipe unless the
+experiment is explicitly a throughput/allocator sweep. Batch
 size is architecture-dependent: if parameter count or activation footprint
 increases, retune downward by measured samples/s; if it decreases, retune upward
 only after a fresh sweep. The 2026-06-10 local RTX 5070 Ti sweep on the refreshed
@@ -445,19 +402,17 @@ A full rolled-split seed-4 run at batch `16384` confirmed stable epochs around
 | Checkpoint selection | raw test accuracy (test is the model-selection split) |
 | Training batch size / throughput | `16384`; `51,505` augmented samples/s on the 2026-06-10 local RTX 5070 Ti sweep for the current 128x32 recipe. |
 | Learning rate / patience / weight decay | `3e-4` / `5` / `0.0` |
-| Report-only temperature scaling | Fit on test logits only; never changes served probabilities. |
 | Raw tensor cache device | `cpu`; model-device caching is an explicit throughput sweep option. |
-| Test evaluation | Always on: test is tensor-cached, evaluated every epoch, and written to metrics with `selection_split: "test"`. |
-| Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required for promotion. |
+| Test evaluation | Always on: test is tensor-cached, evaluated every epoch, and written to metrics with accuracy/NLL and `selection_split: "test"`. |
+| Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required, and the artifact must be loadable by the current predictor. |
 | Direct 1v1/2vX integrations | Removed from the model, cache, priors, and predictor. |
-| Loadout head | Production validation-on with v30 cache metadata and `loadout_features.npy`; current RL serving bridge rejects checkpoints that require it. |
-| Patch-only Temporal head | Production validation-on with v30 cache metadata and `patch_features.npy`; season/patch blue-side drift only; current RL serving bridge rejects checkpoints that require it. |
-| Player-prior arrays | Present in v30 cache as an experimental training surface; disabled in promoted production and rejected by current RL serving when enabled. |
-| Identity-encoder node-init sidecar MLPs (static/full-game/temporal) | Disabled by default. |
-| Learned semantic MoE head over all three identity sidecars | Enabled by default with `convex_encoder_mix`. |
+| Loadout head | Offline-training head with v32 cache metadata and `loadout_features.npy`; the default production serving path rejects checkpoints that require it. |
+| Patch-only Temporal head | Offline-training head with v32 cache metadata and `patch_features.npy`; season/patch blue-side drift only; the default production serving path rejects checkpoints that require it. |
+| Player-prior arrays | Experimental opt-in cache-build surface; disabled in promoted serving and rejected by current RL serving when enabled. |
+| Identity-encoder node-init sidecar MLPs (static/full-game/temporal) | Removed from the maintained model surface. |
+| Learned semantic MoE head over all three identity sidecars | Enabled by default. |
 | Semantic group features and relationship head | Enabled by default for the learned semantic MoE. |
 
 Invalid training config combinations fail early in `app/ml/train.py`. Under
-the per-patch protocol the test split drives checkpoint selection, threshold
-selection, and report-only temperature fitting; it is a selection split, not a
-final untouched holdout.
+the per-patch protocol the test split drives checkpoint selection and
+accuracy/NLL reporting; it is a selection split, not a final untouched holdout.

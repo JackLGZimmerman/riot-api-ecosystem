@@ -52,7 +52,7 @@ def test_load_splits_uses_explicit_metadata_ranges(tmp_path) -> None:
     assert splits["test"].blue_win.tolist() == [0.0]
 
 
-def test_load_splits_uses_split_order_when_ranges_are_absent(tmp_path) -> None:
+def test_load_splits_rejects_v32_cache_without_explicit_ranges(tmp_path) -> None:
     _write_minimal_cache(
         tmp_path,
         [0, 1, 0, 1],
@@ -64,10 +64,8 @@ def test_load_splits_uses_split_order_when_ranges_are_absent(tmp_path) -> None:
         },
     )
 
-    splits = load_splits(DatasetConfig(cache_dir=tmp_path), require_counts=True)
-
-    assert splits["train"].blue_win.tolist() == [1.0, 0.0, 1.0]
-    assert splits["test"].blue_win.tolist() == [0.0]
+    with pytest.raises(ValueError, match="split_ranges"):
+        load_splits(DatasetConfig(cache_dir=tmp_path), require_counts=True)
 
 
 def test_load_splits_rejects_stale_val_cache(tmp_path) -> None:
