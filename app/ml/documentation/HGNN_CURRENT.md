@@ -91,10 +91,13 @@ Gate reachability (2026-06-10, reaffirmed 2026-06-11): every draft-safe input
 axis has now been audited — context head saturated at the draft-time ceiling,
 relationship features dead, recency/level dead, role experience marginal,
 player-skill priors blocked by aggregate staleness (val gains flip negative on
-test; see Player Priors Round 2 in `EXPERIMENTS.md`), and champion-strength /
+test; see Player Priors Round 2 in `EXPERIMENTS.md`), champion-strength /
 meta-drift features bounded out by a leakage-free future-knowledge oracle
 (`<=0.005pp` val ceiling; see Champion Strength / Meta Drift in
-`EXPERIMENTS.md`). The gate is not reachable under the frozen split boundary +
+`EXPERIMENTS.md`), and `(champion, position)` semantic identity profiles shown
+fully redundant with champion identity by shuffled-profile and one-hot
+controls (see Semantic Identity Profiles in `EXPERIMENTS.md`). The gate is not
+reachable under the frozen split boundary +
 frozen aggregates protocol. The two levers that move it — rolling the split
 windows with refreshed data, and continuously refreshed player aggregate
 dictionaries — are pipeline decisions, both user-gated.

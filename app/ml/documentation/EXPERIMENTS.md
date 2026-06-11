@@ -730,3 +730,88 @@ assessment from Player Priors Round 2 stands unchanged.
 
 Artifacts (gitignored data dir): `rolled_split_production/champ_oracle_probe.py`
 + `champ_oracle_report.json`.
+
+### Semantic Identity Profiles: Real Signal, Fully Redundant With Champion Identity (2026-06-11)
+
+Question: do hand-readable `(champion, position)` semantic profiles from the
+`app/classification` surface ("high armor", "physical damage dealer", "high
+sustain", ...) form useful draft-time features when aggregated into ally/enemy
+team profiles and explicit cross-team interactions (e.g. ally armor vs enemy
+physical damage)? And if yes, is mining richer encoder-derived latent groups
+the next step? Answer: the signal exists in absolute terms but is entirely a
+lossy re-encoding of champion identity, which the base already consumes; the
+causal controls attribute the whole residual lift to non-semantic artifacts.
+
+**Audit.** Semantic identity outputs are keyed `(championid, teamposition,
+build)` and smoothed from train-split rows only (draft-safe, frozen at the
+train boundary like every prior). Production already consumes this surface
+twice: the 25-dim compact semantic group features and the learned semantic MoE
+over the static/full-game/temporal encoder latents. Build-free `(champ, pos)`
+coverage: 859 cells over 172 champions, median 949 train games per cell, 425
+cells `>=1000`; the 254 cells `<200` are off-role picks handled by EB pooling
+toward the champion level. Profiles are *stable*, not stale: train-window vs
+val-window weighted correlation per behavioral dim is `0.96-0.998`
+(cells with `n>100` in both windows).
+
+**Probe (`semantic_profile_probe.py`).** Build-free `(champ, pos)` profiles:
+10 behavioral dims from ClickHouse train rows (physical/magic/true damage
+shares, damage to champions, damage taken, self-mitigation, CC time,
+heals+shields on allies, turret damage, gold — per minute, EB strength 200
+toward champion then global) plus 4 static dims (level-18 armor/MR/HP, attack
+range). Features per match: blue-minus-red team-mean profile diff (14) and 11
+explicit interactions (7 cross-team own-durability-vs-enemy-threat products,
+2 within-team fits, 1 per-lane product, 1 damage-type balance). Head: ridge
+logistic residual on the frozen warm4 base logits, fit on full train and on
+the last-15% train window, val-only reads. Controls: shuffled
+`(champ,pos) -> profile` assignment, intercept-only refit, standalone (no
+base) fits, and a `(champ,pos)` one-hot champion-identity ablation.
+
+Validation results (base `57.936%` / `0.673202`; best per variant):
+
+| variant | val acc | NLL | acc lift vs base |
+| --- | ---: | ---: | ---: |
+| intercept-only, last15 window | `58.102%` | `0.672131` | `+0.166pp` |
+| shuffled profiles, all features, last15 | `58.142%` | `0.672100` | `+0.206pp` |
+| real profiles, diff features, last15 | `58.144%` | `0.672092` | `+0.208pp` |
+| real profiles, diff+interactions, last15 | `58.137%` | `0.672098` | `+0.201pp` |
+
+Standalone (no base offset, fit on train): real semantic features `53.67%`,
+shuffled profiles `53.80%`, `(champ,pos)` one-hot `54.55%`.
+
+**Decomposition.** ~80% of the residual lift (`+0.166pp` / `-0.00107` NLL) is
+a single scalar: the frozen base is blue-side miscalibrated on the late-train
+window and val (fitted intercept `-0.062` on the last 15% of train). The
+remaining `~+0.04pp` comes from *any* fixed champion-keyed projection
+(shuffled control), i.e. mild champion-composition recalibration, not
+semantics. Real semantic content beyond the shuffled control: `+0.002pp` acc,
+`-8e-6` NLL — zero. The interpretable cross-team interactions carry intuitive
+signs on the full-train fit (sustain-vs-enemy-damage `+0.075`,
+HP-vs-enemy-damage `+0.041`, MR-vs-enemy-magic `+0.035`,
+armor-vs-enemy-physical `+0.014` in standardized space) but the armor/MR signs
+flip on the last15 window and the shuffled-control equivalence marks the
+whole block as noise-level. The standalone ordering (one-hot > shuffled ~=
+real) confirms the semantic profiles are a lossy compression of champion
+identity, which the base's champion embeddings already encode losslessly.
+
+**Verdict.** Q1: simple semantic groups do contain absolute draft-time signal
+(`53.7%` standalone vs `50%`) but zero incremental signal over the production
+base — redundant with champion identity, not noisy and not stale. Q2: no,
+mining richer encoder-derived semantic groups is not worth it for win
+prediction: production already feeds the full encoder latents through the
+semantic MoE, and the in-band ceiling decomposition showed the 900-dim union
+of group features + context axes + sidecar latents plateaus at `~0.0014`
+train-fit NLL with era freshness, not representation, as the binding
+constraint. This probe independently reconfirms that conclusion on a
+build-free `(champ, pos)` surface with causal controls. No candidate was
+formed; no test read was taken. The 60% gate assessment stands unchanged —
+the intercept-drift finding (`+0.166pp` from one scalar) is more evidence
+that window freshness is the only live lever, and the player-priors round
+already showed such late-window val gains can flip sign on test.
+
+Note: the probe's report `auc` values are invalid in the archived JSON — the
+shared `_binary_auc(scores, targets)` helper was called with swapped
+arguments, the same root cause as the known-buggy `eval_player.py` AUC
+column. Conclusions use acc/NLL only; the probe script is fixed.
+
+Artifacts (gitignored data dir): `rolled_split_production/semantic_profile_probe.py`
++ `semantic_profile_report.json` + `semantic_profile_slots.npz`.
