@@ -59,6 +59,12 @@ than the batch validation surface: the current `app.rl.reward.Predictor`
 protocol supplies champions, roles, and build ids, but not Loadout or patch
 feature tensors. Checkpoints that require those residual heads fail fast at
 load time instead of silently dropping trained production inputs.
+`WinRatePredictor.predict_marginal` additionally serves the pregame path: it
+takes no build ids, enumerates train-supported build worlds from the
+`app.ml.build_catalog` priors, and averages output probabilities (see
+`HGNN_BUILD_INTENT.md` and the marginalisation record in `EXPERIMENTS.md`).
+Accepted marginal *metrics* come from the cache-side harness
+`python -m app.ml.marginal_eval`, which serves loadout/patch heads as trained.
 
 ```text
 cache 1vX priors + support

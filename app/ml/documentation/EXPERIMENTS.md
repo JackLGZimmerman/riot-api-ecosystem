@@ -300,6 +300,50 @@ vs `0.5788` / `0.6723` for the single-seed mean.
 `split_v32/verify_equivalence.py` re-checks the artifact against the frozen
 seed logits and recorded metrics after any model-code change.
 
+## Pregame Build Marginalisation (2026-06-12)
+
+Phase A of `HGNN_BUILD_INTENT.md` landed: the train-only build catalog
+(`app/ml/build_catalog.py`), the cache-side marginalised eval harness
+(`python -m app.ml.marginal_eval`), the runtime `predict_marginal` path, and
+the catalog-backed RL pool. Accepted modes score hypothesised build worlds
+from `P(build | champion, role)` (EB-smoothed `synergy_1vx` train rows,
+`tau=20`, fallback champion_role → role → global) and never read a held-out
+row's observed `build_id`; world probabilities are averaged in probability
+space and divided by retained joint mass. Catalog `b39d506e51eb`.
+
+Full test split (`n=329,586`), production 3-seed calibrated ensemble:
+
+| mode | build source | acc | NLL | brier | ECE |
+| --- | --- | ---: | ---: | ---: | ---: |
+| oracle (diagnostic) | observed final builds | `0.58260` | `0.67105` | `0.23921` | `0.0160` |
+| modal (`W=1`, top build/slot) | pregame catalog | `0.55798` | `0.68432` | `0.24556` | `0.0231` |
+| marginal (`W=128`, `k_slot=3`) | pregame catalog | `0.56186` | `0.68152` | `0.24424` | `0.0123` |
+
+Readings:
+
+- The oracle row reproduces the recorded production metrics exactly — the
+  harness shares the training assembly path, so the marginal rows are
+  apples-to-apples. The `~2.1pp` oracle-marginal gap is the value of knowing
+  final builds, i.e. post-treatment information a draft-time consumer never
+  has; `0.5619 / 0.6815` is the honest pregame deliverable.
+- Marginalisation beats the single most-likely world by `+0.39pp` acc /
+  `-0.0028` NLL and, notably, is already calibrated: a fresh train-fitted
+  affine recalibration is near-identity (scale `1.012`, bias `-0.029`,
+  `+0.01pp`), whereas modal scoring is overconfident (fitted scale `0.867`).
+  Probability-space averaging supplies the variance reduction itself.
+- Retained joint mass at `W=128`: mean `0.691`, p10 `0.464`, `3.0%` of games
+  below the `0.35` low-confidence floor, mean `122` worlds/game. Raising
+  `W`/`k_slot` buys more mass at linear GPU cost (full test + 200k-game
+  calibration took ~40 min on CUDA at `W=128`); the modal→128 trend suggests
+  small further gains — measure `W=512` before relying on it.
+- Per-slot fallback was almost never needed on test (`554` role-fallback
+  slots out of `3.3M`, no global) — train support covers the test
+  champion-role surface.
+
+Follow-ups deliberately not taken here: `W=512` sweep, and the Phase B
+time-capped (pregame-legal) build label, which is the only lever that can
+close any of the oracle gap rather than just approximate the prior.
+
 ## Where The Issue Lies
 
 The issue lies in extracting decision signal from semantic groups, not in the

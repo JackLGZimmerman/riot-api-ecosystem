@@ -120,3 +120,6 @@ app/ml/data/extracts/
 app/ml/data/experiments/
 app/ml/data/cache/
 app/classification/data/embeddings/
+
+# Generated RL artifacts (python -m app.rl.pool generate)
+app/rl/data/champion_pool.json

@@ -28,6 +28,10 @@ class RoleBuildConfig:
     roles: dict[int, str]  # champion_id -> role
     builds: dict[int, int]  # champion_id -> build_id
     probability: float = 1.0  # normalised weight within the returned set
+    # Share of the team's full enumerated assignment mass the returned set
+    # covers (1.0 when nothing was truncated). The same value is stamped on
+    # every config from one sampler call.
+    retained_mass: float = 1.0
 
 
 class Predictor(Protocol):
@@ -56,6 +60,9 @@ class OptimizationResult:
     win_matrix: np.ndarray  # shape (n_blue_cfg, n_red_cfg)
     blue_configs: list[RoleBuildConfig]
     red_configs: list[RoleBuildConfig]
+    # Truncation coverage of each side's config set (see RoleBuildConfig).
+    blue_retained_mass: float = 1.0
+    red_retained_mass: float = 1.0
 
 
 class RoleBuildOptimizer(Protocol):
@@ -146,10 +153,22 @@ def make_pool_sampler(
             )
 
         scored.sort(key=lambda x: x[0], reverse=True)
+        full_mass = sum(w for w, _, _ in scored)
+        if full_mass <= 0.0:
+            raise ValueError(
+                f"All role/build assignment weights are zero for team "
+                f"{team_champions}; the champion pool carries no usable mass."
+            )
         top = scored[:top_k_build_configs]
         total = sum(w for w, _, _ in top)
+        retained = total / full_mass
         return [
-            RoleBuildConfig(roles=roles, builds=builds, probability=w / total)
+            RoleBuildConfig(
+                roles=roles,
+                builds=builds,
+                probability=w / total,
+                retained_mass=retained,
+            )
             for w, roles, builds in top
         ]
 
@@ -163,6 +182,7 @@ def resolve_rewards(
     sampler: RoleBuildSampler,
     reward_mode: RewardMode,
     risk_lambda: float = 0.5,
+    worst_case_min_probability: float = 0.0,
 ) -> OptimizationResult:
     """Build the full P(blue|cfg_b, cfg_r) matrix and aggregate per mode.
 
@@ -175,6 +195,10 @@ def resolve_rewards(
     - worst_case     : min for blue (worst-case blue), max for red
                        (worst-case red); each side assumes the enemy
                        commits to the worst plausible config for it.
+                       `worst_case_min_probability` drops configs below
+                       that normalised weight before taking min/max, so a
+                       barely plausible assignment cannot dominate the
+                       reward; 0.0 keeps every config.
     """
     blue_configs = sampler(blue_team, "blue")
     red_configs = sampler(red_team, "red")
@@ -208,8 +232,17 @@ def resolve_rewards(
         p_for_blue = m - risk_lambda * s
         p_for_red = m + risk_lambda * s
     elif reward_mode == "worst_case":
-        p_for_blue = float(win_matrix.min())
-        p_for_red = float(win_matrix.max())
+        blue_mask = blue_weights >= worst_case_min_probability
+        red_mask = red_weights >= worst_case_min_probability
+        # The threshold is a guard against implausible tails, not a hard
+        # filter: if it would empty a side, keep that side's full set.
+        if not blue_mask.any():
+            blue_mask[:] = True
+        if not red_mask.any():
+            red_mask[:] = True
+        masked = win_matrix[np.ix_(blue_mask, red_mask)]
+        p_for_blue = float(masked.min())
+        p_for_red = float(masked.max())
     else:
         raise ValueError(f"Unknown reward_mode: {reward_mode!r}")
 
@@ -221,4 +254,6 @@ def resolve_rewards(
         win_matrix=win_matrix,
         blue_configs=blue_configs,
         red_configs=red_configs,
+        blue_retained_mass=min(cfg.retained_mass for cfg in blue_configs),
+        red_retained_mass=min(cfg.retained_mass for cfg in red_configs),
     )

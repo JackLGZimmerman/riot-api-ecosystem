@@ -171,30 +171,9 @@ def _identity_meta(cfg: DatasetConfig) -> tuple[int, list[str]]:
     """
     client = get_client()
     solo_prior_table = _sql_ident(cfg.solo_prior_table)
-    if cfg.use_final_build_labels:
-        max_champ = client.query(
-            f"SELECT toInt32(max(championid)) FROM {solo_prior_table} WHERE split = 'train'"
-        ).result_rows[0][0]
-    else:
-        rows = client.query(
-            f"""
-            SELECT
-                toInt32(max(championid)) AS max_championid,
-                countIf(build = {{label:String}}) AS no_build_rows
-            FROM {solo_prior_table}
-            WHERE split = 'train'
-            """,
-            parameters={"label": cfg.draft_unknown_build_label},
-        ).result_rows
-        max_champ, no_build_rows = rows[0]
-        if int(no_build_rows) <= 0:
-            raise ValueError(
-                "Draft-time-safe cache requested (use_final_build_labels=False), "
-                "but no train priors use draft_unknown_build_label="
-                f"{cfg.draft_unknown_build_label!r}. Rebuild the no-build aggregate "
-                "priors before building this cache."
-            )
-        return int(max_champ) + 1, [cfg.draft_unknown_build_label]
+    max_champ = client.query(
+        f"SELECT toInt32(max(championid)) FROM {solo_prior_table} WHERE split = 'train'"
+    ).result_rows[0][0]
     builds = client.query(
         f"SELECT DISTINCT build FROM {solo_prior_table} WHERE split = 'train' ORDER BY build"
     ).result_rows
@@ -361,8 +340,6 @@ def _write_meta(
                     "smoothing_mode": cfg.smoothing_mode,
                     "prior_confidence_matchups": cfg.prior_confidence_matchups,
                     "interaction_loo": cfg.interaction_loo,
-                    "use_final_build_labels": cfg.use_final_build_labels,
-                    "draft_unknown_build_label": cfg.draft_unknown_build_label,
                 },
                 "sources": {
                     "player_pivot_table": cfg.player_pivot_table,
@@ -395,11 +372,7 @@ def build(cfg: DatasetConfig | None = None) -> Path:
     arrays = _open_arrays(n_games, cfg.cache_dir)
     n_builds = len(build_vocab)
     build_vocab_sql = "[" + ",".join(_sql_str(b) for b in build_vocab) + "]"
-    key_build_expr = (
-        "toString(tupleElement(p, 3))"
-        if cfg.use_final_build_labels
-        else _sql_str(cfg.draft_unknown_build_label)
-    )
+    key_build_expr = "toString(tupleElement(p, 3))"
     logger.info(
         "Building cache: games=%d splits=%s n_champions=%d n_builds=%d",
         n_games,

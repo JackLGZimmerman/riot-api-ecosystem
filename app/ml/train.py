@@ -35,6 +35,7 @@ from app.ml.encoder_sidecar import EncoderSidecarLookup, SidecarGatherTables
 from app.core.utils.common import resolve_device_str as resolve_device
 from app.ml.hgnn_model import (
     HGNNConfig,
+    HGNNEnsemble,
     HGNNWinModel,
     build_hgnn_inputs,
     expected_encoder_sidecar_dims,
@@ -610,7 +611,7 @@ def _hgnn_inputs_from_raw(
 
 
 def _predict_hgnn_logits(
-    model: HGNNWinModel,
+    model: HGNNWinModel | HGNNEnsemble,
     split: RawTensorSplit,
     *,
     batch_size: int,

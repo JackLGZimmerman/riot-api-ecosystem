@@ -15,7 +15,7 @@ from app.rl.pool import (
     DEFAULT_POOL_PATH,
     ChampionPool,
     PoolEntry,
-    build_pool_from_priors,
+    build_pool_from_catalog,
     load_pool,
     save_pool,
 )
@@ -66,7 +66,7 @@ __all__ = [
     "RoleBuildSampler",
     "Side",
     "auto_device",
-    "build_pool_from_priors",
+    "build_pool_from_catalog",
     "encode_obs",
     "load_pool",
     "make_pool_sampler",

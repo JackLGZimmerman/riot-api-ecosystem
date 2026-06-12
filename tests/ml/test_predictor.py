@@ -100,8 +100,6 @@ def test_predictor_supplies_semantic_group_features(
         amplification_threshold=0.0,
         smoothing_mode="cascade",
         prior_confidence_matchups=50.0,
-        use_final_build_labels=True,
-        draft_unknown_build_label="unknown",
         encoder_sidecar=None,
         semantic_context_lookup=_semantic_context_lookup(),
         device="cpu",
@@ -140,8 +138,6 @@ def test_predictor_rejects_mismatched_team_assignments(
         amplification_threshold=0.0,
         smoothing_mode="cascade",
         prior_confidence_matchups=50.0,
-        use_final_build_labels=True,
-        draft_unknown_build_label="unknown",
         encoder_sidecar=None,
         semantic_context_lookup=_semantic_context_lookup(),
         device="cpu",
@@ -157,6 +153,138 @@ def test_predictor_rejects_mismatched_team_assignments(
             {champion: position for champion, position in zip(red, POSITIONS)},
             {champion: 0 for champion in blue},
             {champion: 0 for champion in red},
+        )
+
+
+class _BuildSensitiveModel:
+    """Logit depends only on the assigned build ids; no semantic/sidecar path."""
+
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(
+            n_champions=1000,
+            n_builds=2,
+            build_vocab=("carry", "tank"),
+            identity_static_sidecar_dim=0,
+            identity_full_game_sidecar_dim=0,
+            identity_temporal_sidecar_dim=0,
+            use_learned_semantic_moe=False,
+            use_semantic_group_features=False,
+            loadout_feature_dim=0,
+            patch_feature_dim=0,
+        )
+
+    def to(self, _device: str) -> "_BuildSensitiveModel":
+        return self
+
+    def eval(self) -> "_BuildSensitiveModel":
+        return self
+
+    def __call__(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        build_id = inputs["build_id"]
+        return {"final_logit": build_id.float().sum(dim=1) * 0.4 - 2.0}
+
+
+def test_predict_marginal_matches_brute_force_average() -> None:
+    from itertools import product
+
+    from app.ml.build_catalog import build_catalog
+
+    p1: dict[tuple[int, str, str], tuple[float, int]] = {}
+    for champion, position in zip(range(1, 11), POSITIONS + POSITIONS):
+        p1[(champion, position, "carry")] = (0.5, 80)
+        p1[(champion, position, "tank")] = (0.5, 20)
+    catalog = build_catalog(p1, ("carry", "tank"))
+    predictor = WinRatePredictor(
+        _BuildSensitiveModel(),
+        PriorTables(p1=p1),
+        prior_strength=20.0,
+        smoothing_prior_strength=20.0,
+        amplification_threshold=0.0,
+        smoothing_mode="cascade",
+        prior_confidence_matchups=50.0,
+        encoder_sidecar=None,
+        semantic_context_lookup=None,
+        device="cpu",
+    )
+    blue = list(range(1, 6))
+    red = list(range(6, 11))
+
+    result = predictor.predict_marginal(
+        blue,
+        red,
+        {champion: position for champion, position in zip(blue, POSITIONS)},
+        {champion: position for champion, position in zip(red, POSITIONS)},
+        catalog=catalog,
+        k_slot=2,
+        max_worlds=2048,
+        early_stop_mass=2.0,
+    )
+
+    # Identical cells -> one shared smoothed prior vector per slot; brute-force
+    # the probability-space marginal over all 2^10 build worlds.
+    probs = catalog.prior_vector(1, "TOP").probabilities
+    numerator, mass = 0.0, 0.0
+    for combo in product(range(2), repeat=10):
+        weight = float(np.prod([probs[i] for i in combo]))
+        numerator += weight / (1.0 + np.exp(-(sum(combo) * 0.4 - 2.0)))
+        mass += weight
+    assert result.probability == pytest.approx(numerator / mass)
+    assert result.retained_joint_mass == pytest.approx(1.0)
+    assert result.n_worlds == 1024
+    assert result.low_confidence is False
+    assert result.fallback_sources == ("champion_role",) * 10
+    assert result.build_source == "pregame_marginal_build"
+
+
+def test_predictor_rejects_out_of_vocab_build_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_static_lookups(monkeypatch)
+    predictor = WinRatePredictor(
+        _SemanticModel(),
+        _priors(),
+        prior_strength=20.0,
+        smoothing_prior_strength=20.0,
+        amplification_threshold=0.0,
+        smoothing_mode="cascade",
+        prior_confidence_matchups=50.0,
+        encoder_sidecar=None,
+        semantic_context_lookup=_semantic_context_lookup(),
+        device="cpu",
+    )
+    blue = list(range(1, 6))
+    red = list(range(6, 11))
+
+    with pytest.raises(ValueError, match="outside the model build vocab"):
+        predictor(
+            blue,
+            red,
+            {champion: position for champion, position in zip(blue, POSITIONS)},
+            {champion: position for champion, position in zip(red, POSITIONS)},
+            {champion: 1 for champion in blue},  # vocab size is 1: only id 0
+            {champion: 0 for champion in red},
+        )
+
+
+def test_predictor_rejects_prior_vocab_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_static_lookups(monkeypatch)
+    model = _SemanticModel()
+    model.config.build_vocab = ("other",)
+
+    with pytest.raises(ValueError, match="do not match the checkpoint build_vocab"):
+        WinRatePredictor(
+            model,
+            _priors(),
+            prior_strength=20.0,
+            smoothing_prior_strength=20.0,
+            amplification_threshold=0.0,
+            smoothing_mode="cascade",
+            prior_confidence_matchups=50.0,
+            encoder_sidecar=None,
+            semantic_context_lookup=_semantic_context_lookup(),
+            device="cpu",
         )
 
 
@@ -180,8 +308,6 @@ def test_predictor_rejects_feature_heads_missing_from_runtime_protocol(
             amplification_threshold=0.0,
             smoothing_mode="cascade",
             prior_confidence_matchups=50.0,
-            use_final_build_labels=True,
-            draft_unknown_build_label="unknown",
             encoder_sidecar=None,
             semantic_context_lookup=_semantic_context_lookup(),
             device="cpu",

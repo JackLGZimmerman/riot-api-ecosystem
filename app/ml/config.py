@@ -53,11 +53,6 @@ class DatasetConfig:
     # smoothing, so the joint-minus-expected delta stops leaking the label.
     # See documentation/README.md.
     interaction_loo: bool = True
-    # Draft-time caches must not use final item-derived build labels. When
-    # false, the cache builder rewrites all prior lookup keys to this constant
-    # build label and requires matching no-build aggregate priors to exist.
-    use_final_build_labels: bool = True
-    draft_unknown_build_label: str = "unknown"
     # Optional frozen three-encoder sidecar artifact. Current caches record its
     # metadata and gather latents from the compact artifact at tensor-build time.
     encoder_sidecar_path: Path | None = DEFAULT_ENCODER_SIDECAR_PATH

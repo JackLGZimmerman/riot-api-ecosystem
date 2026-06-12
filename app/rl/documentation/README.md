@@ -398,7 +398,7 @@ that does not increase total loss.
 | File | Contents |
 | --- | --- |
 | `draft.py` | `Side`, `ActionType`, `DraftStep`, `DRAFT_SEQUENCE` |
-| `pool.py` | `ChampionPool`, `PoolEntry`, `load_pool`, `build_pool_from_priors` |
+| `pool.py` | `ChampionPool`, `PoolEntry`, `load_pool`, `build_pool_from_catalog` |
 | `reward.py` | `Predictor`, `RoleBuildConfig`, `make_pool_sampler`, `resolve_rewards` |
 | `env.py` | `DraftEnv`, `DraftEnvConfig` (int8 ownership vector internally) |
 | `policy.py` | `MaskedPolicy`, `encode_obs` (REINFORCE policy) |

@@ -1,11 +1,22 @@
 # HGNN Build Intent Plan
 
-Last updated: 2026-06-11.
+Last updated: 2026-06-12.
 
 This document is the implementation plan for adding build intent to the HGNN and
 RL/search stack without leaking completed-game item information. It is grounded
 in the current v32 model surface (see `HGNN_CURRENT.md`) and the recorded
 experiment history (`EXPERIMENTS.md`).
+
+**Status (2026-06-12): Phase A is implemented.** The catalog/contracts live in
+[build_catalog.py](../build_catalog.py), the cache-side marginalised eval in
+[marginal_eval.py](../marginal_eval.py) (`python -m app.ml.marginal_eval`), the
+runtime batched marginal path in [predictor.py](../predictor.py)
+(`predict_marginal`), and the catalog-backed RL pool in
+[pool.py](../../rl/pool.py) (`python -m app.rl.pool generate`). The dead
+`use_final_build_labels=False` arm, the id-0 build default, and
+`build_pool_from_priors` are deleted. Measured results are recorded in
+`EXPERIMENTS.md` ("Pregame Build Marginalisation"). Sections below are the
+plan of record; the "Grounding" section describes the pre-implementation tree.
 
 ## Goal
 
@@ -43,10 +54,10 @@ accepted test/serving scoring must never read a held-out row's observed build.
 Any guard that bans final build labels from the cache outright would destroy
 the conditional model this plan depends on.
 
-## Grounding: What The Code Actually Does Today
+## Grounding: What The Code Did Pre-Implementation
 
-Verified against the working tree on 2026-06-11. Implementers should treat this
-section as the contract with reality; re-verify anchors before editing.
+Verified against the working tree on 2026-06-11, before Phase A landed. Kept as
+the record of why each change was made; line anchors refer to that tree.
 
 - **Build label definition.** The label is the argmax over 11 item-value
   categories of the *final inventory*
