@@ -10,6 +10,8 @@ Lead with findings ordered by severity. Include file and line references where p
 - Confirm any executor sub-agents only executed a decision-complete packet after the plan existed.
 - Confirm the orchestrator used the highest-level available model for framing, architecture, risk, and acceptance criteria.
 - Confirm executor sub-agents, if used, were lower/cheaper/specialized models appropriate for bounded execution.
+- Confirm executor sub-agents did not create nested sub-agent loops unless the top-level orchestrator explicitly authorized that shape.
+- For loops, sweeps, polling, background jobs, or repeated retries, confirm resource limits, artifact/log path, stop condition, and escalation point were defined.
 - Flag missing or weak evidence as `Unverified` unless the diff itself proves a violation.
 - Flag as a finding if a sub-agent made product or architecture decisions, broadened scope, edited outside ownership, or executed before the implementation packet was established.
 - If no sub-agents were used, confirm direct top-level execution was appropriate for the scope.
