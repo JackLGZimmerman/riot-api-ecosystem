@@ -82,6 +82,11 @@ class TrainConfig:
     raw_tensor_cache_device: str = "cpu"
     seed: int = 0
     max_grad_norm: float | None = 1.0
+    # Train the no-build comparator: every build-dependent input becomes the
+    # modal build per (champion, role) from the train-only catalog. Evaluate
+    # the result with `marginal_eval --mode modal`, not against the cache's
+    # observed builds. See HGNN_BUILD_INTENT.md (baseline 2).
+    pregame_modal_builds: bool = False
     # Production artifact paths are the load/serve defaults, not routine train
     # outputs. Promotion runs must opt in before overwriting them.
     allow_production_artifact_overwrite: bool = False

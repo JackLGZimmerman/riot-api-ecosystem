@@ -30,7 +30,10 @@ from app.ml.config import (
     DatasetConfig,
     TrainConfig,
 )
+from app.ml.build_catalog import build_catalog
 from app.ml.dataset import SPLIT_ORDER, SplitData, identity_meta, load_splits
+from app.ml.pregame import apply_modal_build_split, build_hypothesis_tables
+from app.ml.priors import load_priors
 from app.ml.encoder_sidecar import EncoderSidecarLookup, SidecarGatherTables
 from app.core.utils.common import resolve_device_str as resolve_device
 from app.ml.hgnn_model import (
@@ -697,6 +700,31 @@ def train(
             load_semantic_group_features=load_semantic_group_features,
         ).items()
     }
+    if train_cfg.pregame_modal_builds:
+        # No-build comparator for the leakage-free pregame path: every
+        # build-dependent input becomes the modal build per (champion, role)
+        # from the train-only catalog, on both splits. Evaluate the result
+        # with `marginal_eval --mode modal`, never against observed builds.
+        priors = load_priors()
+        build_vocab = tuple(model_config.build_vocab)
+        catalog = build_catalog(priors.p1, build_vocab)
+        tables = build_hypothesis_tables(
+            dataset_cfg,
+            priors,
+            n_champions=int(model_config.n_champions),
+            build_vocab=build_vocab,
+        )
+        loaded_splits = {
+            name: apply_modal_build_split(
+                split,
+                catalog,
+                tables,
+                build_vocab=build_vocab,
+                needs_semantic=load_semantic_group_features,
+            )
+            for name, split in loaded_splits.items()
+        }
+        logger.info("Applied pregame modal-build transform (catalog %s)", catalog.version)
     # Compact caches omit per-game sidecar arrays; build the on-device gather
     # table from the frozen artifact when the model consumes identity latents.
     gatherer = None
@@ -1051,6 +1079,16 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
     )
     parser.add_argument("--seed", type=int, default=train_defaults.seed)
     parser.add_argument(
+        "--pregame-modal-builds",
+        action=argparse.BooleanOptionalAction,
+        default=train_defaults.pregame_modal_builds,
+        help=(
+            "Replace every build-dependent input with the modal build per "
+            "(champion, role) from the train-only catalog (no-build "
+            "comparator; evaluate with marginal_eval --mode modal)."
+        ),
+    )
+    parser.add_argument(
         "--max-grad-norm", type=float, default=train_defaults.max_grad_norm
     )
     parser.add_argument(
@@ -1225,6 +1263,7 @@ def _parse_args() -> tuple[DatasetConfig, TrainConfig, dict[str, Any]]:
             raw_tensor_cache_device=args.raw_tensor_cache_device,
             seed=args.seed,
             max_grad_norm=args.max_grad_norm,
+            pregame_modal_builds=args.pregame_modal_builds,
             allow_production_artifact_overwrite=(
                 args.allow_production_artifact_overwrite
             ),

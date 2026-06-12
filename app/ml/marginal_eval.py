@@ -55,11 +55,10 @@ from app.ml.hgnn_model import (
     model_uses_encoder_sidecar,
     resolve_device,
 )
-from app.ml.priors import PriorTables, load_priors
+from app.ml.pregame import HypothesisTables, build_hypothesis_tables
+from app.ml.priors import load_priors
 from app.ml.promote import _fit_calibration
-from app.ml.semantic_context_lookup import load_semantic_context_raw_lookup
 from app.ml.semantic_group_features import (
-    SEMANTIC_CONTEXT_RAW_DIM,
     build_semantic_group_features,
     static_hp_range_lookups,
 )
@@ -69,67 +68,11 @@ from app.ml.train import (
     _drop_unused_model_arrays,
     _predict_hgnn_logits,
 )
-from app.core.utils.smoothing import smooth_rate_by_mode
-
 setup_logging_config()
 logger = logging.getLogger(__name__)
 
 EPS = 1e-12
 DEFAULT_OUT_DIR = ML_DATA_DIR / "experiments"
-
-
-@dataclass(frozen=True)
-class HypothesisTables:
-    """Dense per-identity lookups for hypothesised (champ, role, build) keys.
-
-    Indexed ``[champion_id, role_idx, build_id]`` with the reserve champion row
-    at ``n_champions``. Priors carry the standard runtime smoothing (no LOO);
-    context rows come from the same train-split identity-keyed lookup the
-    runtime predictor serves from (it is also what filled the cache's
-    ``identity_context_raw.npy``), so hypothesised worlds see exactly the
-    surface observed train identities saw.
-    """
-
-    win_rate: np.ndarray  # [C+1, 5, B] float32, smoothed
-    p1_cnt: np.ndarray  # [C+1, 5, B] float32
-    context: np.ndarray  # [C+1, 5, B, SEMANTIC_CONTEXT_RAW_DIM] float32
-
-
-def _build_hypothesis_tables(
-    cfg: DatasetConfig,
-    priors: PriorTables,
-    *,
-    n_champions: int,
-    build_vocab: tuple[str, ...],
-) -> HypothesisTables:
-    n_builds = len(build_vocab)
-    build_index = {label: i for i, label in enumerate(build_vocab)}
-    role_index = {role: i for i, role in enumerate(POSITIONS)}
-    raw = np.full((n_champions + 1, 5, n_builds), 0.5, dtype=np.float64)
-    cnt = np.zeros((n_champions + 1, 5, n_builds), dtype=np.float64)
-    for (champ, role, label), (wr, matchups) in priors.p1.items():
-        if 0 <= champ < n_champions:
-            raw[champ, role_index[role], build_index[label]] = wr
-            cnt[champ, role_index[role], build_index[label]] = matchups
-    win_rate = smooth_rate_by_mode(
-        raw,
-        cnt,
-        prior_mean=cfg.smoothing_prior_mean,
-        prior_strength=cfg.smoothing_prior_strength,
-        amplification_threshold=cfg.amplification_threshold,
-        smoothing_mode=cfg.smoothing_mode,
-        confidence_threshold=cfg.prior_confidence_matchups,
-    ).astype(np.float32)
-
-    context = np.zeros(
-        (n_champions + 1, 5, n_builds, SEMANTIC_CONTEXT_RAW_DIM), dtype=np.float32
-    )
-    for (champ, role, label), row in load_semantic_context_raw_lookup().values.items():
-        if 0 <= champ < n_champions and role in role_index and label in build_index:
-            context[champ, role_index[role], build_index[label]] = row
-    return HypothesisTables(
-        win_rate=win_rate, p1_cnt=cnt.astype(np.float32), context=context
-    )
 
 
 @dataclass(frozen=True)
@@ -412,7 +355,7 @@ def run(
     priors = load_priors()
     catalog = build_catalog(priors.p1, tuple(model_config.build_vocab))
     payload["catalog_version"] = catalog.version
-    tables = _build_hypothesis_tables(
+    tables = build_hypothesis_tables(
         dataset_cfg,
         priors,
         n_champions=int(model_config.n_champions),
