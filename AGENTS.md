@@ -8,9 +8,11 @@
 
 ## Orchestration and Sub-Agents
 
-- Delegate only when clear ownership boundaries reduce risk, context load, or wall-clock time.
-- Do not delegate small, obvious, single-file, tightly coupled, or urgent blocking work; the top-level agent may execute directly.
+- Default to top-level execution; spawn sub-agents only after an explicit benefit-versus-usage check.
+- Delegate only when clear ownership boundaries reduce risk, context load, or wall-clock time enough to justify extra requests.
+- Do not delegate small, obvious, single-file, tightly coupled, routine review, or urgent blocking work; the top-level agent may execute directly.
 - Prefer fewer agents with precise packets over many agents with vague mandates.
+- Use the cheapest adequate configured model for executor-only work, and close sub-agents promptly when finished.
 
 ### Level 1: Orchestrator
 
@@ -28,9 +30,15 @@
 
 ### Level 3: Independent Review
 
-- After significant implementation, run a separate fresh-context review.
+- After significant or high-risk implementation, run a separate fresh-context review; use top-level self-review for low-risk docs and small edits.
 - Audit correctness, edge cases, regressions, security/authorization, data consistency, performance, UX/accessibility when relevant, tests, maintainability, stale artifacts, and simpler alternatives.
 - Fix high-value findings before finalizing; call out accepted residual risk.
+
+## Usage Limits
+
+- Avoid unbounded background or loop sessions; stop once the task is done or waiting on external input.
+- Keep context intentional: compact mid-task when context grows large, and clear when switching tasks.
+- Treat sub-agent-heavy runs and 8+ hour sessions as exceptional budget events that need an explicit reason.
 
 ## User Work Safety
 
