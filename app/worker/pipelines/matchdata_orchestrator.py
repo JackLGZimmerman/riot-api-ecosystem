@@ -63,6 +63,8 @@ from app.worker.pipelines.recovery_utils import RETRY_MAX_ATTEMPTS, run_sync_wit
 from app.worker.pipelines.stop_flag import raise_if_stop_requested
 from database.clickhouse.operations.matchdata import (
     delete_by_matchids,
+    load_stream_anchor_matchids,
+    load_table_matchids,
 )
 from database.clickhouse.operations.utils import persist_data
 from database.clickhouse.operations.work_state import (
@@ -131,7 +133,6 @@ def _table_spec(table: str, row_type: type[Any], attr: str) -> TableSpec:
 
 NON_TIMELINE_TABLE_SPECS = (
     _table_spec("game_data.metadata", TabulatedMetadata, "metadata"),
-    _table_spec("game_data.info", TabulatedInfo, "game_info"),
     _table_spec("game_data.bans", TabulatedBan, "bans"),
     _table_spec("game_data.feats", TabulatedFeat, "feats"),
     _table_spec("game_data.objectives", TabulatedObjective, "objectives"),
@@ -155,6 +156,7 @@ NON_TIMELINE_TABLE_SPECS = (
         TabulatedParticipantPerkIds,
         "participant_perk_ids",
     ),
+    _table_spec("game_data.info", TabulatedInfo, "game_info"),
 )
 
 TIMELINE_TABLE_SPECS = (
@@ -189,7 +191,6 @@ TIMELINE_TABLE_SPECS = (
     _table_spec("game_data.tl_level_up", LevelUpRow, "levelUp"),
     _table_spec("game_data.tl_skill_level_up", SkillLevelUpRow, "skillLevelUp"),
     _table_spec("game_data.tl_pause_end", PauseEndRow, "pauseEnd"),
-    _table_spec("game_data.tl_game_end", GameEndRow, "gameEnd"),
     _table_spec(
         "game_data.tl_objective_bounty_prestart",
         ObjectiveBountyPrestartRow,
@@ -221,12 +222,17 @@ TIMELINE_TABLE_SPECS = (
         ChampionKillDamageInstanceRow,
         "championKillVictimDamageReceived",
     ),
+    _table_spec("game_data.tl_game_end", GameEndRow, "gameEnd"),
 )
+
+type StreamName = Literal["non_timeline", "timeline"]
 
 ALL_TABLE_SPECS = (*NON_TIMELINE_TABLE_SPECS, *TIMELINE_TABLE_SPECS)
 ALL_DELETE_TABLES = tuple(spec.table for spec in ALL_TABLE_SPECS)
-
-type StreamName = Literal["non_timeline", "timeline"]
+STREAM_TABLE_SPECS: dict[StreamName, tuple[TableSpec, ...]] = {
+    "non_timeline": NON_TIMELINE_TABLE_SPECS,
+    "timeline": TIMELINE_TABLE_SPECS,
+}
 
 
 @dataclass(frozen=True)
@@ -246,6 +252,16 @@ type QueueMsg = StreamItem | _Done
 @dataclass(frozen=True)
 class MatchDataCollectorState:
     matchids: list[str]
+    non_timeline_matchids: list[str] | None = None
+    timeline_matchids: list[str] | None = None
+
+    def stream_matchids(self, stream: StreamName) -> list[str]:
+        ids = (
+            self.non_timeline_matchids
+            if stream == "non_timeline"
+            else self.timeline_matchids
+        )
+        return self.matchids if ids is None else ids
 
 
 class MatchDataOrchestrator(Orchestrator):
@@ -347,18 +363,27 @@ class MatchDataLoader(Loader):
             self._initialized = True
 
         claimed = claim_pending_matchids(batch_size=self.batch_size)
+        non_timeline_done, timeline_done = load_stream_anchor_matchids(claimed)
+        non_timeline_ids = [mid for mid in claimed if mid not in non_timeline_done]
+        timeline_ids = [mid for mid in claimed if mid not in timeline_done]
         logger.info(
-            "MatchData loader source=%s size=%d",
+            "MatchData loader source=%s size=%d non_timeline_missing=%d timeline_missing=%d",
             "state_queue" if claimed else "none",
             len(claimed),
+            len(non_timeline_ids),
+            len(timeline_ids),
         )
-        return MatchDataCollectorState(matchids=claimed)
+        return MatchDataCollectorState(
+            matchids=claimed,
+            non_timeline_matchids=non_timeline_ids,
+            timeline_matchids=timeline_ids,
+        )
 
 
 class MatchDataStreamCollector(Collector):
     def __init__(self, riot_api: RiotAPI, *, stream: StreamName) -> None:
         self.riot_api = riot_api
-        self.stream = stream
+        self.stream: StreamName = stream
 
     async def collect(
         self, state: MatchDataCollectorState, ctx: OrchestrationContext
@@ -367,8 +392,12 @@ class MatchDataStreamCollector(Collector):
         endpoint_type = (
             "by_match_id" if self.stream == "non_timeline" else "timeline_by_match_id"
         )
+        matchids = state.stream_matchids(self.stream)
+        if not matchids:
+            return
+
         iterator = stream_match_data(
-            state.matchids,
+            matchids,
             endpoint_type=endpoint_type,
             riot_api=self.riot_api,
         )
@@ -407,17 +436,22 @@ class MatchDataSaver(Saver):
         if not state.matchids:
             return
 
-        # Idempotency guard: scrub any residue left by a prior crashed run for
-        # the claimed matchids before writing anything. With raw tables on
-        # plain MergeTree, this is what guarantees zero duplicates without
-        # relying on FINAL/merge-time deduplication downstream.
-        await self.delete_failed_matchids(state.matchids)
+        await self.delete_unanchored_residue(state)
 
         stream_successes: dict[str, set[StreamName]] = defaultdict(set)
         stream_terminals: dict[str, set[StreamName]] = defaultdict(set)
         aborted_match_ids: set[str] = set()
         buffers: dict[str, list[dict[str, Any]]] = defaultdict(list)
         last_flush = time.monotonic()
+        streams: tuple[StreamName, ...] = ("non_timeline", "timeline")
+        pending_by_stream: dict[StreamName, set[str]] = {
+            stream: set(state.stream_matchids(stream))
+            for stream in streams
+        }
+        for mid in state.matchids:
+            for stream, pending in pending_by_stream.items():
+                if mid not in pending:
+                    stream_successes[mid].add(stream)
 
         parsers: dict[StreamName, tuple[Any, tuple[TableSpec, ...]]] = {
             "non_timeline": (self.non_timeline_parser, NON_TIMELINE_TABLE_SPECS),
@@ -478,12 +512,11 @@ class MatchDataSaver(Saver):
 
             if requeued:
                 logger.warning(
-                    "MatchData retryable failure run_id=%s count=%d sample=%s",
+                    "MatchData retryable failure run_id=%s count=%d sample=%s; keeping partial rows for anchor retry",
                     ctx.run_id,
                     len(requeued),
                     requeued[:20],
                 )
-                await self.delete_failed_matchids(requeued)
 
             if retired:
                 logger.warning(
@@ -496,7 +529,8 @@ class MatchDataSaver(Saver):
                 await self.delete_failed_matchids(retired)
                 await self.delete_source_matchids(retired)
 
-            await self.mark_finished_matchids([*finished, *retired])
+            if finished or retired:
+                await self.mark_finished_matchids([*finished, *retired])
 
             logger.info(
                 "MatchData done run_id=%s total=%d ok=%d retired=%d requeued=%d",
@@ -517,14 +551,38 @@ class MatchDataSaver(Saver):
             raise
 
     async def delete_failed_matchids(self, match_ids: list[str]) -> None:
-        for table in ALL_DELETE_TABLES:
+        await self.delete_stream_matchids(ALL_TABLE_SPECS, match_ids)
+
+    async def delete_stream_matchids(
+        self,
+        specs: tuple[TableSpec, ...],
+        match_ids: list[str],
+    ) -> None:
+        for spec in specs:
             await run_sync_with_retry(
                 logger=logger,
                 component="MatchData",
-                op_name=f"delete_by_matchids:{table}",
+                op_name=f"delete_by_matchids:{spec.table}",
                 func=delete_by_matchids,
-                args=(table, match_ids),
+                args=(spec.table, match_ids),
             )
+
+    async def delete_unanchored_residue(self, state: MatchDataCollectorState) -> None:
+        for stream, specs in STREAM_TABLE_SPECS.items():
+            ids = state.stream_matchids(stream)
+            if not ids:
+                continue
+            residue = await asyncio.to_thread(load_table_matchids, specs[0].table, ids)
+            if not residue:
+                continue
+            residue_ids = [mid for mid in ids if mid in residue]
+            logger.warning(
+                "MatchData unanchored residue stream=%s count=%d sample=%s; deleting before retry",
+                stream,
+                len(residue_ids),
+                residue_ids[:20],
+            )
+            await self.delete_stream_matchids(specs, residue_ids)
 
     async def mark_finished_matchids(self, match_ids: list[str]) -> None:
         await run_sync_with_retry(

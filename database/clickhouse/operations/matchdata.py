@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 MUTATION_POLL_INTERVAL_S = 5.0
 MUTATION_PROGRESS_LOG_INTERVAL_S = 60.0
+NON_TIMELINE_ANCHOR_TABLE = "game_data.info"
+TIMELINE_ANCHOR_TABLE = "game_data.tl_game_end"
 
 
 def _split_table_name(table: str) -> tuple[str, str]:
@@ -43,6 +45,36 @@ def _has_matching_rows(client, *, table: str, match_ids: list[str]) -> bool:
         parameters={"match_ids": match_ids},
     ).result_rows
     return bool(rows)
+
+
+def _load_matching_matchids(client, *, table: str, match_ids: list[str]) -> set[str]:
+    rows = client.query(
+        f"""
+        SELECT DISTINCT matchid
+        FROM {table}
+        WHERE matchid IN %(match_ids)s
+        """,
+        parameters={"match_ids": match_ids},
+    ).result_rows
+    return {row[0] for row in rows}
+
+
+def load_table_matchids(table: str, match_ids: Iterable[str]) -> set[str]:
+    ids = dedupe_matchids(match_ids)
+    if not ids:
+        return set()
+    return _load_matching_matchids(get_client(), table=table, match_ids=ids)
+
+
+def load_stream_anchor_matchids(match_ids: Iterable[str]) -> tuple[set[str], set[str]]:
+    ids = dedupe_matchids(match_ids)
+    if not ids:
+        return set(), set()
+
+    return (
+        load_table_matchids(NON_TIMELINE_ANCHOR_TABLE, ids),
+        load_table_matchids(TIMELINE_ANCHOR_TABLE, ids),
+    )
 
 
 def _wait_for_mutations_after(
