@@ -330,6 +330,78 @@ def build_catalog_from_priors(
     return build_catalog(load_priors().p1, build_vocab, gates)
 
 
+@dataclass(frozen=True)
+class ConditionGates:
+    child_min_count: int = 50
+    tau: float = 50.0
+
+
+def conditioned_prior_vector(
+    catalog: BuildCatalog,
+    champion_id: int,
+    teamposition: str,
+    keystone: int,
+    cell_counts: dict[str, int] | None,
+    gates: ConditionGates,
+) -> BuildPriorVector:
+    """Return a keystone-conditioned build prior, or the parent if gating fails.
+
+    ``cell_counts`` maps build label -> train count for this exact
+    (champion, teamposition, keystone) cell. Conditioning can only reweight
+    the parent's retained labels; it never introduces a build outside the
+    parent (champ, role) supported set.
+
+    Note: the returned ``retained_mass`` is cell-local (parent-retained rows /
+    all rows in this keystone cell), not the parent's corpus-level mass.
+
+    Falls back to parent when:
+    - keystone <= 0 (missing rune data)
+    - parent was not a direct champion-role fit (fallback_source != "champion_role")
+    - the cell has no train rows, or its count restricted to parent labels is
+      below gates.child_min_count
+    """
+    parent = catalog.prior_vector(champion_id, teamposition)
+    if keystone <= 0 or parent.fallback_source != "champion_role" or not cell_counts:
+        return parent
+
+    # Restrict child counts to the parent's retained labels only.
+    retained_labels = [catalog.build_vocab[hid] for hid in parent.hgnn_build_ids]
+    restricted: dict[str, int] = {
+        label: cell_counts.get(label, 0) for label in retained_labels
+    }
+    # Total cell rows including labels pruned by the parent (pruned mass).
+    all_child_for_cell = sum(cell_counts.values())
+
+    child_total_restricted = sum(restricted.values())
+    if child_total_restricted < gates.child_min_count:
+        return parent
+
+    # EB: p_i = (n_i + tau * p_parent_i) / (N_child_restricted + tau)
+    n_arr = np.array(
+        [restricted[catalog.build_vocab[hid]] for hid in parent.hgnn_build_ids],
+        dtype=np.float64,
+    )
+    p_parent = np.array(parent.probabilities, dtype=np.float64)
+    N = float(child_total_restricted)
+    tau = gates.tau
+    probs = (n_arr + tau * p_parent) / (N + tau)
+    retained_mass = N / all_child_for_cell if all_child_for_cell > 0 else 1.0
+
+    return BuildPriorVector(
+        champion_id=int(champion_id),
+        teamposition=teamposition,
+        profile_ids=parent.profile_ids,
+        hgnn_build_ids=parent.hgnn_build_ids,
+        probabilities=tuple(float(p) for p in probs),
+        support_counts=tuple(int(restricted[catalog.build_vocab[hid]]) for hid in parent.hgnn_build_ids),
+        retained_mass=retained_mass,
+        pruned_mass=1.0 - retained_mass,
+        fallback_source="champion_role_keystone",
+        smoothing_strength=tau,
+        catalog_version=parent.catalog_version,
+    )
+
+
 def enumerate_joint_worlds(
     slot_probabilities: list[np.ndarray],
     *,
@@ -404,9 +476,11 @@ __all__ = [
     "BuildPriorVector",
     "BuildProfile",
     "CatalogGates",
+    "ConditionGates",
     "build_catalog",
     "build_catalog_from_priors",
     "catalog_version",
+    "conditioned_prior_vector",
     "enumerate_joint_worlds",
     "profile_id",
     "validate_accepted_build_source",

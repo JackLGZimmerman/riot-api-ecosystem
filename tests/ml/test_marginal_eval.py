@@ -121,3 +121,56 @@ def test_score_split_marginal_modal_is_top_world_probability() -> None:
     # Modal world = all-"carry" (build id 0 everywhere) -> sigmoid(-2.0).
     assert scores.probabilities == pytest.approx([1.0 / (1.0 + np.exp(2.0))])
     assert scores.n_worlds.tolist() == [1]
+
+
+def test_score_split_marginal_conditioned_uses_keystone_weights() -> None:
+    """With keystone conditioning, the slot prior is reweighted and the
+    fallback_counts entry 'champion_role_keystone' appears in the payload."""
+    catalog = build_catalog(_p1(), VOCAB)
+
+    # One game: all blue slots use champ 1 and all red slots use champ 6.
+    split = SimpleNamespace(
+        champion_id=np.array([BLUE + RED], dtype=np.int64),
+        blue_win=np.array([1.0]),
+        loadout_features=None,
+        patch_features=None,
+    )
+
+    # Keystone array: one game, 10 slots, all keystone 8000.
+    slot_keystones = np.full((1, 10), 8000, dtype=np.int32)
+
+    # Child counts: heavily favour "tank" (build id 1) under keystone 8000.
+    # Each champion present in BLUE+RED has a conditioned count cell.
+    child_counts: dict[tuple[int, str, int], dict[str, int]] = {
+        (champion, position, 8000): {"carry": 10, "tank": 90}
+        for champion, position in zip(BLUE + RED, POSITIONS + POSITIONS)
+    }
+
+    from app.ml.build_catalog import ConditionGates
+
+    scores = score_split_marginal(
+        _BuildSensitiveModel(),
+        split,
+        catalog,
+        _tables(),
+        strength=20.0,
+        device="cpu",
+        gatherer=None,
+        k_slot=2,
+        max_worlds=2048,
+        early_stop_mass=2.0,
+        log_every=0,
+        slot_keystones=slot_keystones,
+        child_counts=child_counts,
+        condition_gates=ConditionGates(child_min_count=50, tau=50.0),
+    )
+
+    # Conditioned slots must appear in the fallback_counts.
+    assert "champion_role_keystone" in scores.fallback_counts
+    # All 10 slots were conditioned (every champ-role pair is in the catalog
+    # and child counts clear the gate).
+    assert scores.fallback_counts["champion_role_keystone"] == 10
+    assert scores.fallback_counts.get("champion_role", 0) == 0
+
+    # Probability must still be a valid probability.
+    assert 0.0 < scores.probabilities[0] < 1.0

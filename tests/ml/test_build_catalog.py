@@ -11,7 +11,9 @@ from app.ml.build_catalog import (
     BUILD_SOURCE_RL_CANDIDATE,
     BUILD_SOURCE_TRAIN_OBSERVED,
     CatalogGates,
+    ConditionGates,
     build_catalog,
+    conditioned_prior_vector,
     enumerate_joint_worlds,
     profile_id,
     validate_accepted_build_source,
@@ -175,3 +177,101 @@ def test_enumeration_filters_zero_mass_candidates() -> None:
     assert all(w > 0.0 for w in weights)
     with pytest.raises(ValueError, match="positive-mass"):
         enumerate_joint_worlds([np.array([0.0, 0.0])], k_slot=2)
+
+
+# ---------------------------------------------------------------------------
+# conditioned_prior_vector
+# ---------------------------------------------------------------------------
+
+
+def _cell_counts(a: int = 60, b: int = 15) -> dict[str, int]:
+    """Counts for one (champ, role, keystone) cell: build label -> n."""
+    return {"a": a, "b": b}
+
+
+def test_conditioned_reweights_parent_retained_labels() -> None:
+    catalog = build_catalog(_p1(), VOCAB)
+    gates = ConditionGates(child_min_count=50, tau=50.0)
+    cell_counts = _cell_counts(a=60, b=15)
+
+    vec = conditioned_prior_vector(catalog, 1, "TOP", 8000, cell_counts, gates)
+
+    assert vec.fallback_source == "champion_role_keystone"
+    assert vec.hgnn_build_ids == catalog.prior_vector(1, "TOP").hgnn_build_ids
+    assert vec.profile_ids == catalog.prior_vector(1, "TOP").profile_ids
+    assert sum(vec.probabilities) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_conditioned_eb_math_matches_hand_computed() -> None:
+    catalog = build_catalog(_p1(), VOCAB)
+    gates = ConditionGates(child_min_count=50, tau=50.0)
+    n_a, n_b = 60, 15
+    cell_counts = _cell_counts(a=n_a, b=n_b)
+
+    vec = conditioned_prior_vector(catalog, 1, "TOP", 8000, cell_counts, gates)
+    parent = catalog.prior_vector(1, "TOP")
+
+    tau = gates.tau
+    N = n_a + n_b
+    p_parent_a = parent.probabilities[0]  # label "a" is index 0
+    p_parent_b = parent.probabilities[1]  # label "b" is index 1
+    expected_a = (n_a + tau * p_parent_a) / (N + tau)
+    expected_b = (n_b + tau * p_parent_b) / (N + tau)
+
+    assert vec.probabilities == pytest.approx((expected_a, expected_b), rel=1e-9)
+    assert vec.support_counts == (n_a, n_b)
+
+
+def test_conditioned_below_gate_returns_parent() -> None:
+    catalog = build_catalog(_p1(), VOCAB)
+    gates = ConditionGates(child_min_count=50, tau=50.0)
+    # Only 30 child counts, below gate of 50.
+    cell_counts = _cell_counts(a=25, b=5)
+
+    vec = conditioned_prior_vector(catalog, 1, "TOP", 8000, cell_counts, gates)
+    parent = catalog.prior_vector(1, "TOP")
+
+    assert vec.fallback_source == "champion_role"
+    assert vec.probabilities == parent.probabilities
+
+
+def test_conditioned_keystone_zero_returns_parent() -> None:
+    catalog = build_catalog(_p1(), VOCAB)
+    gates = ConditionGates(child_min_count=50, tau=50.0)
+    cell_counts = _cell_counts(a=100, b=50)
+
+    vec = conditioned_prior_vector(catalog, 1, "TOP", 0, cell_counts, gates)
+    parent = catalog.prior_vector(1, "TOP")
+
+    assert vec.fallback_source == "champion_role"
+    assert vec.probabilities == parent.probabilities
+
+
+def test_conditioned_fallback_parent_returns_parent_unchanged() -> None:
+    """When the parent is a role/global fallback, conditioning is skipped."""
+    catalog = build_catalog(_p1(), VOCAB)
+    gates = ConditionGates(child_min_count=50, tau=50.0)
+    # Champion 999 is unseen → role fallback.
+    cell_counts = {"a": 100, "b": 50}
+
+    vec = conditioned_prior_vector(catalog, 999, "TOP", 8000, cell_counts, gates)
+
+    # Role fallback → conditioning must not apply.
+    assert vec.fallback_source == "role"
+
+
+def test_conditioned_does_not_introduce_labels_outside_parent() -> None:
+    """Child counts for labels pruned by the parent must not appear in the output."""
+    catalog = build_catalog(_p1(), VOCAB)
+    gates = ConditionGates(child_min_count=50, tau=50.0)
+    # Label "c" is not in the parent's retained set (pruned by profile_min_count).
+    cell_counts = {"a": 60, "b": 15, "c": 200}  # "c" pruned — must not appear
+
+    vec = conditioned_prior_vector(catalog, 1, "TOP", 8000, cell_counts, gates)
+    parent = catalog.prior_vector(1, "TOP")
+
+    # Output profile_ids must match parent exactly.
+    assert vec.profile_ids == parent.profile_ids
+    assert vec.hgnn_build_ids == parent.hgnn_build_ids
+    # "c" must not have its own entry.
+    assert len(vec.probabilities) == len(parent.probabilities)
