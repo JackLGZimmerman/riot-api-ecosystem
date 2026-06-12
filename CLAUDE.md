@@ -32,7 +32,8 @@
 
 - After significant or high-risk implementation, run a separate fresh-context review; use Claude self-review for low-risk docs and small edits.
 - Audit correctness, edge cases, regressions, security/authorization, data consistency, performance, UX/accessibility when relevant, tests, maintainability, stale artifacts, and simpler alternatives.
-- Fix high-value findings before finalizing; call out accepted residual risk.
+- For project reviews, use `code_review.md`; the review pass is read-only unless the user explicitly asks for fixes.
+- After review, handle high-value findings in a separate fix pass before finalizing; call out accepted residual risk.
 
 ## Usage Limits
 
