@@ -53,6 +53,17 @@ Flow:
    - Any retryable failure (5xx exhausted, retry pending): delete partial persisted rows and leave the queue row in place for the next batch.
 7. Repeat until no pending rows remain.
 
+Metadata-only gaps are not queue work. If `info` and `tl_game_end` both exist but
+`metadata` is missing, do not full-requeue those matchids: full requeue causes the
+collector to delete already-persisted raw rows and can trigger expensive
+ClickHouse mutations on timeline tables. Use
+`scripts/repair_partial_matchdata.py` instead; its default `auto` path classifies
+metadata-only gaps and backfills only `game_data.metadata` from
+`participant_stats.puuid` ordered by `participantid`, then clears repaired queue
+rows after post-insert validation. True stream partials (`info`/`tl_game_end` XOR)
+remain on the old backup-and-requeue path, but `--apply` refuses that path unless
+`--allow-full-requeue` is passed.
+
 ## Simplifications Applied (2026-03-09)
 
 - Removed obsolete pending-batch subsystem code from `work_state.py`.
