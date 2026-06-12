@@ -1,69 +1,53 @@
 # Engineering Principles
 
-## Engineering Reductionism
+## Reductionism
 
-- Simplify every code change as much as possible while preserving the requested behavior, safety, and visual quality.
-- Prefer the smallest correct implementation over additive architecture, extra state, new abstractions, or broad refactors.
-- Apply a reductionist mindset before editing: ask whether the same outcome can be achieved with fewer moving parts, fewer lines of code, less duplicated logic, and less runtime work.
-- If less code can deliver the same functionality with equal clarity and maintainability, use less code.
-- Keep changes efficient in both implementation and runtime: avoid unnecessary dependencies, observers, effects, re-renders, network calls, database work, and layout measurement.
-- Remove stale or redundant code created during iteration once the simpler solution is clear.
-- Related documentation (`.md`) should be updated, stale references removed, and sections rewritten when leaner detail would be clearer.
+- Preserve requested behavior, safety, and visual quality with the smallest clear change.
+- Prefer existing patterns over new dependencies, state, abstractions, broad refactors, or extra runtime work.
+- Remove iteration artifacts once the simpler solution is clear; update related docs by deleting stale references and tightening detail.
 
-## Orchestration and Sub-Agent Discipline
+## Orchestration and Sub-Agents
 
-- Use sub-agents only when the task has clear ownership boundaries that make delegation reduce risk, context load, or wall-clock time.
-- Do not delegate small, obvious, single-file, tightly coupled, or urgent blocking work. Claude may execute directly when delegation would add ceremony or risk.
-- Prefer fewer sub-agents with sharper task packets over many agents with fuzzy mandates.
+- Delegate only when clear ownership boundaries reduce risk, context load, or wall-clock time.
+- Do not delegate small, obvious, single-file, tightly coupled, or urgent blocking work; Claude may execute directly.
+- Prefer fewer agents with precise packets over many agents with vague mandates.
 
 ### Level 1: Orchestrator
 
-- Claude, as the top-level orchestration model, owns strategy, integration, and accountability for the whole change.
-- Use the strongest available top-level model and deep reasoning for problem framing, repo inspection, risk analysis, architecture decisions, and implementation planning.
-- Before delegating execution, produce a decision-complete implementation packet that includes:
-  - Goal and success criteria.
-  - Files, modules, or responsibilities owned by the executor.
-  - Interfaces, data flow, and compatibility constraints.
-  - Non-goals and boundaries.
-  - Tests and acceptance criteria.
-  - Known risks, edge cases, and escalation rules.
-- Keep integration authority at the orchestration level: resolve conflicts, prevent overlapping edits, protect user changes, and decide whether executor output is accepted.
-- Claude should continue meaningful non-overlapping work while sub-agents run instead of idly waiting.
+- Claude owns framing, planning, integration, and final accountability.
+- Use the strongest available model and deep reasoning for repo inspection, tradeoffs, architecture, risk, and tests.
+- Before execution, create a decision-complete packet: goal, owned files/areas, interfaces/data flow, non-goals, tests, acceptance criteria, risks, and escalation rules.
+- Prevent overlapping edits, protect user work, accept or reject executor output, and keep non-overlapping work moving while agents run.
 
 ### Level 2: Executor Sub-Agents
 
-- Executor sub-agents implement only the packet they were assigned.
-- Executors must stay inside their ownership area, avoid unrelated files, avoid broad refactors, and avoid improving nearby code unless the packet explicitly requires it.
-- Executors must escalate ambiguity, missing context, or scope pressure instead of inventing new product or architecture decisions.
-- Executors must assume other agents or the user may be editing the codebase at the same time and must not revert changes they did not make.
-- Executor handoff must report changed files, behavior changes, tests run, deviations from the packet, blockers, and residual risks.
+- Execute only the assigned packet and stay within owned files or areas.
+- Do not broaden scope, refactor nearby code, edit unrelated files, or make new product or architecture decisions.
+- Escalate ambiguity or conflict; never revert changes made by others.
+- Handoff changed files, behavior changes, tests run, deviations, blockers, and residual risks.
 
 ### Level 3: Independent Review
 
-- After every significant implementation, run a separate review agent with a fresh, independent context.
-- The review must audit functional correctness, edge cases, regressions, security and authorization risks, performance costs, accessibility and UX clarity when relevant, data consistency, error handling, test coverage, maintainability, stale artifacts, and whether the same outcome can be achieved more simply.
-- Treat review findings as actionable input. Fix high-value findings before finalizing, and explicitly call out any residual risk that remains.
-- The review agent critiques the integrated result; it does not replace Claude's accountability.
+- After significant implementation, run a separate fresh-context review.
+- Audit correctness, edge cases, regressions, security/authorization, data consistency, performance, UX/accessibility when relevant, tests, maintainability, stale artifacts, and simpler alternatives.
+- Fix high-value findings before finalizing; call out accepted residual risk.
 
 ## User Work Safety
 
-- Check `git status` before planning edits, before integration, and before any commit.
-- Treat untracked files and unexpected modifications as user-owned unless proven otherwise.
+- Check `git status` before edits, integration, and commit.
+- Treat untracked or unexpected changes as user-owned unless proven otherwise.
 - Never revert, overwrite, stage, format, or commit unrelated user changes.
-- If assigned files contain user edits, read them first and integrate around them. Ask only if the conflict cannot be resolved safely.
+- If target files contain user edits, read first and integrate around them; ask only when conflict cannot be resolved safely.
 
 ## Commit Discipline
 
-- After every significant completed change, stage, commit, and push the work when the repository is ready.
-- Keep commits scoped to the completed change unless the user explicitly asks to stage everything with `git add .`.
-- Before committing, check the working tree and avoid unintentionally including unrelated user changes.
-- Use clear commit messages that describe the behavior or fix, not implementation noise.
+- Stage, commit, and push significant completed changes when the repo is ready.
+- Stage only completed scope unless the user explicitly asks for `git add .`.
+- Use behavior-focused commit messages.
 
-## Memory System
+## Memory
 
-- Before planning, check relevant summaries in `/home/jack/.codex/memory/` and apply lessons that match the current repo or task.
-- Store one lesson per file with a one-line summary at the top.
-- Record corrections and confirmed approaches alike, including why they mattered.
-- Do not save what the repo or chat history already records.
-- Update an existing note rather than creating a duplicate; delete notes that turn out to be wrong.
-- For `riot-api-ecosystem`, keep known operational lessons visible in planning: backup-first and reversible matchdata repairs, Riot continent versus platform-region distinctions, restart automation safety, service dependency checks, and model-serving interface boundaries.
+- Before planning, scan relevant summaries in `/home/jack/.codex/memory/`.
+- Keep one lesson per file with a one-line summary; update or delete existing notes rather than duplicating stale guidance.
+- Record only durable corrections or confirmed approaches and why they matter.
+- In this repo, keep known risks in view: reversible matchdata repairs, continent/platform distinctions, restart automation, service dependencies, and model-serving boundaries.
