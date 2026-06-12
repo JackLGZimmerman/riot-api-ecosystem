@@ -10,6 +10,10 @@ from app.ml.pregame import (
     apply_modal_build_split,
     modal_build_table,
 )
+from app.ml.semantic_group_features import (
+    SEMANTIC_CONTEXT_RAW_DIM,
+    build_semantic_group_features,
+)
 
 VOCAB = ("alpha", "beta", "gamma")
 N_CHAMPIONS = 3
@@ -33,7 +37,9 @@ def _tables():
     return HypothesisTables(
         win_rate=rng.uniform(0.4, 0.6, size=shape).astype(np.float32),
         p1_cnt=rng.integers(0, 500, size=shape).astype(np.float32),
-        context=np.zeros(shape + (4,), dtype=np.float32),
+        context=rng.normal(size=shape + (SEMANTIC_CONTEXT_RAW_DIM,)).astype(
+            np.float32
+        ),
     )
 
 
@@ -83,3 +89,38 @@ def test_apply_modal_build_split_is_deterministic_per_champ_role() -> None:
     assert (out.build_id[champion_id == 1] == VOCAB.index("alpha")).all()
     # Untouched arrays pass through.
     np.testing.assert_array_equal(out.blue_win, split.blue_win)
+
+
+def test_apply_modal_build_split_rebuilds_semantic_features(monkeypatch) -> None:
+    catalog, tables = _catalog(), _tables()
+    hp = np.full(64, 600.0, dtype=np.float32)
+    attack_range = np.full(64, 175.0, dtype=np.float32)
+    monkeypatch.setattr(
+        "app.ml.pregame.static_hp_range_lookups", lambda: (hp, attack_range)
+    )
+    rng = np.random.default_rng(2)
+    n = 17  # not a multiple of chunk_rows below, so the tail chunk is exercised
+    champion_id = rng.integers(0, N_CHAMPIONS, size=(n, 10)).astype(np.int64)
+    split = SplitData(
+        win_rate=rng.uniform(size=(n, 10)).astype(np.float32),
+        p1_cnt=np.ones((n, 10), dtype=np.float32),
+        blue_win=rng.integers(0, 2, size=n).astype(np.float32),
+        champion_id=champion_id,
+        build_id=rng.integers(0, len(VOCAB), size=(n, 10)).astype(np.int64),
+        semantic_group_features=np.zeros((n, 10, 1), dtype=np.float32),
+    )
+
+    out = apply_modal_build_split(
+        split, catalog, tables, build_vocab=VOCAB, needs_semantic=True, chunk_rows=4
+    )
+
+    slot_roles = np.arange(10) % 5
+    expected = build_semantic_group_features(
+        context_raw=tables.context[champion_id, slot_roles, out.build_id],
+        champion_id=champion_id,
+        build_id=out.build_id,
+        build_vocab=VOCAB,
+        hp_lookup=hp,
+        range_lookup=attack_range,
+    )
+    np.testing.assert_array_equal(out.semantic_group_features, expected)
