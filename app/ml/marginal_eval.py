@@ -435,13 +435,25 @@ def run(
     payload["metrics"] = _metrics(scores.probabilities, scores.labels)
     payload["retained_joint_mass"] = _mass_report(scores, mass_floor)
     payload["fallback_slot_counts"] = scores.fallback_counts
+    if out is not None:
+        # Scoring takes hours; persist the per-game scores before the
+        # calibration phase so failures there cost nothing and calibration
+        # variants can be probed offline.
+        np.savez_compressed(
+            out.with_suffix(".npz"),
+            probabilities=scores.probabilities,
+            labels=scores.labels,
+            retained_mass=scores.retained_mass,
+        )
 
     if calibrate:
-        # Fresh affine calibration on train rows scored by the same procedure
-        # (source pregame_marginal_build); the production scale/bias was fitted
-        # under observed-build conditioning. Train rows here see full-count
-        # self-inclusive priors (the training cache used LOO), so the fitted
-        # scale/bias is slightly optimistic; test metrics are unaffected.
+        # Fresh bias-only calibration on train rows scored by the same
+        # procedure (source pregame_marginal_build); the production scale/bias
+        # was fitted under observed-build conditioning. A train-fitted scale is
+        # in-sample-optimistic (see EXPERIMENTS.md, 2026-06-12), so the scale
+        # stays at 1.0. Train rows here see full-count self-inclusive priors
+        # (the training cache used LOO), so the fitted bias is slightly
+        # optimistic; uncalibrated test metrics are unaffected.
         train_scores = score_split_marginal(
             model,
             splits["train"],
@@ -455,8 +467,17 @@ def run(
             early_stop_mass=early_stop_mass,
             max_games=calibration_max_games,
         )
+        if out is not None:
+            np.savez_compressed(
+                out.with_name(out.stem + "_calibration_rows.npz"),
+                probabilities=train_scores.probabilities,
+                labels=train_scores.labels,
+            )
         scale, bias = _fit_calibration(
-            _logit(train_scores.probabilities), train_scores.labels, device
+            _logit(train_scores.probabilities),
+            train_scores.labels,
+            device,
+            fit_scale=False,
         )
         calibrated = 1.0 / (
             1.0 + np.exp(-(scale * _logit(scores.probabilities) + bias))

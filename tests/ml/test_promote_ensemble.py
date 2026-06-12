@@ -63,7 +63,19 @@ def test_fit_calibration_recovers_known_scale_and_bias() -> None:
     probs = 1.0 / (1.0 + np.exp(-(1.4 * logits - 0.3)))
     labels = (rng.uniform(size=logits.size) < probs).astype(np.float64)
 
-    scale, bias = _fit_calibration(logits, labels, device="cpu")
+    scale, bias = _fit_calibration(logits, labels, device="cpu", fit_scale=True)
 
     assert abs(scale - 1.4) < 0.1
+    assert abs(bias + 0.3) < 0.1
+
+
+def test_fit_calibration_bias_only_keeps_unit_scale() -> None:
+    rng = np.random.default_rng(0)
+    logits = rng.normal(0.0, 2.0, size=20000)
+    probs = 1.0 / (1.0 + np.exp(-(logits - 0.3)))
+    labels = (rng.uniform(size=logits.size) < probs).astype(np.float64)
+
+    scale, bias = _fit_calibration(logits, labels, device="cpu", fit_scale=False)
+
+    assert scale == 1.0
     assert abs(bias + 0.3) < 0.1

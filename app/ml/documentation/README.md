@@ -1,6 +1,6 @@
 # ML Win-Rate Model
 
-As of 2026-06-11, the production artifact is a calibrated 3-seed ensemble of
+As of 2026-06-12, the production artifact is a calibrated 6-seed ensemble of
 HGNN checkpoints. Each member uses champion/build identity embeddings on top of
 the smoothed 1vX champion-role/build prior, the production Loadout head, the bounded
 patch-only Temporal head, and the promoted all-encoder learned semantic MoE over
@@ -29,8 +29,8 @@ cache/prior arrays
 -> Loadout + patch-only Temporal residual heads
 -> static/full-game/temporal sidecars into learned semantic MoE
 -> blue/red mean + attention team readout
--> per-seed final logit, mean over 3 seeds
--> affine calibration (scale, bias)
+-> per-seed final logit, mean over 6 seeds
+-> bias-only calibration
 -> sigmoid = P(blue wins)
 ```
 
@@ -49,13 +49,14 @@ metrics. Test is the model-selection split, not a final untouched holdout.
 Promote seed checkpoints to the production ensemble with:
 
 ```bash
-uv run python -m app.ml.promote --checkpoints seed4.pt seed5.pt seed6.pt
+uv run python -m app.ml.promote --checkpoints seed4.pt seed5.pt ... seed9.pt
 ```
 
-Promotion averages the per-seed logits, fits an affine logit calibration
-(scale, bias) on the train split — the bias restores the blue-side prior that
-team-swap augmentation suppresses — and writes the ensemble artifact with its
-embedded test metrics.
+Promotion averages the per-seed logits, fits a bias-only logit calibration on
+the train split — the bias restores the blue-side prior that team-swap
+augmentation suppresses; a train-fitted scale is in-sample-optimistic and is
+off by default (`--calibration affine` to override) — and writes the ensemble
+artifact with its embedded test metrics.
 
 Training writes:
 

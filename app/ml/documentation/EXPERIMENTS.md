@@ -1,12 +1,34 @@
 # HGNN Experiment Guidance
 
-Last updated: 2026-06-11.
+Last updated: 2026-06-12.
 
-This note records the current semantic-boundary experiment findings and the rules
-for future HGNN experiments. The goal is to keep useful conclusions while keeping
-temporary ablation runners, probes, and tests out of the maintained code surface.
+This note records closed-lever experiment findings and the rules for future
+HGNN experiments. The goal is to keep useful conclusions while keeping
+temporary ablation runners, probes, and tests out of the maintained code
+surface. Sections are decision records; the setup and rules below apply to
+all of them unless a record says otherwise.
 
-## Current Finding
+## Standard Experiment Setup
+
+These settings recur across every record below; records only state deviations.
+
+| Setting | Value |
+| --- | --- |
+| Hardware | local NVIDIA RTX 5070 Ti, `16,303 MiB` VRAM; CUDA |
+| Default training recipe | lr `3e-4`, batch `16384`, `max_epochs=40`, `patience=5`, weight decay `0`, raw test-accuracy checkpointing, `--raw-tensor-cache-device cpu` (~`48s`/epoch, ~10-15 min/seed) |
+| Production model recipe | learned semantic MoE `128x32` + semantic group features + Loadout + patch-only Temporal (the `train.py` production overrides; `HGNNConfig` base defaults keep the MoE flags off) |
+| Split protocol | v32 per-patch chronological 80/20: train `1,318,329` / test `329,586`, no validation split; test is the model-selection split, not an untouched holdout |
+| Frozen evaluation artifacts | `app/ml/data/experiments/split_v32/` (untracked): seed checkpoints, per-seed train+test logits in `preds.npz`, `verify_equivalence.py` (the post-refactor no-regression gate) |
+| Probe methodology | frozen ensemble logit as offset, features train-stat standardized, ridge/IRLS logistic fit on train only, one test read; central band = ensemble `p in [0.45, 0.55]` |
+| Leakage controls | LOO-adjust any train-row feature derived from labels (cache priors already are); include a no-information control (shuffled features or logit-only recalibration) before attributing a lift to feature content |
+| ClickHouse | run from the repo root (`PYTHONPATH=.`); cap `max_memory_usage<=4e9` and `max_threads=2` on raw-table aggregations; `synergy_1vx` and other prior tables are small and safe |
+| Invocation | `python -m app.ml.train --seed N --model-path ... --metrics-path ...`; promotion via `python -m app.ml.promote --checkpoints <seed ckpts>` |
+
+## Historical Finding: Semantic-Boundary Targets (pre-v32)
+
+Record from the old 80/10/10 chronological protocol; its validation split and
+central-band gates no longer exist under v32. Retained because the
+failure-mode taxonomy still applies to any future target construction.
 
 The semantic group examples are still critical for evaluation. They expose
 specific champion/build/context failures that aggregate accuracy, AUC, and even
@@ -288,17 +310,18 @@ checkpoints, `preds.npz`, and `verify_equivalence.py` (the no-regression gate
 for the promoted ensemble). The probe runners were removed after these
 conclusions were recorded.
 
-## Production Promotion: 3-Seed Ensemble + Side Calibration (2026-06-11)
+## Production Promotion: 3-Seed Ensemble + Side Calibration (2026-06-11, superseded)
 
 Both bankable levers from the probe round were promoted via
-`app/ml/promote.py`: the production artifact
-`app/ml/data/hgnn_production_model.pt` is now the 3-seed (4/5/6) logit-mean
-ensemble with a train-fitted affine logit calibration — scale `1.1686`, bias
-`-0.0432`, where the bias is the blue-side intercept that team-swap
-augmentation suppresses. Test accuracy `0.58260` and test NLL `0.67105`,
-vs `0.5788` / `0.6723` for the single-seed mean.
+`app/ml/promote.py`: the production artifact became the 3-seed (4/5/6)
+logit-mean ensemble with a train-fitted affine logit calibration — scale
+`1.1686`, bias `-0.0432`, where the bias is the blue-side intercept that
+team-swap augmentation suppresses. Test accuracy `0.58260` and test NLL
+`0.67105`, vs `0.5788` / `0.6723` for the single-seed mean.
 `split_v32/verify_equivalence.py` re-checks the artifact against the frozen
-seed logits and recorded metrics after any model-code change.
+seed logits and recorded metrics after any model-code change. Superseded by
+the 6-seed bias-only promotion below (2026-06-12), which also showed the
+train-fitted *scale* in this round was in-sample-optimistic.
 
 ## Pregame Build Marginalisation (2026-06-12)
 
@@ -343,6 +366,83 @@ Readings:
 Follow-ups deliberately not taken here: `W=512` sweep, and the Phase B
 time-capped (pregame-legal) build label, which is the only lever that can
 close any of the oracle gap rather than just approximate the prior.
+
+The table above was measured against the then-production 3-seed artifact;
+the 2026-06-12 promotion (below) moved production to the 6-seed bias-only
+ensemble, shifting the absolute rows slightly while leaving the
+oracle/modal/marginal structure unchanged.
+
+## 1vX Saturation and the 6-Seed Bias-Only Promotion (2026-06-12)
+
+Goal round: confirm the architecture record, then squeeze whatever remains in
+the 1vX (champion, role, build) marginal surface — the fastest data grain to
+train — before any higher-order (1v1/2vX) implementation. Outcome: the 1vX
+axis is saturated and now formally closed by three independent bounds, but
+the probe controls exposed a real production defect (in-sample calibration
+scale) whose fix plus three more seeds banked `+0.107pp` accuracy and
+`-0.00141` NLL.
+
+**Bound 1 — low-support mass.** The only place 1vX prior *quality* can matter
+beyond the identity embeddings is keys too rare for the embeddings to learn.
+On test, slots below the cascade confidence threshold (`n < 50`, the only
+rows shrunk toward the flat `0.5` prior) are `0.26%` of all slots; `2.6%` of
+games contain even one, `0.04%` two. A perfect hierarchical
+(build → champ-role → global) re-smoothing has no mass to act on; lever
+closed without building it.
+
+**Bound 2 — enrichment probe.** 24 features per game derived purely from the
+train `synergy_1vx` table — team-diffs of smoothed cell rate, champ-role
+parent rate, champion rate, build share, build entropy, cell-minus-parent
+delta, naive-Bayes logit, log supports, plus per-lane mu/delta diffs and
+cross-lane products — fit as a ridge IRLS residual on the frozen production
+ensemble (train-only, LOO-adjusted parents, slot/role mapping verified by
+exact count reconstruction). Every subset, including single features, gave
+the *same* `-0.00066` test NLL at `-0.03pp` accuracy — the signature of a
+recalibration artifact, not feature content.
+
+**Bound 3 — controls and decomposition.** A logit-only recalibration control
+(scale/bias/|logit|, train-fitted) gains exactly nothing, while an oracle
+*test*-fitted bias also gains nothing — but an oracle test-fitted scale is
+`0.824` (on the calibrated logit), worth `-0.00091` NLL: the production
+affine calibration was overconfident on test. Cause: `promote.py` fit the
+scale on train rows, which are in-sample for every member seed (logits
+sharper than out-of-sample), so the fitted expansion `1.1686` overshoots —
+the test-optimal net scale is `0.963 ~= 1.0`, i.e. the raw ensemble-mean
+logit is already scale-calibrated. Re-running the enrichment probe over a
+bias-only offset collapses the feature stack to `-0.000045` NLL / `-0.01pp`:
+pure noise. With bounds 1-3 and the earlier semantic-profile shuffled
+control, any (champion, role, build)-keyed enrichment is dominated by the
+identity embeddings; the 1vX marginal surface is exhausted.
+
+**Banked fixes.** Pre-registered candidates, one test read each (promotion
+decision under the v32 protocol; test is the selection split):
+
+| candidate | scale | bias | test acc | test NLL |
+| --- | ---: | ---: | ---: | ---: |
+| 3-seed 4/5/6, affine train-fit (incumbent) | `1.1686` | `-0.0432` | `0.58260` | `0.671053` |
+| 3-seed 4/5/6, bias-only | `1.0` | `-0.0475` | `0.58254` | `0.670174` |
+| 6-seed 4-9, affine train-fit | `1.2143` | `-0.0437` | `0.58349` | `0.670484` |
+| **6-seed 4-9, bias-only (promoted)** | `1.0` | `-0.0488` | **`0.58367`** | **`0.669642`** |
+| 3-seed 7/8/9, bias-only (replication) | `1.0` | `-0.0503` | `0.58308` | `0.670020` |
+
+Seeds 7/8/9 are fresh default-recipe runs (`0.5799/0.5795/0.5791` single-seed
+test accuracy — inside the 4/5/6 band, so the ensemble-size gain replicates
+across seed draws). Bias-only beats affine for both ensemble sizes
+(`-0.0009` NLL, accuracy within noise), and ensemble size keeps paying at a
+diminishing rate (`1->3` seeds `+0.26pp`, `3->6` `+0.11pp`). `promote.py`
+defaults to `--calibration bias`; `--calibration affine` remains available.
+`split_v32/verify_equivalence.py` is updated to the new artifact and passes
+(`max |logit diff| 3.9e-07`).
+
+**Direction.** With the marginal surface closed, the remaining draft-generic
+data lever is higher-order relationship structure — 1v1 lane matchups and
+2vX co-located synergies. The 2026-06-04 removal record and the earlier
+interaction findings still apply: any reintroduction must use LOO encoding,
+nested EB pooling toward no-build/champion parents for sparsity, and must
+clear a frozen-ensemble residual probe (with a shuffled-pair control) before
+any model wiring is built. More seeds remain a known-positive but
+diminishing lever (`~+0.05pp` expected for `6->12` at double the training
+cost).
 
 ## Where The Issue Lies
 
@@ -396,160 +496,65 @@ sections above.
 
 ## Experiment Rules
 
-Use NLL as the first decision gate for this semantic-boundary work.
+Use NLL alongside accuracy as the decision gates; record both as gain and new
+total (for example `+0.26pp` and `58.26%`).
 
-- Record accuracy gains as both gain and new total, for example `+0.779pp` and
-  `53.29%`, but reject a branch when central-band NLL is static.
-- The main central band is `p_no_group in [0.45, 0.55]`. Also report
-  `[0.475, 0.525]` as a sharper diagnostic, but do not promote on it alone.
-- Do not select checkpoints, thresholds, temperatures, or target parameters on
-  test data.
-- Every target surface must be train-only and split-safe. Use leave-one-out or
-  cross-fit estimates when the target is derived from labels.
-- If a fixed-feature ceiling learner cannot clear the NLL gate, change the data
-  representation before changing HGNN architecture.
-- If direct target replay cannot move held-out central NLL, change the target
-  construction before adding loss weights.
-- Treat accuracy-only gains as useful records, not promotion evidence.
+- Every feature/target surface must be train-only and split-safe. Use
+  leave-one-out or cross-fit estimates when it is derived from labels.
+- Probe before wiring: a frozen-ensemble residual probe (or a deliberately
+  leaky oracle bound) must show gate-scale signal before any HGNN
+  architecture or cache change is built for it.
+- Always run a no-information control next to a feature probe (shuffled
+  assignment, logit-only recalibration); attribute a lift to feature content
+  only if it beats the control.
+- Under v32 the test split is the model-selection split: checkpoint selection
+  and promotion decisions read it by design. Spend test reads deliberately —
+  pre-register candidates, then read once; do not iterate feature/parameter
+  tuning against test.
+- Treat accuracy-only gains as useful records, not promotion evidence, and
+  vice versa.
 - Run small smoke diagnostics first, then a full-data run only when the smoke
   validates the artifact path and metric writer.
-- Require at least seed `4` plus one additional seed before promotion.
+- Require at least three seeds before promotion.
 - Keep temporary runners, ablation scripts, and test-only probes out of the
   maintained tree after the conclusion is documented.
 
 ## Promotion Gates
 
-For semantic-boundary promotion, require all of the following:
+Production promotion under v32 requires all of the following:
 
 | Gate | Requirement |
 | --- | --- |
-| Boundary accuracy lift | Full model beats no-group ablation by at least `+0.50pp` validation and `+0.30pp` test on central-band games. |
-| Boundary NLL lift | At least `+0.003` validation and `+0.002` test central-band NLL lift. |
-| Directional semantic use | Support-weighted sign agreement between semantic movement and train-only residual direction at least `55%` on validation and non-regressing on test. |
-| Audit sanity | High-support semantic bins target `max_abs_gap <= 3.0pp` validation and `<= 3.5pp` test; report p95 gap. |
-| Global guardrails | Global validation/test NLL must not worsen by more than `0.0002`; accuracy/AUC must not drop by more than `0.05pp`. |
+| Test improvement | The candidate beats the promoted artifact on test accuracy and/or NLL with neither regressing materially (NLL within `+0.0002`, accuracy within `-0.05pp`). |
+| Reproducibility | Gains hold across at least three seeds (or are seed-free, like calibration/ensembling changes). |
+| Leakage review | No held-out information in any feature, prior, or calibration fit; accepted serving paths satisfy the draft-generic constraint and the build-intent leakage policy. |
+| No-regression gate | `split_v32/verify_equivalence.py` updated and passing against the new artifact. |
 
-Any model that improves audit MSE but fails boundary causal lift is rejected.
-Any model that improves central accuracy but leaves central NLL near the current
-`+0.001` band is also rejected.
+The pre-v32 semantic-boundary gate table (central-band validation lifts, audit
+max-gap targets) was retired with the validation split; the historical records
+below still cite it.
 
-## Next Data Direction
+## Next Data Direction (resolved 2026-06-11)
 
-The time-local teacher ceiling (2026-06-10) resolved the previous direction
-list: rolling/refresh teachers carry real signal, recency loss-weighting does
-not, and no train-boundary-respecting construction can clear the validation
-gate because the gate-clearing signal lives in same-patch history that the
-frozen Apr-22 boundary withholds. The next change is therefore to the split
-protocol itself, not to targets or architecture:
+The time-local teacher ceiling (2026-06-10) showed the gate-clearing signal
+lives in same-patch history that the old frozen Apr-22 boundary withheld;
+recency loss-weighting carried nothing. The resolution was the split protocol
+itself: the per-patch chronological 80/20 v32 protocol (`ml_game_split`; see
+`HGNN_CURRENT.md`) banked the freshness dividend (`+0.50pp` test accuracy,
+`-0.0037` NLL). Rolling the boundary forward again regenerates every
+split-scoped artifact (filter tables, priors, encoder sidecars, semantic
+context tables, cache), so it remains a deliberate pipeline operation, not a
+casual rerun.
 
-- Roll the chronological windows forward: extend train through the freshest
-  complete patch, assign new validation/test windows after the new boundary
-  (`ml_game_split` reassignment), and rebuild the filtered tables, priors,
-  sidecar artifacts, and v30 cache on the rolled boundary.
-- Retrain and evaluate the standard gates on the rolled held-out windows.
-  This is the production-true protocol: deployment always has data up to the
-  refresh point. Measured dividend at the teacher level, by cohort: the
-  half-patch-stale 1609 cohort reached a `0.00304` three-seed candidate mean
-  (`+1.3-1.8pp` accuracy; uniform refresh higher-mean but seed-noisy), while
-  one-patch-stale cohorts sat at `~0.0018`.
-- Keep refresh cadence well inside a patch if the in-era dividend is the
-  goal. The two available measurement points (~3 days own-patch history
-  `~0.0023`; 8.6 days `~0.0030`) are directional cadence evidence, not a
-  fitted curve — they differ in cohort and construction.
-- The fixed-feature ceiling harness (in-band + time-local sections above)
-  remains the gate for any cheaper variant before HGNN wiring changes.
+### Rolled-Split Round Context (2026-06-10, superseded)
 
-Status 2026-06-11: done — implemented as the per-patch chronological 80/20
-protocol (`ml_game_split` v32; see `HGNN_CURRENT.md`). The freshness dividend
-is banked (`+0.50pp` test accuracy, `-0.0037` NLL), and the follow-up probe
-section above records what remains on the draft-only surface.
-
-Rolling the boundary regenerates split-scoped artifacts (filter tables,
-priors, encoder sidecars, semantic context tables, cache), so it is a
-deliberate pipeline operation, not a casual rerun. Promotion gates are
-unchanged and apply on the rolled windows.
-
-### Refreshed Data State (2026-06-10)
-
-The model-development data refresh completed through the documented ClickHouse
-path in `database/clickhouse/commands.md`: corrected participant rows, filter
-stages, `valid_game_ids`, filtered participant rows, item-value totals,
-`ml_game_split`, `ml_game_player_pivot`, active 6000/6020 priors, 7000
-dictionaries, compact encoder sidecar, and the v30 Python cache. The split and
-cache counts below are the verification anchor for this refreshed state.
-
-Raw `game_data.info` currently contains season 16 through patch 24, but the
-current ML-valid pool after filtering reaches patch 11. The refreshed v30 cache
-contains `1,647,915` games:
-
-| Split | Games | Season | Patch range | Timestamp range |
-|---|---:|---|---|---|
-| train | 1,318,331 | 16 | 1-9 | `1767834983987` - `1777993488223` |
-| validation | 164,792 | 16 | 9-10 | `1777993501649` - `1779515542851` |
-| test | 164,792 | 16 | 10-11 | `1779515564023` - `1780922846108` |
-
-Patch distribution:
-
-| Split | Patch rows |
-|---|---|
-| train | S16.1 `196,280`; S16.2 `166,734`; S16.3 `167,810`; S16.4 `136,967`; S16.5 `138,764`; S16.6 `159,109`; S16.7 `151,105`; S16.8 `122,466`; S16.9 `79,096` |
-| validation | S16.9 `76,521`; S16.10 `88,271` |
-| test | S16.10 `40,357`; S16.11 `124,435` |
-
-The compact sidecar was regenerated from train-only classification matrices and
-rewritten to `app/ml/data/semantic_identity_sidecar_compact.npz` (`5,518`
-identity rows; static/full-game/temporal dims `16/64/64`). `build_dataset` was
-then rerun so `app/ml/data/cache/cache_meta.json` records the refreshed sidecar
-metadata and split sizes.
-
-### Rolled Split Test Plan
-
-Execution note, 2026-06-10: the rolled-split production recipe was evaluated
-with the active defaults from `HGNN_CURRENT.md`: learned semantic MoE 128x32,
-compact sidecar, semantic group features, batch `16384`, validation-accuracy
-checkpoint selection, and seeds `4` and `5`. The from-scratch round and
-warm-start round were both rejected for promotion under the pre-registered
-validation gates. The rolled-split line was subsequently superseded by the
-per-patch v32 protocol, and its candidate artifacts and runners were removed
-(2026-06-11); the records below are the retained conclusions.
-
-Batch `16384` is the measured throughput setting for the current architecture
-(`51,505` team-swap-augmented samples/s on the local RTX 5070 Ti). If the MoE or
-other model capacity changes, batch size must be reselected by samples/s rather
-than carried over mechanically.
-
-1. Freeze this refreshed data state as the candidate rolled-boundary protocol.
-   Record the split ranges above with every run so results are not compared
-   against the older Apr-22/S16.8 boundary by accident.
-2. Run a smoke train on seed `4` with the existing production recipe:
-   1vX prior, champion/build identity embeddings, Loadout, patch-only Temporal,
-   compact sidecar, semantic group features, and learned semantic MoE 128x32.
-   Verify cache loading, sidecar gather, metric writing, and no-group ablation
-   evaluation before spending full training time.
-3. If the smoke is clean, run the full production recipe on seed `4` plus at
-   least one additional seed. Select only on validation; keep test untouched
-   until the predeclared candidate is fixed.
-4. For each seed, evaluate the full model and the no-group ablation on:
-   global validation/test, central `p_no_group in [0.45, 0.55]`, and diagnostic
-   `p_no_group in [0.475, 0.525]`.
-5. Apply validation selection gates first: central NLL lift at least `+0.003`,
-   central accuracy lift at least `+0.50pp`, positive global guardrails, and
-   non-regressing semantic direction/audit metrics. Do not inspect test while
-   choosing seeds, cadence, thresholds, teachers, or checkpoints.
-6. After the validation-selected candidate is fixed, run one final test
-   confirmation: central NLL lift at least `+0.002`, central accuracy lift at
-   least `+0.30pp`, and the same global/audit guardrails. If test fails, reject
-   the candidate; do not tune and retest on the same test window.
-7. Re-run the group EB audit and the high-support context examples as
-   guardrails (audit tooling since retired). Treat low-support context
-   examples as qualitative only, not max-gap evidence.
-8. Compare the rolled-boundary results to the old frozen-boundary production
-   checkpoint and the time-local teacher ceiling. The key question is whether
-   adding same-patch train history in a production-true split closes the
-   historical `~0.0015` central NLL plateau.
-9. If the refreshed protocol fails the NLL gates, reject another semantic
-   architecture sweep until a cheaper fixed-feature ceiling on the refreshed
-   split shows gate-level central NLL signal.
+Rounds 1-2 below were run on an interim rolled v30 protocol (train patches
+1-9 `1,318,331` games, validation S16.9-10 `164,792`, test S16.10-11
+`164,792`; same 1,647,915-game pool the v32 cache now splits per patch), with
+the production recipe and validation-accuracy checkpointing, under
+pre-registered validation gates. Both rounds were rejected for promotion, the
+protocol was superseded by v32, and the candidate artifacts and runners were
+removed (2026-06-11); the records below are the retained conclusions.
 
 ### Rolled Split Round 1: From-Scratch Recipe Rejected (2026-06-10)
 

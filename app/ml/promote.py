@@ -1,12 +1,12 @@
 """Promote trained HGNN seed checkpoints to the production ensemble artifact.
 
-Computes per-seed logits over the cache, fits the affine logit calibration
-(scale, bias) on the train split — the bias restores the blue-side prior that
-team-swap augmentation suppresses — then evaluates the calibrated ensemble on
-test and writes the artifact.
+Computes per-seed logits over the cache, fits a bias-only logit calibration on
+the train split (default; ``--calibration affine`` also fits a scale) — the
+bias restores the blue-side prior that team-swap augmentation suppresses —
+then evaluates the calibrated ensemble on test and writes the artifact.
 
 Run from the repo root:
-  python -m app.ml.promote --checkpoints seed4.pt seed5.pt seed6.pt
+  python -m app.ml.promote --checkpoints seed4.pt seed5.pt ... seed9.pt
 """
 
 from __future__ import annotations
@@ -40,14 +40,22 @@ logger = logging.getLogger(__name__)
 
 
 def _fit_calibration(
-    logits: np.ndarray, labels: np.ndarray, device: str
+    logits: np.ndarray, labels: np.ndarray, device: str, *, fit_scale: bool
 ) -> tuple[float, float]:
-    """Fit logistic ``sigmoid(scale * logit + bias)`` on train rows."""
+    """Fit logistic ``sigmoid(scale * logit + bias)`` on train rows.
+
+    With ``fit_scale=False`` the scale stays fixed at 1.0 and only the bias is
+    fitted (the blue-side prior that team-swap augmentation suppresses). A
+    train-fitted scale is in-sample-optimistic — seed logits are sharper on
+    rows the members trained on — and measurably overshoots on test, so
+    bias-only is the production default (see EXPERIMENTS.md, 2026-06-12).
+    """
     x = torch.as_tensor(logits, dtype=torch.float64, device=device)
     y = torch.as_tensor(labels, dtype=torch.float64, device=device)
-    scale = torch.ones(1, dtype=torch.float64, device=device, requires_grad=True)
+    scale = torch.ones(1, dtype=torch.float64, device=device, requires_grad=fit_scale)
     bias = torch.zeros(1, dtype=torch.float64, device=device, requires_grad=True)
-    optimizer = torch.optim.LBFGS([scale, bias], max_iter=100)
+    params = [scale, bias] if fit_scale else [bias]
+    optimizer = torch.optim.LBFGS(params, max_iter=100)
 
     def closure() -> torch.Tensor:
         optimizer.zero_grad()
@@ -77,7 +85,10 @@ def promote(
     *,
     batch_size: int = 16384,
     device: str = "auto",
+    calibration: str = "bias",
 ) -> dict[str, float]:
+    if calibration not in ("bias", "affine"):
+        raise ValueError(f"unknown calibration mode: {calibration!r}")
     device = resolve_device(device)
     dataset_cfg = DatasetConfig()
     meta = identity_meta(dataset_cfg)
@@ -119,7 +130,9 @@ def promote(
 
     labels = {name: splits[name].blue_win.astype(np.float64) for name in logits}
     mean = {name: np.mean(values, axis=0) for name, values in logits.items()}
-    scale, bias = _fit_calibration(mean["train"], labels["train"], device)
+    scale, bias = _fit_calibration(
+        mean["train"], labels["train"], device, fit_scale=calibration == "affine"
+    )
     test_probs = 1.0 / (1.0 + np.exp(-(scale * mean["test"] + bias)))
     metrics = {
         "n_members": float(len(members)),
@@ -148,9 +161,14 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=DEFAULT_PRODUCTION_MODEL_PATH)
     parser.add_argument("--batch-size", type=int, default=16384)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--calibration", choices=("bias", "affine"), default="bias")
     args = parser.parse_args()
     promote(
-        args.checkpoints, args.out, batch_size=args.batch_size, device=args.device
+        args.checkpoints,
+        args.out,
+        batch_size=args.batch_size,
+        device=args.device,
+        calibration=args.calibration,
     )
 
 

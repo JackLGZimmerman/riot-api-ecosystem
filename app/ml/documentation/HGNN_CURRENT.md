@@ -1,6 +1,6 @@
 # HGNN Current State
 
-Last updated: 2026-06-11.
+Last updated: 2026-06-12.
 
 The model is draft-generic by hard constraint: no player information of any
 kind (no puuids, no player priors, no rank). The admissible surface is
@@ -73,8 +73,8 @@ cache 1vX priors + support
 -> production Loadout head + patch-only Temporal head
 -> frozen static/full-game/temporal sidecars into learned semantic MoE
 -> blue/red team readout
--> per-seed final logit, mean over 3 seeds
--> affine calibration (scale, bias)
+-> per-seed final logit, mean over 6 seeds
+-> bias-only calibration (+ blue-side intercept)
 -> sigmoid = P(blue wins)
 ```
 
@@ -93,17 +93,33 @@ test split. The current promoted production artifact does not meet that gate
 yet, but it banks every validated draft-only lever.
 
 Promoted artifact: `app/ml/data/hgnn_production_model.pt` — a calibrated
-3-seed ensemble written by `app/ml/promote.py`. Each member is a
-default-recipe v32 checkpoint (seeds 4/5/6: lr `3e-4`, batch `16384`,
+6-seed ensemble written by `app/ml/promote.py`. Each member is a
+default-recipe v32 checkpoint (seeds 4-9: lr `3e-4`, batch `16384`,
 `max_epochs=40`, `patience=5`, raw test-accuracy checkpointing). Promotion
-averages the per-seed logits and fits an affine logit calibration on the train
-split; the bias restores the blue-side prior that team-swap augmentation
-suppresses (model mean `p≈0.493` vs true blue winrate `0.482`).
+averages the per-seed logits and fits a bias-only logit calibration on the
+train split (scale fixed at `1.0`); the bias restores the blue-side prior
+that team-swap augmentation suppresses (model mean `p≈0.493` vs true blue
+winrate `0.482`). A train-fitted scale is in-sample-optimistic and overshoots
+on test — see the 2026-06-12 record in `EXPERIMENTS.md`.
 
 | Promoted ensemble | Test accuracy | Test NLL | logit scale | logit bias |
 | --- | ---: | ---: | ---: | ---: |
-| 3-seed logit-mean + affine calibration | **58.2601%** | **0.671053** | `1.1686` | `-0.0432` |
-| Single-seed reference (mean of seeds 4/5/6) | `57.88%` | `0.6723` | — | — |
+| 6-seed logit-mean + bias-only calibration | **58.3669%** | **0.669642** | `1.0` | `-0.0488` |
+| Previous 3-seed affine artifact | `58.2601%` | `0.671053` | `1.1686` | `-0.0432` |
+| Single-seed reference (mean of seeds 4-9) | `57.91%` | `0.6722` | — | — |
+
+The promoted ensemble row is an observed-build/oracle diagnostic: it scores the
+cached final `build_id` and is not the accepted pregame number. The
+leakage-free accepted path is build marginalisation from the train-only build
+catalog. The completed full-test marginal run currently on disk is for the
+previous 3-seed artifact; no completed 6-seed marginal result artifact is
+currently recorded.
+
+| Prediction path | Build source | Artifact | Test accuracy | Test NLL |
+| --- | --- | --- | ---: | ---: |
+| Observed-build oracle diagnostic | cached final `build_id` | Current 6-seed bias-only ensemble | `58.3669%` | `0.669642` |
+| Leakage-free pregame marginal (`W=128`, `k_slot=3`) | train-only `P(build | champion, role)` catalog | Previous 3-seed affine ensemble | `56.1856%` raw / `56.1978%` calibrated | `0.681523` raw / `0.681721` calibrated |
+| Leakage-free modal baseline (`W=1`) | train-only top build per slot | Previous 3-seed affine ensemble | `55.7985%` raw / `55.8340%` calibrated | `0.684316` raw / `0.683228` calibrated |
 
 Gate reachability (2026-06-10, reaffirmed 2026-06-11): every draft-safe input
 axis has been audited — context head saturated at the draft-time ceiling,
@@ -156,7 +172,7 @@ flowchart TD
     context_logit --> final
     loadout_logit --> final
     patch_logit --> final
-    final --> ensemble["mean over 3 seed members<br/>scale * logit + bias"]
+    final --> ensemble["mean over 6 seed members<br/>logit + bias"]
     ensemble --> prob["sigmoid = P(blue wins)"]
     prob --> metrics["accuracy / NLL metrics"]
 ```
@@ -278,7 +294,7 @@ flowchart TD
 | [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and sidecar metadata. |
 | [../dataset.py](../dataset.py) | Cache loader and split dataclass. |
 | [../train.py](../train.py) | Production training, test-split selection, and accuracy/NLL metrics. |
-| [../promote.py](../promote.py) | Seed-checkpoint scoring, affine calibration fit, and production ensemble artifact writer. |
+| [../promote.py](../promote.py) | Seed-checkpoint scoring, calibration fit, and production ensemble artifact writer. |
 | [../predictor.py](../predictor.py) | Draft-time runtime bridge. |
 
 ## Throughput Default
@@ -313,12 +329,12 @@ GPU holds the model and active minibatch rather than the full raw split cache.
 | Raw tensor cache device | `cpu`; model-device caching is an explicit throughput sweep option. |
 | Test evaluation | Always on: test is tensor-cached, evaluated every epoch, and written to metrics with accuracy/NLL and `selection_split: "test"`. |
 | Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required for `train.py`. |
-| Production promotion | `python -m app.ml.promote --checkpoints <3 seed checkpoints>`; logit-mean + train-fitted affine calibration. |
+| Production promotion | `python -m app.ml.promote --checkpoints <seed checkpoints>`; current artifact uses seeds 4-9 with logit-mean + train-fitted bias-only calibration. |
 | Direct 1v1/2vX integrations, player priors | Removed from the model, cache, priors, and predictor. |
 | Loadout head | Offline-training head with v32 cache metadata and `loadout_features.npy`; the default production serving path rejects checkpoints that require it. |
 | Patch-only Temporal head | Offline-training head with v32 cache metadata and `patch_features.npy`; season/patch blue-side drift only; the default production serving path rejects checkpoints that require it. |
-| Learned semantic MoE head over all three identity sidecars | Enabled by default. |
-| Semantic group features and relationship head | Enabled by default for the learned semantic MoE. |
+| Learned semantic MoE head over all three identity sidecars | Enabled by the `train.py` production-recipe overrides (`HGNNConfig` base default is off). |
+| Semantic group features and relationship head | Enabled by the same production-recipe overrides for the learned semantic MoE. |
 
 Invalid training config combinations fail early in `app/ml/train.py`. Under
 the per-patch protocol the test split drives checkpoint selection and

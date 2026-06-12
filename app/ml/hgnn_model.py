@@ -1613,12 +1613,13 @@ def hgnn_config_payload(config: HGNNConfig) -> dict[str, Any]:
 
 
 class HGNNEnsemble(nn.Module):
-    """Logit-mean ensemble of HGNN seeds with a train-fitted affine calibration.
+    """Logit-mean ensemble of HGNN seeds with a train-fitted logit calibration.
 
     ``scale * mean_logit + bias`` is fit post-hoc on train ensemble logits; the
     bias restores the blue-side prior that team-swap augmentation suppresses
     during training (every game is seen mirrored, so an in-model side bias
-    would train to zero).
+    would train to zero). Production fits bias-only (scale stays 1.0): a
+    train-fitted scale is in-sample-optimistic (see promote.py).
     """
 
     def __init__(

@@ -342,12 +342,13 @@ For one draft (10 `(champion, role)` slots):
 5. If retained joint mass is below a floor (default 0.35 — calibrated so the
    p10 draft at `K=3, W=512` passes; 0.5 would flag roughly a third of
    normal drafts), emit a low-confidence diagnostic on the result payload.
-6. Calibrate the marginal probability with a fresh affine logit calibration
+6. Calibrate the marginal probability with a fresh bias-only logit calibration
    fit on the **train split scored by the same marginalisation procedure**
    (source label `pregame_marginal_build`). Do not reuse the production
    ensemble's scale/bias blindly — it was fitted under observed-build
    conditioning; refitting on marginal train logits is cheap and removes a
-   known mismatch.
+   known mismatch. A train-fitted *scale* is in-sample-optimistic (see the
+   2026-06-12 record in `EXPERIMENTS.md`), so the scale stays at 1.0.
 
 ### Where accepted metrics are computed
 
