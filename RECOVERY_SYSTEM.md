@@ -12,9 +12,9 @@ Prefect deployment concurrency is set to `1`, so only one pipeline run should ex
 
 ## Flow Modes
 
-- Full mode runs `players` -> `match_ids` -> `match_data`; this is the default for `./restart`.
-- Matchdata-only mode runs only `match_data`; use `./restart --matchdata-only` when the existing latest matchids run has enough regional coverage and the goal is to drain/fill match payloads.
-- `./restart --fresh --matchdata-only` is invalid because `--fresh` removes Docker volumes, including the ClickHouse data matchdata-only mode depends on.
+- Full mode runs `players` -> `match_ids` -> `match_data`; this is the default for `./restart.sh`.
+- Matchdata-only mode runs only `match_data`; use `./restart.sh --matchdata-only` when the existing latest matchids run has enough regional coverage and the goal is to drain/fill match payloads.
+- `./restart.sh --fresh --matchdata-only` is invalid because `--fresh` removes Docker volumes, including the ClickHouse data matchdata-only mode depends on.
 - Matchdata-only restarts pause and do not resume `AUTOMATION_NAME`; a normal automation follow-up would use default flow parameters and collect matchids again unless separately configured for `matchdata_only=true`.
 - If `AUTOMATION_NAME` is unset, pause any external full-pipeline automation before a matchdata-only restart.
 
