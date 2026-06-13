@@ -8,10 +8,7 @@ side rewards. Episodes are independent so this scales near-linearly.
 
 from __future__ import annotations
 
-import io
-import os
 from dataclasses import dataclass
-from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +17,15 @@ import torch
 
 from app.ml.predictor import load_predictor
 from app.rl.env import DraftEnv, DraftEnvConfig
-from app.rl.policy import MaskedPolicy, PolicyConfig, encode_obs
+from app.rl.net import MaskedPolicy, PolicyConfig, encode_obs
 from app.rl.pool import load_pool
 from app.rl.reward import make_pool_sampler
+from app.rl.worker import (
+    bytes_to_state,
+    default_workers,
+    make_spawn_pool,
+    state_to_bytes,
+)
 
 # Worker-local globals (process-scoped — picklable boundary is the pool init).
 _PREDICTOR = None
@@ -112,8 +115,7 @@ def _run_episode(
 def _worker_rollout(args: tuple[bytes, int, int, bool]) -> EpisodeBatch:
     weights_bytes, n_episodes, base_seed, vs_random = args
     assert _POLICY is not None
-    state = torch.load(io.BytesIO(weights_bytes), weights_only=True)
-    _POLICY.load_state_dict(state)
+    _POLICY.load_state_dict(bytes_to_state(weights_bytes))
     _POLICY.eval()
     rng = np.random.default_rng(base_seed)
 
@@ -153,12 +155,6 @@ def _worker_rollout(args: tuple[bytes, int, int, bool]) -> EpisodeBatch:
     )
 
 
-def _state_to_bytes(state: dict) -> bytes:
-    buf = io.BytesIO()
-    torch.save(state, buf)
-    return buf.getvalue()
-
-
 class RolloutPool:
     """Persistent worker pool — open once, dispatch many batches."""
 
@@ -172,12 +168,11 @@ class RolloutPool:
     ) -> None:
         self.env_cfg = env_cfg
         self.policy_cfg = policy_cfg
-        self.n_workers = n_workers or max(1, (os.cpu_count() or 2) - 1)
-        ctx = get_context("spawn")
-        self.pool = ctx.Pool(
+        self.n_workers = default_workers(n_workers)
+        self.pool = make_spawn_pool(
             self.n_workers,
-            initializer=_worker_init,
-            initargs=(
+            _worker_init,
+            (
                 env_cfg.__dict__,
                 policy_cfg.__dict__,
                 str(pool_path) if pool_path else None,
@@ -192,7 +187,7 @@ class RolloutPool:
         *,
         vs_random: bool = False,
     ) -> list[EpisodeBatch]:
-        weights = _state_to_bytes(policy.state_dict())
+        weights = state_to_bytes(policy.state_dict())
         seeds = [base_seed + i * episodes_per_worker for i in range(self.n_workers)]
         args = [(weights, episodes_per_worker, s, vs_random) for s in seeds]
         return self.pool.map(_worker_rollout, args)

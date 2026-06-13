@@ -20,7 +20,7 @@ import sys
 import numpy as np
 import torch
 
-from app.rl.alpha_net import AlphaNetConfig, AlphaZeroNet, auto_device
+from app.rl.net import AlphaNetConfig, AlphaZeroNet, auto_device
 from app.rl.alpha_train import AlphaTrainConfig, _mcts_cfg, _update
 from app.rl.draft import DRAFT_SEQUENCE
 from app.rl.example import dummy_predictor, dummy_sampler
@@ -47,6 +47,7 @@ def main() -> int:
     net = AlphaZeroNet(net_cfg).to(device)
 
     train_cfg = AlphaTrainConfig(
+        top_k_build_configs=4,
         iterations=1,
         episodes_per_iter=1,
         simulations=8,

@@ -288,6 +288,34 @@ class WinRatePredictor:
         red_tuples = _team_tuples(red_roles, red_builds, self.build_labels)
         return float(self._forward_probabilities([blue_tuples + red_tuples])[0])
 
+    def predict_batch(
+        self,
+        games: list[
+            tuple[
+                list[int],
+                list[int],
+                dict[int, str],
+                dict[int, str],
+                dict[int, int],
+                dict[int, int],
+            ]
+        ],
+    ) -> np.ndarray:
+        """Score many (blue, red, roles, builds) games in one forward pass.
+
+        Same per-game contract as ``__call__``; lets ``resolve_rewards`` build
+        the whole role/build config matrix and evaluate it in a single batch.
+        """
+        rows: list[list[tuple[int, str, str]]] = []
+        for blue_team, red_team, blue_roles, red_roles, blue_builds, red_builds in games:
+            _validate_team_assignment("blue", blue_team, blue_roles, blue_builds)
+            _validate_team_assignment("red", red_team, red_roles, red_builds)
+            rows.append(
+                _team_tuples(blue_roles, blue_builds, self.build_labels)
+                + _team_tuples(red_roles, red_builds, self.build_labels)
+            )
+        return self._forward_probabilities(rows)
+
     def predict_marginal(
         self,
         blue_team: list[int],

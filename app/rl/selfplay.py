@@ -14,10 +14,9 @@ from typing import Any
 import numpy as np
 import torch
 
-from app.rl.alpha_net import AlphaZeroNet
-from app.rl.draft import Side
-from app.rl.mcts import MCTS, DraftState, MCTSConfig, visit_policy
-from app.rl.policy import encode_obs
+from app.rl.draft import DraftState, Side
+from app.rl.mcts import MCTS, MCTSConfig, visit_policy
+from app.rl.net import AlphaZeroNet, encode_obs
 from app.rl.reward import (
     Predictor,
     RewardMode,

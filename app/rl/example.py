@@ -9,7 +9,6 @@ from __future__ import annotations
 import numpy as np
 
 from app.ml.config import POSITIONS
-from app.rl.env import DraftEnv, DraftEnvConfig
 from app.rl.pool import ChampionPool, PoolEntry
 from app.rl.reward import make_pool_sampler
 
@@ -54,6 +53,8 @@ dummy_sampler = make_pool_sampler(
 
 
 def run_random_episode(seed: int = 0) -> None:
+    from app.rl.env import DraftEnv, DraftEnvConfig  # lazy: only this path needs gym
+
     n_champions = 170
     pool = dummy_pool(n_champions)
     sampler = make_pool_sampler(pool, top_k_build_configs=4)

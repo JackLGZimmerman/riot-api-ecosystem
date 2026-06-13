@@ -16,12 +16,10 @@ chosen device.
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import time
 from dataclasses import asdict, dataclass
-from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +30,12 @@ import torch.nn.functional as F
 from app.core.config.settings import PROJECT_ROOT
 from app.core.logging.logger import setup_logging_config
 from app.ml.predictor import load_predictor
-from app.rl.alpha_net import AlphaNetConfig, AlphaZeroNet, auto_device
+from app.rl.net import AlphaNetConfig, AlphaZeroNet, auto_device
 from app.rl.mcts import MCTSConfig
 from app.rl.pool import DEFAULT_POOL_PATH, load_pool
 from app.rl.reward import RewardMode, make_pool_sampler
-from app.rl.rollout import _state_to_bytes
 from app.rl.selfplay import EpisodeSamples, play_episode
+from app.rl.worker import bytes_to_state, make_spawn_pool, state_to_bytes
 
 setup_logging_config()
 logger = logging.getLogger(__name__)
@@ -131,10 +129,9 @@ def _worker_init(net_cfg_dict: dict, train_cfg_dict: dict, device_str: str) -> N
 
 def _worker_play(args: tuple[bytes, int]) -> EpisodeSamples:
     weights_bytes, seed = args
-    state = torch.load(
-        io.BytesIO(weights_bytes), map_location=_WORKER["device"], weights_only=True
+    _WORKER["net"].load_state_dict(
+        bytes_to_state(weights_bytes, map_location=_WORKER["device"])
     )
-    _WORKER["net"].load_state_dict(state)
     cfg: AlphaTrainConfig = _WORKER["train_cfg"]
     return play_episode(
         _WORKER["net"],
@@ -249,11 +246,10 @@ def train(cfg: AlphaTrainConfig) -> Path:
 
     pool = None
     if cfg.n_workers > 1:
-        ctx = get_context("spawn")
-        pool = ctx.Pool(
+        pool = make_spawn_pool(
             cfg.n_workers,
-            initializer=_worker_init,
-            initargs=(asdict(net_cfg), asdict(cfg), str(device)),
+            _worker_init,
+            (asdict(net_cfg), asdict(cfg), str(device)),
         )
 
     try:
@@ -261,7 +257,7 @@ def train(cfg: AlphaTrainConfig) -> Path:
             t0 = time.time()
             base_seed = 10_000 * (it + 1)
             if pool is not None:
-                weights = _state_to_bytes(
+                weights = state_to_bytes(
                     {k: v.cpu() for k, v in net.state_dict().items()}
                 )
                 args = [(weights, base_seed + i) for i in range(cfg.episodes_per_iter)]

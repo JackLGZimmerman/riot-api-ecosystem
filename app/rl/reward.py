@@ -35,7 +35,13 @@ class RoleBuildConfig:
 
 
 class Predictor(Protocol):
-    """Win-probability model: returns P(blue wins)."""
+    """Win-probability model: returns P(blue wins).
+
+    May optionally expose ``predict_batch(games) -> np.ndarray`` (one
+    probability per game, each game a tuple matching ``__call__``'s args).
+    When present, ``resolve_rewards`` scores the whole config matrix in a
+    single forward pass; otherwise it falls back to per-cell ``__call__``.
+    """
 
     def __call__(
         self,
@@ -206,19 +212,19 @@ def resolve_rewards(
         raise ValueError("Role/build sampler returned no configurations.")
 
     n_b, n_r = len(blue_configs), len(red_configs)
-    win_matrix = np.zeros((n_b, n_r), dtype=np.float64)
-    for i, bc in enumerate(blue_configs):
-        for j, rc in enumerate(red_configs):
-            win_matrix[i, j] = float(
-                predictor(
-                    blue_team,
-                    red_team,
-                    bc.roles,
-                    rc.roles,
-                    bc.builds,
-                    rc.builds,
-                )
-            )
+    games = [
+        (blue_team, red_team, bc.roles, rc.roles, bc.builds, rc.builds)
+        for bc in blue_configs
+        for rc in red_configs
+    ]
+    batch = getattr(predictor, "predict_batch", None)
+    if batch is not None:
+        # One forward pass over the whole n_b x n_r config matrix.
+        win_matrix = np.asarray(batch(games), dtype=np.float64).reshape(n_b, n_r)
+    else:
+        win_matrix = np.asarray(
+            [float(predictor(*g)) for g in games], dtype=np.float64
+        ).reshape(n_b, n_r)
 
     blue_weights = _normalized_config_weights(blue_configs, side="blue")
     red_weights = _normalized_config_weights(red_configs, side="red")

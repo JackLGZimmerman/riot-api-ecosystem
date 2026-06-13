@@ -2,15 +2,16 @@
 
 from importlib import import_module
 
-from app.rl.alpha_net import AlphaNetConfig, AlphaZeroNet, auto_device
+from app.rl.net import AlphaNetConfig, AlphaZeroNet, auto_device
 from app.rl.draft import (
     DRAFT_SEQUENCE,
     ActionType,
+    DraftState,
     DraftStep,
     Side,
 )
-from app.rl.mcts import MCTS, DraftState, MCTSConfig, visit_policy
-from app.rl.policy import MaskedPolicy, PolicyConfig, encode_obs, obs_dim
+from app.rl.mcts import MCTS, MCTSConfig, visit_policy
+from app.rl.net import MaskedPolicy, PolicyConfig, encode_obs, obs_dim
 from app.rl.pool import (
     DEFAULT_POOL_PATH,
     ChampionPool,

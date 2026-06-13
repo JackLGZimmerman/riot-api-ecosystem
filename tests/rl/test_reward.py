@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from app.rl.pool import ChampionPool, PoolEntry
@@ -44,6 +45,35 @@ def test_expected_reward_uses_role_build_probabilities() -> None:
 
     assert result.p_blue_win_for_blue == pytest.approx(0.26)
     assert result.blue_reward == pytest.approx(-0.24)
+
+
+def test_batched_predictor_matches_scalar_path() -> None:
+    blue_configs = [
+        _config(BLUE, probability=0.9, build=0),
+        _config(BLUE, probability=0.1, build=1),
+    ]
+    red_configs = [_config(RED, probability=1.0, build=0)]
+
+    def sampler(team: list[int], side: str) -> list[RoleBuildConfig]:
+        return blue_configs if side == "blue" else red_configs
+
+    def scalar(*args) -> float:
+        blue_builds = args[4]
+        return 0.2 if set(blue_builds.values()) == {0} else 0.8
+
+    class Batched:
+        def __call__(self, *args) -> float:
+            return scalar(*args)
+
+        def predict_batch(self, games) -> np.ndarray:
+            return np.asarray([scalar(*g) for g in games], dtype=np.float64)
+
+    scalar_result = resolve_rewards(BLUE, RED, scalar, sampler, "expected_value")
+    batched_result = resolve_rewards(BLUE, RED, Batched(), sampler, "expected_value")
+    assert batched_result.p_blue_win_for_blue == pytest.approx(
+        scalar_result.p_blue_win_for_blue
+    )
+    assert batched_result.p_blue_win_for_blue == pytest.approx(0.26)
 
 
 def test_role_build_probabilities_are_validated() -> None:

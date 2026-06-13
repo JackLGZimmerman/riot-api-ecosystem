@@ -24,7 +24,7 @@ from app.core.config.settings import PROJECT_ROOT
 from app.core.logging.logger import setup_logging_config
 from app.ml.predictor import load_predictor
 from app.rl.env import DraftEnv, DraftEnvConfig
-from app.rl.policy import MaskedPolicy, PolicyConfig, encode_obs
+from app.rl.net import MaskedPolicy, PolicyConfig, encode_obs
 from app.rl.pool import DEFAULT_POOL_PATH, load_pool
 from app.rl.reward import make_pool_sampler
 from app.rl.rollout import EpisodeBatch, RolloutPool
