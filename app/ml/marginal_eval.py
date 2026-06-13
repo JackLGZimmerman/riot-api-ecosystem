@@ -408,6 +408,7 @@ def run(
     )
     priors = load_priors()
     catalog = build_catalog(priors.p1, tuple(model_config.build_vocab))
+    catalog.assert_pregame_native()
     payload["catalog_version"] = catalog.version
     tables = build_hypothesis_tables(
         dataset_cfg,

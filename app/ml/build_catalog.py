@@ -16,6 +16,7 @@ import hashlib
 import heapq
 import json
 from dataclasses import asdict, dataclass
+from typing import ClassVar
 
 import numpy as np
 
@@ -37,6 +38,41 @@ BUILD_SOURCES = frozenset(
 ACCEPTED_BUILD_SOURCES = frozenset(
     {BUILD_SOURCE_PREGAME_MARGINAL, BUILD_SOURCE_RL_CANDIDATE}
 )
+
+# Asset-family taxonomy: every ML asset belongs to exactly one family.
+ASSET_FAMILY_BUILD_CONDITIONAL = "build_conditional"
+ASSET_FAMILY_PREGAME_NATIVE = "pregame_native"
+
+# Key-space descriptors for the two families.
+KEY_SPACE_CHAMP_ROLE = ("championid", "teamposition")
+KEY_SPACE_CHAMP_ROLE_BUILD = ("championid", "teamposition", "build")
+
+
+def assert_pregame_native_key_space(keys) -> None:
+    """Guard: pregame-native assets may key only on (championid, teamposition).
+    Raise ValueError if any key carries a third (build) component or is not a
+    (int championid, str teamposition) 2-tuple — i.e. a build-conditional asset
+    has leaked into a pregame-native (accepted) surface."""
+    for key in keys:
+        if len(key) != len(KEY_SPACE_CHAMP_ROLE):
+            raise ValueError(
+                f"pregame-native key space is {KEY_SPACE_CHAMP_ROLE} but got key "
+                f"{key!r} with {len(key)} components; build-conditional state must "
+                "not reach a pregame-native/accepted surface"
+            )
+        champ, role = key
+        if not isinstance(champ, (int, np.integer)):
+            raise ValueError(
+                f"pregame-native key {key!r}: championid must be an int, got "
+                f"{type(champ).__name__!r}; build-conditional state must not reach "
+                "a pregame-native/accepted surface"
+            )
+        if not isinstance(role, str):
+            raise ValueError(
+                f"pregame-native key {key!r}: teamposition must be a str, got "
+                f"{type(role).__name__!r}; build-conditional state must not reach "
+                "a pregame-native/accepted surface"
+            )
 
 
 def validate_accepted_build_source(source: str) -> str:
@@ -108,6 +144,9 @@ class _FallbackDist:
 
 @dataclass(frozen=True)
 class BuildCatalog:
+    asset_family: ClassVar[str] = ASSET_FAMILY_PREGAME_NATIVE
+    key_space: ClassVar[tuple[str, ...]] = KEY_SPACE_CHAMP_ROLE
+
     build_vocab: tuple[str, ...]
     gates: CatalogGates
     version: str
@@ -189,6 +228,10 @@ class BuildCatalog:
                 f"build_vocab: catalog={self.build_vocab} "
                 f"model={tuple(model_build_vocab)}"
             )
+
+    def assert_pregame_native(self) -> None:
+        """Assert this catalog is a valid pregame-native asset (champ-role keys only)."""
+        assert_pregame_native_key_space(self.vectors.keys())
 
 
 def _support_tier(count: int, share: float, gates: CatalogGates) -> str:
@@ -467,6 +510,8 @@ def enumerate_joint_worlds(
 
 __all__ = [
     "ACCEPTED_BUILD_SOURCES",
+    "ASSET_FAMILY_BUILD_CONDITIONAL",
+    "ASSET_FAMILY_PREGAME_NATIVE",
     "BUILD_SOURCES",
     "BUILD_SOURCE_ORACLE_OBSERVED",
     "BUILD_SOURCE_PREGAME_MARGINAL",
@@ -477,6 +522,9 @@ __all__ = [
     "BuildProfile",
     "CatalogGates",
     "ConditionGates",
+    "KEY_SPACE_CHAMP_ROLE",
+    "KEY_SPACE_CHAMP_ROLE_BUILD",
+    "assert_pregame_native_key_space",
     "build_catalog",
     "build_catalog_from_priors",
     "catalog_version",

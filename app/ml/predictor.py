@@ -339,6 +339,7 @@ class WinRatePredictor:
         _validate_team_assignment("blue", blue_team, blue_roles, builds=None)
         _validate_team_assignment("red", red_team, red_roles, builds=None)
         catalog.validate_model_vocab(tuple(self._model.config.build_vocab))
+        catalog.assert_pregame_native()
         slots: list[tuple[int, str]] = []
         for roles in (blue_roles, red_roles):
             role_to_champ = {role: champ for champ, role in roles.items()}
