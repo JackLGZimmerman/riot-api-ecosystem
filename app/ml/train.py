@@ -45,7 +45,6 @@ from app.ml.hgnn_model import (
     hgnn_config_payload,
     model_requires_semantic_group_features,
     model_uses_encoder_sidecar,
-    runtime_unsupported_inputs,
     save_hgnn_model,
     swap_hgnn_inputs,
 )
@@ -80,8 +79,6 @@ class RawTensorSplit:
     identity_temporal_sidecar: torch.Tensor | None = None
     identity_encoder_support: torch.Tensor | None = None
     semantic_group_features: torch.Tensor | None = None
-    loadout_features: torch.Tensor | None = None
-    patch_features: torch.Tensor | None = None
 
 
 class _SidecarGatherer:
@@ -252,21 +249,7 @@ def _drop_unused_model_arrays(
         "identity_temporal_sidecar": not requires_all_sidecars,
         "identity_encoder_support": not sidecar_enabled,
         "semantic_group_features": not semantic_group_features_enabled,
-        "loadout_features": int(config.loadout_feature_dim) <= 0,
-        "patch_features": int(config.patch_feature_dim) <= 0,
     }
-    for name, dim in (
-        ("loadout_features", int(config.loadout_feature_dim)),
-        ("patch_features", int(config.patch_feature_dim)),
-    ):
-        if dim <= 0:
-            continue
-        value = getattr(split, name)
-        if value is None or value.ndim != 2 or value.shape[1] != dim:
-            raise ValueError(
-                f"HGNN config enables {name}, but the cache is missing "
-                f"{name} [games, {dim}]; rebuild the dataset cache."
-            )
     if semantic_group_features_enabled:
         value = split.semantic_group_features
         if (
@@ -502,25 +485,6 @@ def _validate_train_output_paths(train_cfg: TrainConfig) -> None:
         )
 
 
-def _validate_serving_artifact_contract(
-    train_cfg: TrainConfig,
-    model_config: HGNNConfig,
-) -> None:
-    if not _same_output_path(train_cfg.model_path, DEFAULT_PRODUCTION_MODEL_PATH):
-        return
-    unsupported = runtime_unsupported_inputs(model_config)
-    if not unsupported:
-        return
-    raise ValueError(
-        "The default production model path is the RL serving artifact, but this "
-        "HGNN config requires runtime inputs the current predictor does not "
-        "supply: "
-        + ", ".join(unsupported)
-        + ". Save this broad offline checkpoint to an experiment path, or train "
-        "a serving-compatible config before promoting."
-    )
-
-
 def _parse_int_tuple(value: str) -> tuple[int, ...]:
     normalized = value.strip()
     if normalized.lower() in {"", "none", "empty"}:
@@ -547,10 +511,6 @@ def _hgnn_config_from_meta(
         n_builds=int(meta["n_builds"]),
         build_vocab=tuple(meta["build_vocab"]),
     )
-    if int(meta.get("loadout_feature_dim", 0)) > 0:
-        base["loadout_feature_dim"] = int(meta["loadout_feature_dim"])
-    if int(meta.get("patch_feature_dim", 0)) > 0:
-        base["patch_feature_dim"] = int(meta["patch_feature_dim"])
     sidecar = meta.get("identity_encoder_sidecar")
     if isinstance(sidecar, dict):
         dims = sidecar.get("dims", {})
@@ -606,8 +566,6 @@ def _hgnn_inputs_from_raw(
         p1_cnt=raw.p1_cnt,
         strength=strength,
         semantic_group_features=raw.semantic_group_features,
-        loadout_features=raw.loadout_features,
-        patch_features=raw.patch_features,
         device=device,
         **sidecar,
     )
@@ -689,7 +647,6 @@ def train(
         encoder_sidecar_path=dataset_cfg.encoder_sidecar_path,
         overrides=model_overrides,
     )
-    _validate_serving_artifact_contract(train_cfg, model_config)
 
     load_semantic_group_features = model_requires_semantic_group_features(model_config)
     loaded_splits = {

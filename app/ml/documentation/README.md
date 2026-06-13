@@ -1,13 +1,13 @@
 # ML Win-Rate Model
 
-As of 2026-06-12, the production artifact is a calibrated 6-seed ensemble of
+As of 2026-06-13, the production artifact is a calibrated 6-seed ensemble of
 HGNN checkpoints. Each member uses champion/build identity embeddings on top of
-the smoothed 1vX champion-role/build prior, the production Loadout head, the bounded
-patch-only Temporal head, and the promoted all-encoder learned semantic MoE over
-frozen static, full-game, and temporal identity latents. The old
-classification-derived semantic, profile, context, direct relationship, and
-player-prior inputs have been removed from the HGNN contract. The model is
-draft-generic by hard constraint: no player information of any kind.
+the smoothed 1vX champion-role/build prior and the promoted all-encoder learned
+semantic MoE over frozen static, full-game, and temporal identity latents. The
+old classification-derived semantic, profile, context, direct relationship,
+player-prior, loadout, and patch-residual inputs have been removed from the
+HGNN contract. The model is draft-generic by hard constraint: no player
+information of any kind, and no runtime-unsupported inputs — it is RL-servable.
 
 The current identity-signal surface is the frozen identity-encoder sidecar
 artifact at `app/ml/data/semantic_identity_sidecar_compact.npz`. Production
@@ -26,7 +26,6 @@ train-only historical build-profile prior marginalisation.
 cache/prior arrays
 -> posterior and support features
 -> champion/role/build identity + 1vX node prior
--> Loadout + patch-only Temporal residual heads
 -> static/full-game/temporal sidecars into learned semantic MoE
 -> blue/red mean + attention team readout
 -> per-seed final logit, mean over 6 seeds
@@ -68,9 +67,10 @@ Training writes:
 The promoted load path is `app/ml/data/hgnn_production_model.pt` (the ensemble
 artifact embeds its calibration and test metrics); `metrics_latest.json` is the
 default train metrics output path. Runtime prediction uses `load_predictor()`
-from `app/ml/predictor.py`; it fails fast for checkpoints that require
-Loadout or patch tensors because the current `app.rl.reward.Predictor`
-protocol only supplies champions, roles, and build ids.
+from `app/ml/predictor.py`. The production model is RL-servable: its required
+inputs (champion identity, item-based build, team/role structure, frozen
+identity-encoder sidecars, and the learned semantic-MoE context head) are all
+available at draft time through the `app.rl.reward.Predictor` protocol.
 
 ## Cache Contract
 
@@ -89,8 +89,6 @@ caches with a validation split must be rebuilt:
 | `p1_cnt.npy` | `[games, 10]` | raw `1vX` support for node confidence |
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
-| `loadout_features.npy` | `[games, 10]` | production Loadout residual features |
-| `patch_features.npy` | `[games, 2]` | bounded patch-only Temporal residual features |
 | `blue_win.npy` | `[games]` | target label |
 
 ## Identity Semantic Context

@@ -106,13 +106,13 @@ the record of why each change was made; line anchors refer to that tree.
   both are sorted over the same set. The catalog must make
   `model.config.build_vocab` the single canonical ordering and assert
   equality at load.
-- **Serving contract.** `load_predictor` fail-fasts on checkpoints with
-  loadout/patch heads (`runtime_unsupported_inputs`), and the promoted
-  production ensemble *has* those heads. Accepted marginalised metrics must
-  therefore be computed by a cache-side eval harness (where
-  `loadout_features.npy` / `patch_features.npy` exist), not through
-  `WinRatePredictor`. Extending the runtime to supply patch features
-  (deterministic from current patch) is a separate, deferred decision.
+- **Serving contract.** `load_predictor` loads the production ensemble and
+  supplies all required inputs (champion identity, build, team/role structure,
+  identity-encoder sidecars, and the learned semantic-MoE context head). The
+  model is RL-servable; no runtime-unsupported inputs remain. Accepted
+  marginalised metrics are computed by the cache-side eval harness
+  `python -m app.ml.marginal_eval`, which shares the same assembly code as
+  the runtime predictor path.
 - **Existing tests.** `tests/ml/test_build_dataset.py`, `test_dataset.py`,
   `test_predictor.py`, `test_train_defaults.py`, `test_train_calibration.py`,
   `test_encoder_sidecar.py`, `tests/rl/test_reward.py` all exist and cover
@@ -333,8 +333,7 @@ For one draft (10 `(champion, role)` slots):
    - the 1vX prior pair `(win_rate, p1_cnt)` for the hypothesised key,
      smoothed with the standard runtime smoothing (no LOO at runtime),
    - sidecar blocks and semantic-context rows for `(champ, role, label)`.
-   Champion ids, loadout/patch features (cache-side eval), and everything
-   role-derived are shared across worlds.
+   Champion ids and everything role-derived are shared across worlds.
 4. Average sigmoid probabilities with the *unnormalised* retained joint
    weights divided by retained mass, and report `retained_joint_mass` and
    tail mass rather than hiding pruned probability behind silent
@@ -352,12 +351,11 @@ For one draft (10 `(champion, role)` slots):
 
 ### Where accepted metrics are computed
 
-Through a cache-side harness (new module under `app/ml/`), not through
-`WinRatePredictor`: it loads the v32 cache, reconstructs roles from slot
-order, replaces test-side `build_id`/prior columns with hypothesised
-candidates, and reuses `build_hgnn_inputs` plus the on-device sidecar gather
-from `train.py`. This keeps loadout/patch heads served exactly as trained and
-avoids the runtime fail-fast.
+Through the cache-side harness `python -m app.ml.marginal_eval`: it loads the
+v32 cache, reconstructs roles from slot order, replaces test-side
+`build_id`/prior columns with hypothesised candidates, and reuses
+`build_hgnn_inputs` plus the on-device sidecar gather from `train.py`. The
+runtime predictor path shares the same assembly code.
 
 Cost envelope: 329,586 test games × 512 worlds ≈ 169M forward rows — on the
 order of an hour of forward-only GPU time at current throughput (`W=128` ≈

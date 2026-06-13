@@ -4,8 +4,8 @@ Last updated: 2026-06-13 12:25 BST.
 
 The model is draft-generic by hard constraint: no player information of any
 kind (no puuids, no player priors, no rank). The admissible surface is
-champions, positions, runes, summoners, bans, patch, and
-(champion, role, build)-keyed historical profiles via the encoder sidecars.
+champions, positions, bans, and (champion, role, build)-keyed historical
+profiles via the encoder sidecars.
 
 ## Split Protocol (v32)
 
@@ -36,15 +36,14 @@ Follow-up draft-only residual probes (see EXPERIMENTS.md, 2026-06-11) found
 two bankable levers — a 3-seed ensemble (`+0.26pp` acc, `-0.0011` NLL over a
 refit single seed) and a train-fitted side intercept the swap-augmented model
 cannot express — and otherwise no linear or shallow-nonlinear residual in
-bans, loadout, encoder latents, or role-aligned lane diffs; the stable hard
-core is well-covered balanced drafts, not a data blind spot. Both levers are
-now promoted (see Production Status).
+bans, encoder latents, or role-aligned lane diffs; the stable hard core is
+well-covered balanced drafts, not a data blind spot. Both levers are now
+promoted (see Production Status).
 
 ## Production Path
 
 Default training and evaluation use the 1vX champion-role/build prior, champion/build identity
-embeddings, the production Loadout head, the production patch-only Temporal
-head, the promoted learned semantic MoE over all three frozen identity encoders
+embeddings, the promoted learned semantic MoE over all three frozen identity encoders
 (`static`, `full_game`, and `temporal`), and team-swap augmentation. Legacy
 classification-derived semantic, profile, and context inputs are no longer part
 of `build_hgnn_inputs()` or `HGNNWinModel.forward()`.
@@ -54,23 +53,23 @@ temporal sidecar latents plus compact semantic group features. Production
 capacity is 128 experts with `top_k=32`. See
 [Identity Encoder Sidecars](#identity-encoder-sidecars).
 
-Serving through `app.ml.predictor.load_predictor()` is intentionally narrower
-than the batch validation surface: the current `app.rl.reward.Predictor`
-protocol supplies champions, roles, and build ids, but not Loadout or patch
-feature tensors. Checkpoints that require those residual heads fail fast at
-load time instead of silently dropping trained production inputs.
+Serving through `app.ml.predictor.load_predictor()` supplies champions, roles,
+and build ids — exactly what the `app.rl.reward.Predictor` protocol provides.
+The model is **RL-servable**: all required inputs (champion identity, item-based
+build, team/role structure, frozen identity-encoder sidecars, and the learned
+semantic-MoE context head) are available at draft time; no runtime-unsupported
+inputs remain.
 `WinRatePredictor.predict_marginal` additionally serves the pregame path: it
 takes no build ids, enumerates train-supported build worlds from the
 `app.ml.build_catalog` priors, and averages output probabilities (see
 `HGNN_BUILD_INTENT.md` and the marginalisation record in `EXPERIMENTS.md`).
 Accepted marginal *metrics* come from the cache-side harness
-`python -m app.ml.marginal_eval`, which serves loadout/patch heads as trained.
+`python -m app.ml.marginal_eval`.
 
 ```text
 cache 1vX priors + support
 -> posterior node features
 -> champion/build identity embeddings
--> production Loadout head + patch-only Temporal head
 -> frozen static/full-game/temporal sidecars into learned semantic MoE
 -> blue/red team readout
 -> per-seed final logit, mean over 6 seeds
@@ -82,9 +81,7 @@ Direct 1v1/2vX champion matchup and synergy relationship integrations, and the
 experimental player-prior arrays, have been removed from the model contract,
 cache layout, priors, and predictor. Older local cache directories may still
 contain ignored relationship or player `.npy` files, but v32 production
-loading does not declare or consume them. Loadout and patch-only Temporal are
-part of the default production model when the v32 cache provides
-`loadout_features.npy` and `patch_features.npy`.
+loading does not declare or consume them.
 
 ## Production Status
 
@@ -116,7 +113,8 @@ catalog. The pregame rows below were re-run on 2026-06-13 against the current
 `build_catalog.assert_pregame_native()` key-space guard active on the accepted
 path (catalog `b39d506e51eb`); the guard is a no-op on the real catalog and the
 oracle diagnostic is byte-identical to its prior record, confirming the asset
-separation did not perturb accepted scoring.
+separation did not perturb accepted scoring. Metrics in this table predate the
+loadout/patch-head removal and will be refreshed after the retrain.
 
 | Prediction path | Build source | Artifact | Test accuracy | Test NLL |
 | --- | --- | --- | ---: | ---: |
@@ -135,15 +133,6 @@ with champion identity by shuffled-profile and one-hot controls (see
 `EXPERIMENTS.md` for each record). Remaining headroom most plausibly requires
 new draft-generic information rather than residual heads on current features.
 
-Loadout uses train-only, leave-one-out-adjusted historical priors over
-summoner spell pairs, broad rune setup, full rune page, secondary rune pair, and
-stat shards. Rune rows are joined through `puuid` only to align the selected
-rune page; no player identity is emitted into `loadout_features.npy`. Patch
-Temporal is restricted to season/patch blue-side drift only and does not
-include champion-role patch deltas; the older broad `T+L` diagnostic washed
-out loadout because it combined champion-role patch deltas with the patch
-blue-side intercept in one shared residual head.
-
 Under the current leakage policy, observed final build-value/profile residuals
 remain diagnostic only unless a draft-safe source or RL search supplies the
 build intent (see `HGNN_BUILD_INTENT.md`).
@@ -154,27 +143,19 @@ build intent (see `HGNN_BUILD_INTENT.md`).
 flowchart TD
     cache["v32 production cache"] --> ids["champion/build ids"]
     cache --> prior["1vX prior + support"]
-    cache --> loadout["Loadout features<br/>spells + rune page + stat shards"]
-    cache --> patch["Patch-only Temporal<br/>season/patch blue-side drift"]
 
     ids --> hgnn_inputs["build_hgnn_inputs"]
     prior --> hgnn_inputs
-    loadout --> hgnn_inputs
-    patch --> hgnn_inputs
     sidecars["static + full-game + temporal sidecars"] -->|semantic MoE default| hgnn_inputs
 
     hgnn_inputs --> tensor_batch["HGNN tensor batch"]
     tensor_batch --> nodes["Identity embeddings + 1vX posterior node features"]
-    tensor_batch --> loadout_logit["production loadout_logit"]
-    tensor_batch --> patch_logit["production patch_logit<br/>bounded max abs 0.15"]
     tensor_batch -.-> moe["Learned semantic MoE head<br/>sidecar factors + top-k experts"]
     nodes --> readout["Mean + attention team readout"]
     readout --> base["base_logit"]
     moe -.->|use_learned_semantic_moe=True| context_logit
-    base --> final["final_logit = base_logit + loadout_logit + patch_logit + context_logit"]
+    base --> final["final_logit = base_logit + context_logit"]
     context_logit --> final
-    loadout_logit --> final
-    patch_logit --> final
     final --> ensemble["mean over 6 seed members<br/>logit + bias"]
     ensemble --> prob["sigmoid = P(blue wins)"]
     prob --> metrics["accuracy / NLL metrics"]
@@ -283,7 +264,7 @@ flowchart TD
     experts --> moe_slots
     moe_slots --> context["context_logit = semantic_moe_logit<br/>mean blue - mean red"]
 
-    production["production logit<br/>base + loadout + patch"] --> final["final_logit = production_logit + context_logit"]
+    production["production logit<br/>base"] --> final["final_logit = base_logit + context_logit"]
     context --> final
 ```
 
@@ -291,9 +272,8 @@ flowchart TD
 
 | File | Purpose |
 | --- | --- |
-| [../hgnn_model.py](../hgnn_model.py) | HGNN model, ensemble wrapper, input builder, swap invariants, and maintained residual/semantic MoE heads. |
+| [../hgnn_model.py](../hgnn_model.py) | HGNN model, ensemble wrapper, input builder, swap invariants, and maintained semantic MoE heads. |
 | [../encoder_sidecar.py](../encoder_sidecar.py) | Identity-encoder latent loading, per-game lookup, and dedup gather tables. |
-| [../loadout_patch_features.py](../loadout_patch_features.py) | Production train-only loadout priors and patch-only temporal feature extraction. |
 | [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and sidecar metadata. |
 | [../dataset.py](../dataset.py) | Cache loader and split dataclass. |
 | [../train.py](../train.py) | Production training, test-split selection, and accuracy/NLL metrics. |
@@ -334,8 +314,6 @@ GPU holds the model and active minibatch rather than the full raw split cache.
 | Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required for `train.py`. |
 | Production promotion | `python -m app.ml.promote --checkpoints <seed checkpoints>`; current artifact uses seeds 4-9 with logit-mean + train-fitted bias-only calibration. |
 | Direct 1v1/2vX integrations, player priors | Removed from the model, cache, priors, and predictor. |
-| Loadout head | Offline-training head with v32 cache metadata and `loadout_features.npy`; the default production serving path rejects checkpoints that require it. |
-| Patch-only Temporal head | Offline-training head with v32 cache metadata and `patch_features.npy`; season/patch blue-side drift only; the default production serving path rejects checkpoints that require it. |
 | Learned semantic MoE head over all three identity sidecars | Enabled by the `train.py` production-recipe overrides (`HGNNConfig` base default is off). |
 | Semantic group features and relationship head | Enabled by the same production-recipe overrides for the learned semantic MoE. |
 

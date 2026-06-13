@@ -33,8 +33,6 @@ class _SemanticModel:
             identity_temporal_sidecar_dim=4,
             use_learned_semantic_moe=True,
             use_semantic_group_features=True,
-            loadout_feature_dim=0,
-            patch_feature_dim=0,
         )
         self.seen_features: torch.Tensor | None = None
 
@@ -169,8 +167,6 @@ class _BuildSensitiveModel:
             identity_temporal_sidecar_dim=0,
             use_learned_semantic_moe=False,
             use_semantic_group_features=False,
-            loadout_feature_dim=0,
-            patch_feature_dim=0,
         )
 
     def to(self, _device: str) -> "_BuildSensitiveModel":
@@ -286,54 +282,6 @@ def test_predictor_rejects_prior_vocab_mismatch(
             semantic_context_lookup=_semantic_context_lookup(),
             device="cpu",
         )
-
-
-def test_predictor_rejects_feature_heads_missing_from_runtime_protocol(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_static_lookups(monkeypatch)
-    model = _SemanticModel()
-    model.config.loadout_feature_dim = 10
-    model.config.patch_feature_dim = 2
-
-    with pytest.raises(
-        ValueError,
-        match="loadout_features, patch_features",
-    ):
-        WinRatePredictor(
-            model,
-            _priors(),
-            prior_strength=20.0,
-            smoothing_prior_strength=20.0,
-            amplification_threshold=0.0,
-            smoothing_mode="cascade",
-            prior_confidence_matchups=50.0,
-            encoder_sidecar=None,
-            semantic_context_lookup=_semantic_context_lookup(),
-            device="cpu",
-        )
-
-
-def test_load_predictor_rejects_unsupported_heads_before_resource_loads(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model = _SemanticModel()
-    model.config.loadout_feature_dim = 10
-
-    monkeypatch.setattr(predictor_module, "resolve_device", lambda _device: "cpu")
-    monkeypatch.setattr(
-        predictor_module,
-        "load_hgnn_model",
-        lambda _path, *, device: (model, None, 20.0),
-    )
-    monkeypatch.setattr(
-        predictor_module,
-        "load_priors",
-        lambda: (_ for _ in ()).throw(AssertionError("load_priors called")),
-    )
-
-    with pytest.raises(ValueError, match="loadout_features"):
-        predictor_module.load_predictor(cfg=TrainConfig(model_path=Path("unused.pt")))
 
 
 def test_load_predictor_loads_semantic_context_for_grouped_model(

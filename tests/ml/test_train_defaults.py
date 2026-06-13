@@ -25,7 +25,6 @@ from app.ml.hgnn_model import (
 from app.ml.train import (
     _hgnn_config_from_meta,
     _batch_indices,
-    _validate_serving_artifact_contract,
     _validate_train_output_paths,
     production_semantic_model_overrides,
 )
@@ -122,24 +121,6 @@ def test_hgnn_loader_ignores_removed_legacy_state_keys(tmp_path) -> None:
     assert strength == pytest.approx(30.0)
 
 
-def test_serving_artifact_path_rejects_runtime_unsupported_heads() -> None:
-    broad = HGNNConfig(loadout_feature_dim=10, patch_feature_dim=2)
-
-    with pytest.raises(ValueError, match="production model path"):
-        _validate_serving_artifact_contract(
-            TrainConfig(allow_production_artifact_overwrite=True),
-            broad,
-        )
-
-    _validate_serving_artifact_contract(
-        TrainConfig(
-            model_path=DEFAULT_PRODUCTION_MODEL_PATH.with_name("candidate.pt"),
-            allow_production_artifact_overwrite=True,
-        ),
-        broad,
-    )
-
-
 def test_batch_indices_can_cap_train_rows_per_epoch() -> None:
     batches = list(
         _batch_indices(
@@ -152,19 +133,6 @@ def test_batch_indices_can_cap_train_rows_per_epoch() -> None:
     )
 
     assert [batch.tolist() for batch in batches] == [[0, 1, 2, 3], [4, 5]]
-
-
-def test_loadout_and_patch_dims_are_loaded_from_cache_metadata() -> None:
-    cfg = _hgnn_config_from_meta(
-        {
-            **_meta(),
-            "loadout_feature_dim": 10,
-            "patch_feature_dim": 2,
-        },
-    )
-
-    assert cfg.loadout_feature_dim == 10
-    assert cfg.patch_feature_dim == 2
 
 
 def test_sidecar_dims_are_loaded_from_cache_metadata() -> None:

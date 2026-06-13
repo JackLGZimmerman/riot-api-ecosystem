@@ -35,11 +35,9 @@ Two families, two key spaces. Every ML asset belongs to exactly one.
 | Family | Key space | Reads observed build? | Reaches accepted scoring? |
 | --- | --- | --- | --- |
 | `build_conditional` | `(championid, teamposition, build)` | Yes (train rows) | Only as `oracle`/`train_observed` diagnostics |
-| `pregame_native` | `(championid, teamposition)` (later `+ draft-safe loadout`) | **Never** | Yes (`pregame_marginal_build`, `rl_candidate`) |
+| `pregame_native` | `(championid, teamposition)` | **Never** | Yes (`pregame_marginal_build`, `rl_candidate`) |
 
-"draft-safe loadout" = runes / summoner spells, chosen before the game starts
-(already admissible: see the keystone-conditioned prior). Final item inventory
-is **not** draft-safe and is build-conditional only.
+Final item inventory is **not** draft-safe and is build-conditional only.
 
 ## 2. Current shared asset surfaces (built / loaded / served)
 
@@ -57,14 +55,12 @@ marginalisation. The marginal path is leakage-free only because it never reads a
 | Semantic group features | `app/ml/semantic_group_features.py` (`SEMANTIC_GROUP_FEATURE_DIM=25`) | `materialize_semantic_group_feature_cache` from `identity_context_raw` + `build_id` | `dataset.load_splits()` (optional materialise) | model semantic head |
 | Semantic context raw lookup | `app/ml/semantic_context_lookup.py` `(int,str,str)` | `load_semantic_context_raw_lookup()` from classification embeddings (`split='train'`) | `predictor` runtime | `build_semantic_group_features` |
 | Build identity embedding | `app/ml/hgnn_model.py` (`n_builds`) | trained weights | checkpoint | forward |
-| Loadout / patch heads | `cache_layout.py` loadout_features/patch_features | `build_dataset.py` | `dataset.load_splits()` | offline only; production serving dims = 0 |
 | **Build catalog** `P(build\|champ,role)` | `app/ml/build_catalog.py` `BuildCatalog.vectors: dict[(int,str)]` | `build_catalog()` from `priors.p1` (train-only) | `marginal_eval` line ~410; `predict_marginal` arg | marginal world weights |
 | Modal transform | `app/ml/pregame.py` `apply_modal_build_split` | n/a (deterministic fn of `(champ, slot role)`) | `train()` `pregame_modal_builds`, `marginal_eval` `modal` | replaces build inputs |
-| Keystone-conditioned prior | `build_catalog.conditioned_prior_vector`, `app/ml/loadout_condition.py` | train-only keystone counts | `marginal_eval --condition keystone` | reweights catalog vector |
 
-The **catalog**, **modal transform**, and **keystone conditioning** are already
-pregame-native by construction (champ-role keyed, train-only, never read a
-held-out build). Everything else is build-conditional.
+The **catalog** and **modal transform** are already pregame-native by
+construction (champ-role keyed, train-only, never read a held-out build).
+Everything else is build-conditional.
 
 ## 3. Target contracts
 
@@ -81,17 +77,15 @@ held-out build). Everything else is build-conditional.
 - **Identity:** this is the current production checkpoint
   (`hgnn_production_model.pt`).
 
-### 3.2 Pregame-native HGNN — `P(win | draft)` / `P(win | draft, draft-safe loadout)`
+### 3.2 Pregame-native HGNN — `P(win | draft)`
 
-- **Input key space:** `(championid, teamposition)` initially; may extend to
-  `(championid, teamposition, draft-safe-loadout)` (runes/summoners) but never
-  to final inventory.
+- **Input key space:** `(championid, teamposition)`.
 - **Two realisations (both kept):**
   - Marginalisation over the catalog — the current accepted path.
   - Modal comparator (`pregame_modal_builds`) — the `W=1` floor.
 - **Hard rule:** no accepted pregame-native asset may depend on a held-out
-  observed `build_id` or final inventory. The catalog, modal transform, and
-  keystone conditioning satisfy this today; the separation makes it *checked*.
+  observed `build_id` or final inventory. The catalog and modal transform
+  satisfy this today; the separation makes it *checked*.
 - **Marginalisation invariant:** average **output probabilities**, never logits
   or embeddings (`predict_marginal`: `np.dot(probabilities, weights) /
   weights.sum()`).
@@ -104,8 +98,8 @@ held-out build). Everything else is build-conditional.
 | Semantic features | `semantic_group_features.py` (uses `build_id`) | none yet (would need `(c,r)`-only descriptor) |
 | Priors | `priors.py` `p1 (c,r,b)` at observed build | catalog-derived `P(build\|c,r)` only |
 | Identity embeddings | build embedding (`n_builds`) | champion + role embeddings only |
-| Cache fields | `build_id`, loadout/patch, sidecar arrays | `champion_id`, role (slot index), `blue_win`, patch (draft-safe subset) |
-| Config flags | `interaction_loo`, `encoder_sidecar_path` | `pregame_modal_builds`, catalog gates (`CatalogGates`, `ConditionGates`) |
+| Cache fields | `build_id`, sidecar arrays | `champion_id`, role (slot index), `blue_win` |
+| Config flags | `interaction_loo`, `encoder_sidecar_path` | `pregame_modal_builds`, catalog gates (`CatalogGates`) |
 | Artifact paths | `hgnn_production_model.pt`, sidecar npz | `build_catalog` (in-memory, train-derived; versioned by `catalog_version`) |
 | Build-source labels | `train_observed_build`, `oracle_observed_build` | `pregame_marginal_build`, `rl_candidate` |
 
@@ -121,10 +115,6 @@ held-out build). Everything else is build-conditional.
    must be assertable. Add `assert_pregame_native_key_space()` and call it at
    every accepted catalog entry point so a build-keyed asset cannot silently
    reach accepted scoring.
-5. **Draft-safe loadout** extensions (keystone, summoners, styles) are
-   admissible *only* because they are selected pregame and aggregated train-only
-   (`conditioned_prior_vector`, `loadout_condition.py`). Final inventory never
-   qualifies.
 
 ## 6. Minimal migration plan (preserves the build-marginal path)
 

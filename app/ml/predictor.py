@@ -34,7 +34,6 @@ from app.ml.hgnn_model import (
     model_requires_semantic_group_features,
     model_uses_encoder_sidecar,
     resolve_device,
-    runtime_unsupported_inputs,
 )
 from app.core.utils.smoothing import smooth_rate_by_mode
 
@@ -59,19 +58,6 @@ def _team_tuples(
             )
         tuples.append((int(champ), pos, build_labels[build_id]))
     return tuples
-
-
-def _validate_runtime_feature_contract(model: HGNNWinModel) -> None:
-    missing = runtime_unsupported_inputs(model.config)
-    if not missing:
-        return
-    raise ValueError(
-        "HGNN checkpoint requires runtime inputs that app.rl.reward.Predictor "
-        "does not supply: "
-        + ", ".join(missing)
-        + ". Use a predictor protocol that passes those feature tensors, or "
-        "serve a checkpoint trained without those heads."
-    )
 
 
 def _validate_sidecar_dims(model: HGNNWinModel, sidecar: EncoderSidecarLookup) -> None:
@@ -145,7 +131,6 @@ class WinRatePredictor:
         semantic_context_lookup: SemanticContextRawLookup | None,
         device: str,
     ) -> None:
-        _validate_runtime_feature_contract(model)
         self._model = model.to(device).eval()
         self._priors = priors
         self._semantic_context_lookup = semantic_context_lookup
@@ -385,7 +370,6 @@ def load_predictor(
     dataset_cfg = dataset_cfg or DatasetConfig()
     device = resolve_device(cfg.device)
     model, _, prior_strength = load_hgnn_model(cfg.model_path, device=device)
-    _validate_runtime_feature_contract(model)
     requires_semantic_context = model_requires_semantic_group_features(model.config)
     requires_encoder_sidecar = model_uses_encoder_sidecar(model.config)
     if requires_encoder_sidecar and dataset_cfg.encoder_sidecar_path is None:

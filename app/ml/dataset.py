@@ -26,10 +26,6 @@ class SplitData:
     # Per-slot identity ids (HGNN identity embeddings); None for legacy caches.
     champion_id: np.ndarray | None = None
     build_id: np.ndarray | None = None
-    # Production game-level residual features. Signed edge columns are already
-    # blue-minus-red; coverage columns are unsigned.
-    loadout_features: np.ndarray | None = None
-    patch_features: np.ndarray | None = None
     # Optional frozen three-encoder sidecar blocks; None for caches built
     # without an encoder_sidecar_path.
     identity_static_sidecar: np.ndarray | None = None
@@ -65,18 +61,6 @@ def identity_meta(cfg: DatasetConfig) -> dict:
     identity = dict(meta["identity"])
     if "identity_encoder_sidecar" in meta:
         identity["identity_encoder_sidecar"] = meta["identity_encoder_sidecar"]
-    features = meta.get("production_features")
-    if isinstance(features, dict):
-        loadout_names = tuple(
-            str(name) for name in features.get("loadout_feature_names", ())
-        )
-        patch_names = tuple(
-            str(name) for name in features.get("patch_feature_names", ())
-        )
-        identity["loadout_feature_names"] = loadout_names
-        identity["patch_feature_names"] = patch_names
-        identity["loadout_feature_dim"] = len(loadout_names)
-        identity["patch_feature_dim"] = len(patch_names)
     return identity
 
 
@@ -196,29 +180,6 @@ def load_splits(
     for name in ("champion_id", "build_id"):
         if paths[name].exists():
             arrays[name] = np.load(paths[name], mmap_mode="r")[:n]
-    feature_meta = meta.get("production_features")
-    feature_dims = {}
-    if isinstance(feature_meta, dict):
-        feature_dims = {
-            "loadout_features": len(feature_meta.get("loadout_feature_names", ())),
-            "patch_features": len(feature_meta.get("patch_feature_names", ())),
-        }
-    for name in ("loadout_features", "patch_features"):
-        path = paths[name]
-        if path.exists():
-            value = np.load(path, mmap_mode="r")[:n]
-            expected_dim = feature_dims.get(name, 0)
-            if expected_dim > 0 and (value.ndim != 2 or value.shape[1] != expected_dim):
-                raise ValueError(
-                    f"Dataset cache {name} must have shape [games, {expected_dim}]; "
-                    "rebuild the cache."
-                )
-            arrays[name] = value
-        elif feature_dims.get(name, 0) > 0:
-            raise ValueError(
-                f"Dataset cache metadata declares {name}, but {path.name} is missing; "
-                "rebuild the cache."
-            )
     for name, path in sidecar_array_paths(cfg.cache_dir).items():
         if path.exists():
             arrays[name] = np.load(path, mmap_mode="r")[:n]

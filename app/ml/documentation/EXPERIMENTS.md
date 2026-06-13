@@ -16,7 +16,7 @@ These settings recur across every record below; records only state deviations.
 | --- | --- |
 | Hardware | local NVIDIA RTX 5070 Ti, `16,303 MiB` VRAM; CUDA |
 | Default training recipe | lr `3e-4`, batch `16384`, `max_epochs=40`, `patience=5`, weight decay `0`, raw test-accuracy checkpointing, `--raw-tensor-cache-device cpu` (~`48s`/epoch, ~10-15 min/seed) |
-| Production model recipe | learned semantic MoE `128x32` + semantic group features + Loadout + patch-only Temporal (the `train.py` production overrides; `HGNNConfig` base defaults keep the MoE flags off) |
+| Production model recipe | learned semantic MoE `128x32` + semantic group features (the `train.py` production overrides; `HGNNConfig` base defaults keep the MoE flags off) |
 | Split protocol | v32 per-patch chronological 80/20: train `1,318,329` / test `329,586`, no validation split; test is the model-selection split, not an untouched holdout |
 | Frozen evaluation artifacts | `app/ml/data/experiments/split_v32/` (untracked): seed checkpoints, per-seed train+test logits in `preds.npz`, `verify_equivalence.py` (the post-refactor no-regression gate) |
 | Probe methodology | frozen ensemble logit as offset, features train-stat standardized, ridge/IRLS logistic fit on train only, one test read; central band = ensemble `p in [0.45, 0.55]` |
@@ -70,8 +70,8 @@ A split-safe fixed-feature ceiling separated two competing root causes for the
 static-NLL plateau: "identity-derived surfaces have no further row-level
 signal" versus "the signal exists but does not transfer across the
 chronological patch boundary." The v30 cache makes the decomposition
-observable without new data: `patch_features[:, 1]` is `1.0` only for games
-whose patch has train coverage. Validation splits into `18,561` covered-patch
+observable without new data: the v30 cache's `patch_features[:, 1]` column is
+`1.0` only for games whose patch has train coverage. Validation splits into `18,561` covered-patch
 and `35,420` uncovered-patch central-band games; test is 100% uncovered.
 
 Setup: production checkpoint frozen; no-group base = forward pass with
@@ -202,8 +202,8 @@ Findings:
   lives. Train-boundary-respecting teachers stayed at or below the historical
   plateau (train_static `0.001550`/`0.001489` here vs `0.001354` in the f32
   in-band run — the same plateau at gate scale under the f16/masked-column
-  harness). All priors (1vX, loadout, patch) are also hard-scoped to
-  `split = 'train'`, so served features carry the same staleness.
+  harness). All priors (1vX) are also hard-scoped to `split = 'train'`, so
+  served features carry the same staleness.
 
 The one-off runner and report artifacts were removed after this conclusion
 was recorded; the construction above plus the in-band section is sufficient to
@@ -215,9 +215,8 @@ With the per-patch 80/20 protocol validated (see `HGNN_CURRENT.md`), this
 experiment asked where additional draft-only signal remains. Hard constraint,
 set by the user and binding on all future work: the model is draft-generic —
 no player information of any kind (no puuids, no player priors, no rank
-features). The admissible surface is champions, positions, runes, summoners,
-bans, patch, and (champion, role, build)-keyed historical profiles via the
-three encoder sidecars.
+features). The admissible surface is champions, positions, bans, and
+(champion, role, build)-keyed historical profiles via the three encoder sidecars.
 
 Setup: three default-recipe v32 seeds (4/5/6) frozen; residual probes fit on
 train only and scored on test, with three cohorts — global, central band
@@ -245,15 +244,17 @@ TOP/JG/MID/BOT/UTILITY, 5-9 red). Learners: IRLS logistic over
 | ensemble + ban-identity embeddings | `0.5827` | `0.5315` | `0.5170` |
 | ensemble + set probe(10x144 latents) | `0.5815` | `0.5300` | `0.5133` |
 
+The loadout block measured here (summoner spells + runes + shards) was removed
+from the model on 2026-06-13 as a direct result of the `+0.05pp` null finding
+below; the numbers are kept as the evidentiary record. See `HGNN_CURRENT.md`.
+
 Findings:
 
 - The side prior is the one real correction in current features: team-swap
   augmentation forces side-symmetric predictions (model mean `p = 0.4930` vs
-  true blue winrate `0.4818`) and the tanh-clipped `patch_residual`
-  (`max_abs_logit 0.15`) recovers only ~40% of the needed intercept. A
-  train-fitted intercept is leak-free and worth `+0.11pp` global / `+0.31pp`
-  band on a single seed. In-model fix: loosen the clip or add a learned side
-  bias.
+  true blue winrate `0.4818`). A train-fitted intercept is leak-free and worth
+  `+0.11pp` global / `+0.31pp` band on a single seed. In-model fix: add a
+  learned side bias.
 - The 3-seed ensemble is the largest free gain: `+0.26pp` over the refit
   single seed (`+0.29pp` over raw), `-0.0011` NLL, `+0.66pp` band, `+0.6pp`
   core. No new information required.
@@ -262,10 +263,10 @@ Findings:
   `z = 1.8` — below significance and 2x the seed-to-seed accuracy spread —
   and on the ensemble offset the same stack adds nothing (`0.5820` vs
   `0.5826`, within noise). The per-block deltas (loadout `+0.05pp`, latent
-  `+0.03pp`) are noise-level descriptive numbers, not effects. Ban scalars
-  are empty outright (standalone test AUC `0.5052`; the null is not an
-  alignment artifact — the ban columns correlate with the label and the
-  model logit at 4-8 sigma with consistent sign on both splits).
+  `+0.03pp`) are noise-level descriptive numbers, not effects. Ban scalars are empty
+  outright (standalone test AUC `0.5052`; the null is not an alignment
+  artifact — the ban columns correlate with the label and the model logit at
+  4-8 sigma with consistent sign on both splits).
 - Role-aligned lane diffs are null (`+0.01pp`): attention pooling is not
   discarding linearly recoverable lane-matchup structure from the encoder
   latents.

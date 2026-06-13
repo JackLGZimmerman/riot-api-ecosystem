@@ -7,8 +7,7 @@ pregame build worlds instead of observed labels: per game, the train-only
 catalog supplies one prior per slot, the joint worlds are enumerated
 best-first, every retained world is scored in batched forward passes, and
 output probabilities are averaged with the unnormalised joint weights
-divided by retained mass. Loadout/patch heads are served exactly as trained
-(this is why accepted metrics cannot go through ``WinRatePredictor``).
+divided by retained mass.
 
 Accepted modes (``marginal``, ``modal``) never read a held-out row's
 observed ``build_id``; ``oracle`` reproduces the recorded production path
@@ -35,9 +34,7 @@ from app.ml.build_catalog import (
     BUILD_SOURCE_ORACLE_OBSERVED,
     BUILD_SOURCE_PREGAME_MARGINAL,
     BuildCatalog,
-    ConditionGates,
     build_catalog,
-    conditioned_prior_vector,
     enumerate_joint_worlds,
     validate_accepted_build_source,
 )
@@ -124,16 +121,8 @@ def score_split_marginal(
     batch_rows: int = 16384,
     max_games: int | None = None,
     log_every: int = 50_000,
-    slot_keystones: np.ndarray | None = None,
-    child_counts: dict[tuple[int, str, int], dict[str, int]] | None = None,
-    condition_gates: ConditionGates | None = None,
 ) -> MarginalScores:
-    """Marginal probabilities for one split without reading its build_id.
-
-    When ``slot_keystones`` and ``child_counts`` are provided (shape [n_games, 10]),
-    each slot's prior is conditioned on its pregame keystone via
-    ``conditioned_prior_vector`` before world enumeration.
-    """
+    """Marginal probabilities for one split without reading its build_id."""
     champion_id = split.champion_id
     if champion_id is None:
         raise ValueError("cache is missing champion_id")
@@ -144,15 +133,8 @@ def score_split_marginal(
     hp_lookup, range_lookup = static_hp_range_lookups() if needs_semantic else (None, None)
     n_champions = tables.win_rate.shape[0] - 1
     slot_roles = np.arange(10) % 5
-    _condition_gates = condition_gates or ConditionGates()
-    use_keystone = slot_keystones is not None and child_counts is not None
-    if slot_keystones is not None and slot_keystones.shape[0] < n_games:
-        raise ValueError(
-            f"slot_keystones covers {slot_keystones.shape[0]} games "
-            f"but {n_games} are being scored"
-        )
 
-    # Per-(champ, role) candidate cache (used when no keystone conditioning).
+    # Per-(champ, role) candidate cache.
     candidate_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, str]] = {}
 
     def candidates(champ: int, role_idx: int) -> tuple[np.ndarray, np.ndarray, str]:
@@ -166,30 +148,6 @@ def score_split_marginal(
                 vector.fallback_source,
             )
             candidate_cache[key] = cached
-        return cached
-
-    # Per-(champ, role, keystone) candidate cache for conditioned mode.
-    conditioned_cache: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray, str]] = {}
-
-    def conditioned_candidates(
-        champ: int, role_idx: int, keystone: int
-    ) -> tuple[np.ndarray, np.ndarray, str]:
-        key = (champ, role_idx, keystone)
-        cached = conditioned_cache.get(key)
-        if cached is None:
-            assert child_counts is not None
-            teamposition = POSITIONS[role_idx]
-            vector = conditioned_prior_vector(
-                catalog, champ, teamposition, keystone,
-                child_counts.get((int(champ), teamposition, int(keystone))),
-                _condition_gates,
-            )
-            cached = (
-                np.asarray(vector.hgnn_build_ids, dtype=np.int64),
-                np.asarray(vector.probabilities, dtype=np.float64),
-                vector.fallback_source,
-            )
-            conditioned_cache[key] = cached
         return cached
 
     probabilities = np.zeros(n_games, dtype=np.float64)
@@ -223,16 +181,6 @@ def score_split_marginal(
                 hp_lookup=hp_lookup,
                 range_lookup=range_lookup,
             )
-        loadout = (
-            None
-            if split.loadout_features is None
-            else np.asarray(split.loadout_features[:n_games][game_idx])
-        )
-        patch = (
-            None
-            if split.patch_features is None
-            else np.asarray(split.patch_features[:n_games][game_idx])
-        )
         sidecar = (
             gatherer.gather(
                 torch.as_tensor(champ, dtype=torch.long, device=device),
@@ -248,8 +196,6 @@ def score_split_marginal(
             p1_cnt=p1_cnt,
             strength=strength,
             semantic_group_features=semantic,
-            loadout_features=loadout,
-            patch_features=patch,
             device=device,
             **sidecar,
         )
@@ -266,19 +212,9 @@ def score_split_marginal(
     started = time.monotonic()
     for game in range(n_games):
         champ_row = np.asarray(champion_id[game], dtype=np.int64)
-        if use_keystone:
-            assert slot_keystones is not None
-            ks_row = np.asarray(slot_keystones[game], dtype=np.int64)
-            slot_candidates = [
-                conditioned_candidates(
-                    int(champ_row[s]), int(slot_roles[s]), int(ks_row[s])
-                )
-                for s in range(10)
-            ]
-        else:
-            slot_candidates = [
-                candidates(int(champ_row[s]), int(slot_roles[s])) for s in range(10)
-            ]
+        slot_candidates = [
+            candidates(int(champ_row[s]), int(slot_roles[s])) for s in range(10)
+        ]
         for _, _, source in slot_candidates:
             fallback_counts[source] = fallback_counts.get(source, 0) + 1
         selections, weights, mass = enumerate_joint_worlds(
@@ -346,8 +282,6 @@ def run(
     model_path: Path,
     out: Path | None,
     device: str = "auto",
-    condition: str = "none",
-    condition_gates: ConditionGates | None = None,
 ) -> dict:
     device = resolve_device(device)
     dataset_cfg = DatasetConfig()
@@ -403,7 +337,6 @@ def run(
             "worlds": worlds,
             "k_slot": k_slot,
             "early_stop_mass": early_stop_mass,
-            "condition": condition,
         }
     )
     priors = load_priors()
@@ -417,22 +350,6 @@ def run(
         build_vocab=tuple(model_config.build_vocab),
     )
 
-    # Keystone conditioning: load counts and per-split slot arrays.
-    child_counts: dict[tuple[int, str, int], dict[str, int]] | None = None
-    slot_keystones_scored: np.ndarray | None = None
-    slot_keystones_train: np.ndarray | None = None
-    if condition == "keystone":
-        from app.ml.loadout_condition import load_keystone_counts, load_slot_keystones
-        child_counts = load_keystone_counts()
-        slot_keystones_scored = load_slot_keystones(split_name, dataset_cfg)
-        if calibrate:
-            slot_keystones_train = load_slot_keystones("train", dataset_cfg)
-        gates = condition_gates or ConditionGates()
-        payload["condition_gates"] = {
-            "child_min_count": gates.child_min_count,
-            "tau": gates.tau,
-        }
-
     scores = score_split_marginal(
         model,
         splits[split_name],
@@ -445,19 +362,10 @@ def run(
         max_worlds=worlds,
         early_stop_mass=early_stop_mass,
         max_games=max_games,
-        slot_keystones=slot_keystones_scored,
-        child_counts=child_counts,
-        condition_gates=condition_gates,
     )
     payload["metrics"] = _metrics(scores.probabilities, scores.labels)
     payload["retained_joint_mass"] = _mass_report(scores, mass_floor)
     payload["fallback_slot_counts"] = scores.fallback_counts
-    # Share of slots served a conditioned (champion_role_keystone) vector.
-    total_slots = sum(scores.fallback_counts.values())
-    conditioned_slots = scores.fallback_counts.get("champion_role_keystone", 0)
-    payload["conditioned_slot_share"] = (
-        conditioned_slots / total_slots if total_slots > 0 else 0.0
-    )
     if out is not None:
         # Persist per-game scores before calibration so failures there cost
         # nothing and calibration variants can be probed offline.
@@ -488,9 +396,6 @@ def run(
             max_worlds=worlds,
             early_stop_mass=early_stop_mass,
             max_games=calibration_max_games,
-            slot_keystones=slot_keystones_train,
-            child_counts=child_counts,
-            condition_gates=condition_gates,
         )
         if out is not None:
             np.savez_compressed(
@@ -545,15 +450,6 @@ def main() -> None:
     )
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--condition-tau", type=float, default=50.0)
-    parser.add_argument("--condition-min-count", type=int, default=50)
-    parser.add_argument(
-        "--condition", choices=("none", "keystone"), default="none",
-        help="Condition the build prior on pregame information. "
-             "'keystone' uses P(build | champ, role, keystone) instead of "
-             "P(build | champ, role). Requires pre-built slot arrays "
-             "(python -m app.ml.loadout_condition build --split <split>).",
-    )
     args = parser.parse_args()
     out = args.out
     if out is None:
@@ -572,10 +468,6 @@ def main() -> None:
         model_path=args.model_path,
         out=out,
         device=args.device,
-        condition=args.condition,
-        condition_gates=ConditionGates(
-            child_min_count=args.condition_min_count, tau=args.condition_tau
-        ),
     )
 
 

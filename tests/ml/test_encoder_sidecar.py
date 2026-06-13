@@ -176,7 +176,7 @@ def test_static_and_split_metadata_reject_leaky_inputs() -> None:
         validate_train_only_metadata({"split_metadata": {"fit_split": "test"}})
 
 
-def test_hgnn_sidecar_inputs_swap_signed_feature_contract() -> None:
+def test_hgnn_sidecar_inputs_swap_half_contract() -> None:
     rng = np.random.default_rng(9)
     champion_id = np.tile(np.arange(10), (2, 1))
     build_id = np.tile(np.arange(10) % 3, (2, 1))
@@ -186,11 +186,6 @@ def test_hgnn_sidecar_inputs_swap_signed_feature_contract() -> None:
     full_game = rng.normal(size=(2, 10, 3)).astype(np.float32)
     temporal = rng.normal(size=(2, 10, 4)).astype(np.float32)
     support = rng.uniform(0.0, 80.0, size=(2, 10)).astype(np.float32)
-    loadout_features = np.array(
-        [[0.2, 1.0, -0.3, 0.5, 0.1, 0.8, -0.4, 0.2, 0.6, 0.9]],
-        dtype=np.float32,
-    ).repeat(2, axis=0)
-    patch_features = np.array([[0.05, 1.0]], dtype=np.float32).repeat(2, axis=0)
     group_features = rng.uniform(
         0.0,
         1.0,
@@ -207,8 +202,6 @@ def test_hgnn_sidecar_inputs_swap_signed_feature_contract() -> None:
         identity_temporal_sidecar=temporal,
         identity_encoder_support=support,
         semantic_group_features=group_features,
-        loadout_features=loadout_features,
-        patch_features=patch_features,
     )
 
     swapped = swap_hgnn_inputs(inputs)
@@ -224,33 +217,6 @@ def test_hgnn_sidecar_inputs_swap_signed_feature_contract() -> None:
         swapped["semantic_group_features"][:, :5],
         inputs["semantic_group_features"][:, 5:],
     )
-    assert torch.allclose(
-        swapped["loadout_features"][:, [0, 2, 4, 6, 8]],
-        -inputs["loadout_features"][:, [0, 2, 4, 6, 8]],
-    )
-    assert torch.allclose(
-        swapped["loadout_features"][:, [1, 3, 5, 7, 9]],
-        inputs["loadout_features"][:, [1, 3, 5, 7, 9]],
-    )
-    assert torch.allclose(
-        swapped["patch_features"][:, 0], -inputs["patch_features"][:, 0]
-    )
-    assert torch.allclose(
-        swapped["patch_features"][:, 1], inputs["patch_features"][:, 1]
-    )
-
-
-def test_hgnn_requires_configured_residual_feature_inputs() -> None:
-    inputs = _semantic_hgnn_inputs(batch_size=2, seed=31)
-    model = HGNNWinModel(
-        _semantic_moe_config(loadout_feature_dim=10, patch_feature_dim=2)
-    ).eval()
-
-    with pytest.raises(ValueError, match="loadout_features is required"):
-        model(**inputs)
-
-    with pytest.raises(ValueError, match="patch_features is required"):
-        model(**{**inputs, "loadout_features": torch.zeros(2, 10)})
 
 
 def test_learned_semantic_moe_flag_disabled_preserves_old_outputs() -> None:
@@ -267,13 +233,9 @@ def test_learned_semantic_moe_flag_disabled_preserves_old_outputs() -> None:
     assert set(without_sidecars) == {
         "base_logit",
         "context_logit",
-        "loadout_logit",
-        "patch_logit",
-        "feature_logit",
         "final_logit",
     }
     assert torch.allclose(without_sidecars["context_logit"], torch.zeros(2))
-    assert torch.allclose(without_sidecars["feature_logit"], torch.zeros(2))
     assert torch.allclose(
         without_sidecars["base_logit"], with_ignored_sidecars["base_logit"]
     )

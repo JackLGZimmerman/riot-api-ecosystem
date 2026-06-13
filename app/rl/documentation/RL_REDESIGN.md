@@ -20,10 +20,10 @@ Two capabilities must be preserved/added:
   frozen opponents and only graduate when they provably beat the champion
   (Stockfish fishtest SPRT + AlphaStar PFSP).
 
-Hidden information (positions, runes, summoners, **intended builds**) is already
-modelled: the env never exposes enemy roles/builds; `make_pool_sampler`
-marginalises terminal reward over plausible (role, build) joint worlds. The
-league must keep this boundary — opponents see only public draft state.
+Hidden information (positions, **intended builds**) is already modelled: the
+env never exposes enemy roles/builds; `make_pool_sampler` marginalises terminal
+reward over plausible (role, build) joint worlds. The league must keep this
+boundary — opponents see only public draft state.
 
 ## Current state (2470 LOC, 14 files) and the 5 redundancies
 
