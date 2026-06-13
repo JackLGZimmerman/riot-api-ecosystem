@@ -144,6 +144,10 @@ wholesale rather than fusing it.
 New `league.py` + minimal `alpha_train.py` hooks. Reuses the Phase-1 unified
 net + worker + DraftState. Stockfish/AlphaStar practices, kept lean.
 
+**Status:** 2a `league.py` (PFSP + SPRT + Elo) **landed and gated**
+(`tests/rl/test_league.py`, torch-free, 4 tests). 2b = the `alpha_train.py` +
+`selfplay.py` integration below (next packet).
+
 ### Concepts
 
 - **Pool**: list of frozen checkpoints `{path, rating, games, wins}` persisted as
@@ -168,19 +172,23 @@ net + worker + DraftState. Stockfish/AlphaStar practices, kept lean.
 - **Elo** updates after each recorded result; tracks frontier progress and feeds
   PFSP weights.
 
-### `league.py` surface (lean)
+### `league.py` surface (landed — torch-free)
 
-```
-@dataclass LeagueEntry(path, rating, games, wins)
-class League:
+```python
+@dataclass LeagueEntry(path, rating=0.0, games=0, wins=0)   # games/wins = learner's H2H record
+@dataclass League:
     entries: list[LeagueEntry]; champion_idx: int
-    @classmethod load(dir)->League        save(dir)
-    sample_opponent(rng, p=2.0)->LeagueEntry      # PFSP
-    record(entry, agent_won: bool)                 # Elo + H2H counts
-    admit(net_state, rating)->None                 # snapshot into pool
-def sprt(wins, losses, draws, elo0, elo1, alpha, beta)->Literal["accept","reject","continue"]
-def elo_update(r_a, r_b, score_a, k=16)->tuple[float,float]
+    champion -> LeagueEntry | None                  # property
+    classmethod load(dir)->League        save(dir)
+    sample_opponent(rng, p=2.0)->tuple[int, LeagueEntry]   # PFSP ∝ (1-winrate_vs)^p
+    record(idx, agent_won: bool)                    # H2H counts (feeds PFSP)
+    admit(state_bytes, rating, directory)->LeagueEntry     # snapshot bytes -> entry_{k}.pt, set champion
+def sprt(wins, losses, draws=0, *, elo0=0.0, elo1=15.0, alpha=0.05, beta=0.05)->str  # accept|reject|continue
+def elo_update(r_a, r_b, score_a, k=16.0)->tuple[float,float]   # learner rating tracked by trainer
 ```
+
+Elo lives with the trainer (the learner's live rating), not on frozen entries;
+`record` only updates H2H counts for PFSP.
 
 ### `alpha_train.py` hooks (minimal)
 
