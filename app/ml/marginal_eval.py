@@ -459,9 +459,8 @@ def run(
         conditioned_slots / total_slots if total_slots > 0 else 0.0
     )
     if out is not None:
-        # Scoring takes hours; persist the per-game scores before the
-        # calibration phase so failures there cost nothing and calibration
-        # variants can be probed offline.
+        # Persist per-game scores before calibration so failures there cost
+        # nothing and calibration variants can be probed offline.
         np.savez_compressed(
             out.with_suffix(".npz"),
             probabilities=scores.probabilities,
