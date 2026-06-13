@@ -1,6 +1,6 @@
 # HGNN Current State
 
-Last updated: 2026-06-12.
+Last updated: 2026-06-13 12:25 BST.
 
 The model is draft-generic by hard constraint: no player information of any
 kind (no puuids, no player priors, no rank). The admissible surface is
@@ -111,15 +111,18 @@ on test — see the 2026-06-12 record in `EXPERIMENTS.md`.
 The promoted ensemble row is an observed-build/oracle diagnostic: it scores the
 cached final `build_id` and is not the accepted pregame number. The
 leakage-free accepted path is build marginalisation from the train-only build
-catalog. The completed full-test marginal run currently on disk is for the
-previous 3-seed artifact; no completed 6-seed marginal result artifact is
-currently recorded.
+catalog. The pregame rows below were re-run on 2026-06-13 against the current
+6-seed artifact through `python -m app.ml.marginal_eval` with the
+`build_catalog.assert_pregame_native()` key-space guard active on the accepted
+path (catalog `b39d506e51eb`); the guard is a no-op on the real catalog and the
+oracle diagnostic is byte-identical to its prior record, confirming the asset
+separation did not perturb accepted scoring.
 
 | Prediction path | Build source | Artifact | Test accuracy | Test NLL |
 | --- | --- | --- | ---: | ---: |
 | Observed-build oracle diagnostic | cached final `build_id` | Current 6-seed bias-only ensemble | `58.3669%` | `0.669642` |
-| Leakage-free pregame marginal (`W=128`, `k_slot=3`) | train-only `P(build | champion, role)` catalog | Previous 3-seed affine ensemble | `56.1856%` raw / `56.1978%` calibrated | `0.681523` raw / `0.681721` calibrated |
-| Leakage-free modal baseline (`W=1`) | train-only top build per slot | Previous 3-seed affine ensemble | `55.7985%` raw / `55.8340%` calibrated | `0.684316` raw / `0.683228` calibrated |
+| Leakage-free pregame marginal (`W=128`, `k_slot=3`) | train-only `P(build \| champion, role)` catalog | Current 6-seed ensemble | `56.3064%` raw / `56.3079%` calibrated | `0.680652` raw / `0.680773` calibrated |
+| Leakage-free modal baseline (`W=1`) | train-only top build per slot | Current 6-seed ensemble | `55.8589%` raw / `55.9265%` calibrated | `0.682588` raw / `0.682705` calibrated |
 
 Gate reachability (2026-06-10, reaffirmed 2026-06-11): every draft-safe input
 axis has been audited — context head saturated at the draft-time ceiling,
