@@ -1,9 +1,9 @@
-"""Shared multiprocessing helpers for the rollout / self-play trainers.
+"""Shared multiprocessing helpers for the self-play trainer.
 
 Deliberately free of the gymnasium env import: the AlphaZero path searches
 over ``DraftState`` (not ``DraftEnv``), so importing these helpers must not
-pull ``gymnasium`` in. ``rollout.py`` and ``alpha_train.py`` both use them
-instead of redefining state<->bytes and spawn-pool plumbing.
+pull ``gymnasium`` in. ``alpha_train.py`` uses them instead of redefining
+state<->bytes and spawn-pool plumbing.
 """
 
 from __future__ import annotations

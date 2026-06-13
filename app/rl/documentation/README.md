@@ -1,7 +1,7 @@
 # Draft RL
 
-Gymnasium environment + REINFORCE trainer that drafts champions and is
-scored by the win-probability model in `app/ml`.
+Gymnasium environment + AlphaZero self-play learner that drafts champions
+and is scored by the win-probability model in `app/ml`.
 
 ## Overview
 
@@ -198,86 +198,9 @@ runtime features or a no-feature-head serving checkpoint is promoted.
 
 ## Training
 
-```bash
-python -m app.rl.train
-```
-
-Architecture:
-
-| Piece | File | Purpose |
-| --- | --- | --- |
-| Policy | `net.py` | Torch MLP, masked categorical sampling |
-| Workers | `rollout.py` | Persistent `multiprocessing.Pool`, one env + policy per worker |
-| Trainer | `train.py` | REINFORCE + baseline + entropy, TensorBoard + JSONL logging |
-
-### Throughput
-
-The predictor is pure numpy after init, so the bottleneck is rollouts.
-Workers are spawned once; on each epoch the master broadcasts fresh
-weights and each worker runs a batch of episodes independently.
-`torch.set_num_threads(1)` inside workers prevents intra-op contention.
-
-Observed (7 workers, 8-core box): ~1500-1800 episodes/sec.
-
-### Modes
-
-| `train_mode` | Behaviour |
-| --- | --- |
-| `vs_random` (default) | Policy plays blue, uniform random plays red. Only blue transitions trained. Clean learning signal. |
-| `self_play` | Policy plays both sides. Per-step return = reward of the side that took the step. |
-
-### TrainConfig
-
-```python
-TrainConfig(
-    top_k_build_configs=8,      # required
-    epochs=200,
-    episodes_per_worker=8,
-    n_workers=None,             # default: cpu_count - 1
-    lr=3e-4,
-    entropy_coef=0.01,
-    grad_clip=1.0,
-    random_start_steps=0,
-    eval_every=5,
-    eval_episodes=64,
-    hidden=256,
-    train_mode="vs_random",
-    run_name=None,              # default: draft_YYYYMMDD_HHMMSS
-    pool_path=DEFAULT_POOL_PATH,
-)
-```
-
-All fields are keyword-only.
-
-## Live Performance Graph
-
-Run TensorBoard against the run directory:
-
-```bash
-tensorboard --logdir app/rl/data/runs
-```
-
-Scalars per epoch: `policy_loss`, `entropy`, `grad_norm`,
-`blue_reward_mean`, `p_blue_win_mean`, `ep_per_sec`. Every
-`eval_every` epochs: `eval_blue_reward_mean`, `eval_p_blue_win_mean`,
-`eval_win_rate` (policy-vs-random).
-
-## JSONL Logging
-
-Every epoch appends one JSON object to
-`app/rl/data/logs/{run_name}.jsonl` for offline analysis.
-
-## Verified Improvement
-
-A 60-epoch `vs_random` run (~20 s wallclock) takes a fresh policy from
-`eval_win_rate ≈ 0.55` to `≈ 0.85`, entropy from `5.08` to `3.3`. The
-learning curve is visible live in TensorBoard.
-
-## AlphaZero Learner
-
-Stronger search-based learner that replaces vanilla REINFORCE with
-self-play + MCTS + a policy-value net. Reuses everything documented
-above: same `DraftEnv` rules (mirrored in `DraftState`), same
+The learner is search-based: self-play + MCTS + a policy-value net
+(AlphaZero). It reuses everything documented above: same `DraftEnv`
+rules (mirrored in `DraftState`), same
 `Predictor` boundary, same `resolve_rewards` for terminal rewards, same
 `reward_mode` semantics, same `encode_obs` features.
 
@@ -407,13 +330,11 @@ that does not increase total loss, and the adversarial league round-trip.
 | `draft.py` | `Side`, `ActionType`, `DraftStep`, `DRAFT_SEQUENCE`, and `DraftState` (the single transition state) |
 | `pool.py` | `ChampionPool`, `PoolEntry`, `load_pool`, `build_pool_from_catalog` |
 | `reward.py` | `Predictor` (optional `predict_batch`), `RoleBuildConfig`, `make_pool_sampler`, `resolve_rewards` (batched) |
-| `net.py` | `MaskedPolicy`, `AlphaZeroNet`, `encode_obs`, `auto_device` (was `policy.py` + `alpha_net.py`) |
+| `net.py` | `AlphaZeroNet`, `encode_obs`, `auto_device` (was `policy.py` + `alpha_net.py`) |
 | `env.py` | `DraftEnv`, `DraftEnvConfig` (thin gym wrapper over `DraftState`) |
 | `mcts.py` | `MCTS` (PUCT + beam), `visit_policy` |
-| `worker.py` | shared spawn-pool + `state_to_bytes`/`bytes_to_state` (used by both trainers) |
+| `worker.py` | shared spawn-pool + `state_to_bytes`/`bytes_to_state` (used by `alpha_train`) |
 | `selfplay.py` | `play_episode`, `EpisodeSamples` |
-| `rollout.py` | `RolloutPool`, persistent multiprocessing workers (REINFORCE) |
-| `train.py` | REINFORCE training loop with TensorBoard + JSONL |
 | `league.py` | adversarial opponent pool: PFSP sampling + SPRT promotion + Elo |
 | `alpha_train.py` | AlphaZero training loop + `AlphaTrainConfig` |
 | `alpha_smoke.py` | End-to-end smoke test (no ClickHouse) |
@@ -449,5 +370,4 @@ PFSP sample, asymmetric episode, league generation/eval glue, and SPRT.
 
 ## Dependencies
 
-`gymnasium`, `numpy`, `torch`, `tensorboard`. All pinned in
-`pyproject.toml`.
+`gymnasium`, `numpy`, `torch`. All pinned in `pyproject.toml`.

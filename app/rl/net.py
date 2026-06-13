@@ -1,8 +1,7 @@
-"""Networks for the draft env: masked policy (REINFORCE) + policy-value net (AlphaZero).
+"""Policy-value network for the AlphaZero draft learner.
 
-Both share `encode_obs` features (public draft state + scalar context) and the
-same two-layer trunk. `MaskedPolicy` adds a single logits head; `AlphaZeroNet`
-adds separate policy + value heads.
+`AlphaZeroNet` consumes `encode_obs` features (public draft state + scalar
+context) through a two-layer trunk and adds separate policy + value heads.
 """
 
 from __future__ import annotations
@@ -39,46 +38,10 @@ def encode_obs(obs: dict[str, Any], n_champions: int) -> np.ndarray:
 
 
 def _trunk(d: int, hidden: int) -> list[nn.Module]:
-    """Two-layer ReLU body shared by both nets. Returned as a list so callers
-    splat it (`*_trunk(...)`) into their own nn.Sequential — this keeps each
-    net's existing state_dict keys (net.0/net.2/net.4, trunk.0/trunk.2)."""
+    """Two-layer ReLU body. Returned as a list so `AlphaZeroNet` splats it
+    (`*_trunk(...)`) into its own nn.Sequential, preserving the on-disk
+    state_dict keys (trunk.0/trunk.2)."""
     return [nn.Linear(d, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU()]
-
-
-@dataclass(frozen=True)
-class PolicyConfig:
-    n_champions: int
-    hidden: int = 256
-
-
-class MaskedPolicy(nn.Module):
-    def __init__(self, cfg: PolicyConfig) -> None:
-        super().__init__()
-        self.cfg = cfg
-        self.net = nn.Sequential(
-            *_trunk(obs_dim(cfg.n_champions), cfg.hidden),
-            nn.Linear(cfg.hidden, cfg.n_champions),
-        )
-
-    def logits(self, features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        return self.net(features).masked_fill(~mask, -1e9)
-
-    @torch.no_grad()
-    def act(
-        self,
-        features: np.ndarray,
-        mask: np.ndarray,
-        *,
-        greedy: bool = False,
-    ) -> int:
-        logits = self.logits(
-            torch.from_numpy(features)[None],
-            torch.from_numpy(mask)[None],
-        )[0]
-        if greedy:
-            return int(torch.argmax(logits).item())
-        probs = torch.softmax(logits, dim=-1)
-        return int(torch.multinomial(probs, num_samples=1).item())
 
 
 @dataclass(frozen=True)

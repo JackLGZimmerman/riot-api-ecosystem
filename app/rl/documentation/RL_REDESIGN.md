@@ -32,8 +32,8 @@ league must keep this boundary — opponents see only public draft state.
 | R1 Reward double-loop | `reward.py:210-221` calls scalar `predictor()` n_b×n_r times | **speed** — up to 64 forward passes/terminal instead of 1 |
 | R2 Duplicate net trunk | `policy.py:51-57` ≈ `alpha_net.py:30-37` | 1 extra file, ~15 LOC |
 | R3 Duplicate draft rules | `DraftEnv` (`env.py`) vs `DraftState` (`mcts.py`) two reps of the same transition table | ~50 LOC, drift risk |
-| R4 Duplicate episode structs | `EpisodeBatch` (`rollout.py:34`) vs `EpisodeSamples` (`selfplay.py:29`) + two concat helpers | ~30 LOC — **evaluated, NOT merged** (see 1d) |
-| R5 Duplicate worker plumbing | `_worker_init`/spawn-pool/`_state_to_bytes`/`set_num_threads` in `rollout.py` **and** `alpha_train.py` | ~40 LOC |
+| R4 Duplicate episode structs | `EpisodeBatch` (`rollout.py:34`) vs `EpisodeSamples` (`selfplay.py:29`) | **resolved by Phase 3** — `rollout.py` deleted, `EpisodeSamples` is the only struct |
+| R5 Duplicate worker plumbing | `_worker_init`/spawn-pool/`_state_to_bytes`/`set_num_threads` in `rollout.py` **and** `alpha_train.py` | **resolved by Phase 3** — `rollout.py` deleted; only `worker.py` plumbing remains |
 
 ## Target architecture
 
@@ -41,13 +41,13 @@ league must keep this boundary — opponents see only public draft state.
 draft.py     sequence + Side/ActionType + DraftState (single transition truth)
 reward.py    Predictor protocol (+ optional predict_batch), sampler, resolve_rewards (batched)
 pool.py      champion (role,build) eligibility pool            [unchanged]
-net.py       encode_obs/obs_dim + trunk + MaskedPolicy + AlphaZeroNet + auto_device  (was policy.py + alpha_net.py)
+net.py       encode_obs/obs_dim + trunk + AlphaZeroNet + auto_device  (was policy.py + alpha_net.py)
 env.py       DraftEnv: thin gym wrapper over DraftState
 mcts.py      PUCT search over DraftState
-selfplay.py  play_episode → EpisodeSamples (AlphaZero); REINFORCE keeps EpisodeBatch
-worker.py    spawn-pool + worker globals + state<->bytes  (shared by both trainers)
+selfplay.py  play_episode → EpisodeSamples (the only episode struct)
+worker.py    spawn-pool + worker globals + state<->bytes  (used by alpha_train)
 league.py    opponent pool + PFSP sampling + SPRT gating   [NEW]
-train.py / alpha_train.py   thin loops over worker.py + league.py
+alpha_train.py   thin loop over worker.py + league.py
 example.py / alpha_smoke.py  dummy fixtures + end-to-end smoke   [unchanged API]
 ```
 
@@ -211,16 +211,17 @@ Elo lives with the trainer (the learner's live rating), not on frozen entries;
 
 ---
 
-## Phase 3 — Stack-consolidation decision (deferred, flagged)
+## Phase 3 — Stack consolidation (landed and gated)
 
-Once the league makes MCTS self-play the canonical strong-agent path, the
-REINFORCE stack (`train.py` + `vs_random` half of `rollout.py` + `MaskedPolicy`)
-is largely redundant and would be the single biggest LOC/file cut (~400 LOC).
-**Do not auto-delete** — it is the cheap `vs_random` baseline/sanity loop and a
-one-way door. Surface as an explicit recommendation; execute only on user
-confirm. If retained, it still benefits from Phases 1a/1b/1e and is the only
-remaining consumer of `EpisodeBatch`/`MaskedPolicy`/`RolloutPool` (~485 LOC);
-removing it is the single biggest LOC/file cut left.
+**Status:** done (user-confirmed). With the league making MCTS self-play the
+canonical strong-agent path, the REINFORCE stack was redundant. Removed
+`train.py` + `rollout.py` (485 LOC, −2 files) and trimmed `MaskedPolicy` +
+`PolicyConfig` out of `net.py` and its `__init__`/README exports. `EpisodeBatch`
+and `RolloutPool` are gone; `selfplay.EpisodeSamples` is the only episode struct
+left. Gated via `app.rl.alpha_smoke` (16 checks) + `pytest tests/rl/` (12). This
+was the single biggest LOC/file cut and a one-way door (removes the cheap
+`vs_random` baseline), so it was surfaced as a recommendation and executed only
+on user confirm.
 
 ---
 

@@ -11,7 +11,7 @@ from app.rl.draft import (
     Side,
 )
 from app.rl.mcts import MCTS, MCTSConfig, visit_policy
-from app.rl.net import MaskedPolicy, PolicyConfig, encode_obs, obs_dim
+from app.rl.net import encode_obs, obs_dim
 from app.rl.pool import (
     DEFAULT_POOL_PATH,
     ChampionPool,
@@ -56,9 +56,7 @@ __all__ = [
     "EpisodeSamples",
     "MCTS",
     "MCTSConfig",
-    "MaskedPolicy",
     "OptimizationResult",
-    "PolicyConfig",
     "PoolEntry",
     "Predictor",
     "RewardMode",
