@@ -24,11 +24,12 @@ indices into the `champion_ids` tuple, not raw champion IDs. Real
 champion IDs (sparse, 1..950) are only resolved at the predictor
 boundary.
 
-Internal state is a single `int8` ownership vector of shape
-`(n_champions,)` with codes `{0: AVAILABLE, 1: BLUE_BAN, 2: RED_BAN, 3:
-BLUE_PICK, 4: RED_PICK}`. The four pick/ban index arrays and the
-available mask in the observation are derived from it on each `_obs`
-call, so all four are always consistent with each other.
+Internal state is a `DraftState` (defined in `draft.py`), which holds four
+Python lists: `blue_picks`, `red_picks`, `blue_bans`, `red_bans` (positional
+champion indices), plus an `int8` `available` vector of shape `(n_champions,)`
+that is the legal mask (`1` = selectable, `0` = taken), and `step_idx`.
+`DraftState.to_obs()` produces the observation dict. The `DraftEnv` is a thin
+gym wrapper over `DraftState`.
 
 ## Draft Sequence
 
@@ -71,14 +72,10 @@ Enemy roles and builds are never exposed during the draft.
 
 ## Action
 
-`Discrete(n_champions)`. Legal actions are indices whose
-`available_mask` bit is `1`. `env.get_action_mask()` returns a bool
-vector that the policy must respect.
-
-If an illegal action is passed to `step()`:
-
-- Reward = `illegal_action_penalty` (default `-1.0`).
-- Episode terminates if `terminate_on_illegal=True` (default).
+`Discrete(n_champions)`. Legal actions are indices whose `available_mask` bit
+is `1`. `env.get_action_mask()` returns a bool vector that the policy must
+respect. `DraftState.apply()` validates legality and raises `ValueError` on a
+masked (illegal) action.
 
 ## Champion Pool
 
@@ -209,7 +206,7 @@ Architecture:
 
 | Piece | File | Purpose |
 | --- | --- | --- |
-| Policy | `policy.py` | Torch MLP, masked categorical sampling |
+| Policy | `net.py` | Torch MLP, masked categorical sampling |
 | Workers | `rollout.py` | Persistent `multiprocessing.Pool`, one env + policy per worker |
 | Trainer | `train.py` | REINFORCE + baseline + entropy, TensorBoard + JSONL logging |
 
@@ -347,6 +344,16 @@ AlphaTrainConfig(
     batch_size=256,
     epochs_per_iter=2,
     value_loss_coef=1.0,
+    # Adversarial league (off by default)
+    league=False,
+    league_dir=None,
+    self_play_frac=0.5,
+    eval_games=64,
+    promote_every=5,
+    elo0=0.0,
+    elo1=15.0,
+    sprt_alpha=0.05,
+    sprt_beta=0.05,
     # Persistence
     run_name=None,
     save_every=5,
@@ -390,26 +397,55 @@ python -m app.rl.alpha_smoke
 
 It validates: device auto-selection, full 20-step legal draft sequence,
 legal-action masking on every search policy, terminal reward in range,
-one full self-play episode, and one learner update with finite losses
-that does not increase total loss.
+one full self-play episode, one learner update with finite losses
+that does not increase total loss, and the adversarial league round-trip.
 
 ### Files
 
 | File | Contents |
 | --- | --- |
-| `draft.py` | `Side`, `ActionType`, `DraftStep`, `DRAFT_SEQUENCE` |
+| `draft.py` | `Side`, `ActionType`, `DraftStep`, `DRAFT_SEQUENCE`, and `DraftState` (the single transition state) |
 | `pool.py` | `ChampionPool`, `PoolEntry`, `load_pool`, `build_pool_from_catalog` |
-| `reward.py` | `Predictor`, `RoleBuildConfig`, `make_pool_sampler`, `resolve_rewards` |
-| `env.py` | `DraftEnv`, `DraftEnvConfig` (int8 ownership vector internally) |
-| `policy.py` | `MaskedPolicy`, `encode_obs` (REINFORCE policy) |
+| `reward.py` | `Predictor` (optional `predict_batch`), `RoleBuildConfig`, `make_pool_sampler`, `resolve_rewards` (batched) |
+| `net.py` | `MaskedPolicy`, `AlphaZeroNet`, `encode_obs`, `auto_device` (was `policy.py` + `alpha_net.py`) |
+| `env.py` | `DraftEnv`, `DraftEnvConfig` (thin gym wrapper over `DraftState`) |
+| `mcts.py` | `MCTS` (PUCT + beam), `visit_policy` |
+| `worker.py` | shared spawn-pool + `state_to_bytes`/`bytes_to_state` (used by both trainers) |
+| `selfplay.py` | `play_episode`, `EpisodeSamples` |
 | `rollout.py` | `RolloutPool`, persistent multiprocessing workers (REINFORCE) |
 | `train.py` | REINFORCE training loop with TensorBoard + JSONL |
-| `alpha_net.py` | `AlphaZeroNet`, `auto_device` (CUDA/MPS/CPU) |
-| `mcts.py` | `DraftState`, `MCTS` (PUCT + beam), `visit_policy` |
-| `selfplay.py` | `play_episode`, `EpisodeSamples` |
+| `league.py` | adversarial opponent pool: PFSP sampling + SPRT promotion + Elo |
 | `alpha_train.py` | AlphaZero training loop + `AlphaTrainConfig` |
 | `alpha_smoke.py` | End-to-end smoke test (no ClickHouse) |
 | `example.py` | Random episode with a dummy predictor and sampler |
+
+## Adversarial League
+
+Optional self-improvement loop (`league=True`) so the learner keeps facing a
+pool of strong, diverse frozen opponents instead of only itself — referencing
+AlphaStar PFSP and Stockfish-fishtest SPRT practices, kept lean. The
+hidden-information boundary is preserved: opponents see only public draft state.
+
+- **Pool** (`league.py`): frozen checkpoints `{path, rating, games, wins}`
+  persisted under `data/policies/league/` (`index.json` + `entry_k.pt`). The
+  current best is the champion.
+- **PFSP sampling**: each league episode samples an opponent with weight
+  proportional to `(1 - learner_winrate_vs)^p` (default p=2), concentrating
+  training on hard-but-beatable adversaries. A `self_play_frac` of episodes
+  still play vanilla self-play for stability.
+- **Asymmetric episode**: the learner plays one side with full MCTS; the frozen
+  opponent plays the other side greedily from its own policy head (no search).
+  Only learner-side steps become training samples — a clean single-agent signal.
+- **SPRT promotion**: every `promote_every` iterations the learner plays
+  `eval_games` side-balanced games vs the champion; a Wald SPRT (H0: Elo<=elo0
+  vs H1: Elo>=elo1) decides accept/reject/continue. On accept the learner is
+  snapshotted into the pool and promoted to champion. SPRT plays only as many
+  games as needed, directly serving the "fewer iterations" goal.
+- **Elo** tracks the learner's live rating and feeds PFSP weights.
+
+`league=True` forces inline generation (the parallel worker pool is used only
+for plain self-play). The `alpha_smoke` test covers the full round-trip: admit,
+PFSP sample, asymmetric episode, league generation/eval glue, and SPRT.
 
 ## Dependencies
 
