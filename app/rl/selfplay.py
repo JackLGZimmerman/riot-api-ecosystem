@@ -4,6 +4,11 @@ Each episode plays one full draft using PUCT MCTS at every step. The
 sample stored per step is ``(features, search_policy, mask,
 acting_side)``. After the terminal step, the per-side reward from the
 predictor is broadcast back as the value target.
+
+League mode: pass ``opponent_net`` + ``learner_side`` to have a frozen
+opponent play the other side greedily (no search, no recorded samples) —
+only learner-side steps become training data, mirroring a clean
+single-agent signal against a fixed adversary.
 """
 
 from __future__ import annotations
@@ -49,6 +54,8 @@ def play_episode(
     risk_lambda: float = 0.5,
     sampler: RoleBuildSampler | None = None,
     optimizer: RoleBuildOptimizer | None = None,
+    opponent_net: AlphaZeroNet | None = None,
+    learner_side: Side | None = None,
     rng: np.random.Generator | None = None,
 ) -> EpisodeSamples:
     rng = rng or np.random.default_rng()
@@ -72,6 +79,11 @@ def play_episode(
     sides: list[int] = []
 
     while not state.is_terminal():
+        # League mode: the frozen opponent plays its side greedily; those
+        # steps are not recorded, keeping a clean single-agent signal.
+        if opponent_net is not None and state.current_side() != learner_side:
+            state.apply(_greedy_action(opponent_net, state, n_champions, device))
+            continue
         _, visits = mcts.run(state)
         legal = state.legal_mask()
         temperature = (
@@ -104,3 +116,14 @@ def play_episode(
         red_reward=float(rewards[Side.RED]),
         info={"blue_picks": list(state.blue_picks), "red_picks": list(state.red_picks)},
     )
+
+
+@torch.no_grad()
+def _greedy_action(
+    net: AlphaZeroNet, state: DraftState, n_champions: int, device: torch.device
+) -> int:
+    """Frozen-opponent move: argmax of the masked policy head (no search)."""
+    feat = torch.from_numpy(encode_obs(state.to_obs(), n_champions))[None].to(device)
+    logits, _ = net(feat)
+    legal = torch.from_numpy(state.legal_mask()).to(device)
+    return int(torch.argmax(logits[0].masked_fill(~legal, -1e9)).item())

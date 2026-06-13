@@ -145,8 +145,12 @@ New `league.py` + minimal `alpha_train.py` hooks. Reuses the Phase-1 unified
 net + worker + DraftState. Stockfish/AlphaStar practices, kept lean.
 
 **Status:** 2a `league.py` (PFSP + SPRT + Elo) **landed and gated**
-(`tests/rl/test_league.py`, torch-free, 4 tests). 2b = the `alpha_train.py` +
-`selfplay.py` integration below (next packet).
+(`tests/rl/test_league.py`, torch-free, 4 tests). 2b **landed and gated**:
+`selfplay.play_episode` gained `opponent_net`/`learner_side` (frozen greedy
+opponent, learner-only samples); `alpha_train` gained the league config block,
+`_load_opponent`/`_generate_league`/`_eval_vs_champion`, and the SPRT-gated
+promotion loop; `alpha_smoke` covers admit → PFSP → asymmetric episode →
+generation/eval glue → SPRT (16 checks). `league=True` forces inline generation.
 
 ### Concepts
 

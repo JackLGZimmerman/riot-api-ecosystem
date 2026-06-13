@@ -30,6 +30,8 @@ import torch.nn.functional as F
 from app.core.config.settings import PROJECT_ROOT
 from app.core.logging.logger import setup_logging_config
 from app.ml.predictor import load_predictor
+from app.rl.draft import Side
+from app.rl.league import League, elo_update, sprt
 from app.rl.net import AlphaNetConfig, AlphaZeroNet, auto_device
 from app.rl.mcts import MCTSConfig
 from app.rl.pool import DEFAULT_POOL_PATH, load_pool
@@ -69,6 +71,16 @@ class AlphaTrainConfig:
     batch_size: int = 256
     epochs_per_iter: int = 2
     value_loss_coef: float = 1.0
+    # Adversarial league (off by default; forces inline generation)
+    league: bool = False
+    league_dir: Path | None = None
+    self_play_frac: float = 0.5
+    eval_games: int = 64
+    promote_every: int = 5
+    elo0: float = 0.0
+    elo1: float = 15.0
+    sprt_alpha: float = 0.05
+    sprt_beta: float = 0.05
     # Persistence
     run_name: str | None = None
     save_every: int = 5
@@ -177,6 +189,89 @@ def _generate_inline(
     return out
 
 
+# ---- adversarial league ----------------------------------------------
+
+
+def _load_opponent(
+    path: str, net_cfg: AlphaNetConfig, device, cache: dict[str, AlphaZeroNet]
+) -> AlphaZeroNet:
+    """Instantiate + load a frozen league checkpoint, cached by path."""
+    net = cache.get(path)
+    if net is None:
+        net = AlphaZeroNet(net_cfg).to(device).eval()
+        net.load_state_dict(bytes_to_state(Path(path).read_bytes(), map_location=device))
+        cache[path] = net
+    return net
+
+
+def _league_episode(
+    net, opp, predictor, n_champions, champion_ids, cfg, device, sampler, learner_side, rng
+) -> tuple[EpisodeSamples, float]:
+    """One asymmetric episode (learner=MCTS, opponent=frozen greedy). Returns
+    the learner-side samples and the learner's terminal reward."""
+    ep = play_episode(
+        net, predictor,
+        n_champions=n_champions, champion_ids=champion_ids,
+        mcts_cfg=_mcts_cfg(cfg), device=device,
+        reward_mode=cfg.reward_mode, risk_lambda=cfg.risk_lambda, sampler=sampler,
+        opponent_net=opp, learner_side=learner_side, rng=rng,
+    )
+    reward = ep.blue_reward if learner_side == Side.BLUE else ep.red_reward
+    return ep, reward
+
+
+def _generate_league(
+    net, predictor, n_champions, champion_ids, cfg, device, base_seed,
+    sampler, league: League, net_cfg, opp_cache,
+) -> list[EpisodeSamples]:
+    """Inline generation mixing self-play with PFSP asymmetric episodes."""
+    out: list[EpisodeSamples] = []
+    net.eval()
+    for i in range(cfg.episodes_per_iter):
+        rng = np.random.default_rng(base_seed + i)
+        if not league.entries or rng.random() < cfg.self_play_frac:
+            out.append(
+                play_episode(
+                    net, predictor,
+                    n_champions=n_champions, champion_ids=champion_ids,
+                    mcts_cfg=_mcts_cfg(cfg), device=device,
+                    reward_mode=cfg.reward_mode, risk_lambda=cfg.risk_lambda,
+                    sampler=sampler, rng=rng,
+                )
+            )
+            continue
+        idx, entry = league.sample_opponent(rng)
+        opp = _load_opponent(entry.path, net_cfg, device, opp_cache)
+        learner_side = Side.BLUE if rng.random() < 0.5 else Side.RED
+        ep, reward = _league_episode(
+            net, opp, predictor, n_champions, champion_ids, cfg, device,
+            sampler, learner_side, rng,
+        )
+        league.record(idx, reward > 0)
+        out.append(ep)
+    return out
+
+
+def _eval_vs_champion(
+    net, champion_net, predictor, n_champions, champion_ids, cfg, device, sampler, base_seed
+) -> tuple[int, int, int]:
+    """Side-balanced learner-vs-champion match; returns (wins, losses, draws)."""
+    wins = losses = draws = 0
+    for i in range(cfg.eval_games):
+        learner_side = Side.BLUE if i % 2 == 0 else Side.RED
+        _, reward = _league_episode(
+            net, champion_net, predictor, n_champions, champion_ids, cfg, device,
+            sampler, learner_side, np.random.default_rng(base_seed + i),
+        )
+        if reward > 0:
+            wins += 1
+        elif reward < 0:
+            losses += 1
+        else:
+            draws += 1
+    return wins, losses, draws
+
+
 # ---- training loop ---------------------------------------------------
 
 
@@ -244,8 +339,23 @@ def train(cfg: AlphaTrainConfig) -> Path:
     log_path = RL_DATA_DIR / "logs" / f"{run_name}.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # League setup: load (or bootstrap) the opponent pool and the live Elo.
+    league_dir = cfg.league_dir or (ckpt_dir / "league")
+    learner_rating = cfg.elo0
+    opp_cache: dict[str, AlphaZeroNet] = {}
+    league: League | None = None
+    if cfg.league:
+        league = League.load(league_dir)
+        if not league.entries:
+            league.admit(
+                state_to_bytes({k: v.cpu() for k, v in net.state_dict().items()}),
+                learner_rating, league_dir,
+            )
+            league.save(league_dir)
+        learner_rating = league.champion.rating
+
     pool = None
-    if cfg.n_workers > 1:
+    if cfg.n_workers > 1 and not cfg.league:
         pool = make_spawn_pool(
             cfg.n_workers,
             _worker_init,
@@ -256,7 +366,12 @@ def train(cfg: AlphaTrainConfig) -> Path:
         for it in range(cfg.iterations):
             t0 = time.time()
             base_seed = 10_000 * (it + 1)
-            if pool is not None:
+            if league is not None:
+                samples = _generate_league(
+                    net, predictor, n_champions, champion_ids, cfg, device,
+                    base_seed, inline_sampler, league, net_cfg, opp_cache,
+                )
+            elif pool is not None:
                 weights = state_to_bytes(
                     {k: v.cpu() for k, v in net.state_dict().items()}
                 )
@@ -303,6 +418,40 @@ def train(cfg: AlphaTrainConfig) -> Path:
                 metrics["policy_loss"],
                 metrics["value_loss"],
             )
+
+            # SPRT-gated promotion: eval vs champion, update Elo, admit on accept.
+            if league is not None and (it + 1) % cfg.promote_every == 0:
+                champ_net = _load_opponent(
+                    league.champion.path, net_cfg, device, opp_cache
+                )
+                w, l, d = _eval_vs_champion(
+                    net, champ_net, predictor, n_champions, champion_ids, cfg,
+                    device, inline_sampler, 900_000 * (it + 1),
+                )
+                score = (w + 0.5 * d) / max(w + l + d, 1)
+                learner_rating, _ = elo_update(
+                    learner_rating, league.champion.rating, score
+                )
+                verdict = sprt(
+                    w, l, d, elo0=cfg.elo0, elo1=cfg.elo1,
+                    alpha=cfg.sprt_alpha, beta=cfg.sprt_beta,
+                )
+                logger.info(
+                    "league eval w=%d l=%d d=%d score=%.3f elo=%.1f verdict=%s",
+                    w, l, d, score, learner_rating, verdict,
+                )
+                if verdict == "accept":
+                    league.admit(
+                        state_to_bytes(
+                            {k: v.cpu() for k, v in net.state_dict().items()}
+                        ),
+                        learner_rating, league_dir,
+                    )
+                    league.save(league_dir)
+                    logger.info(
+                        "PROMOTED -> champion (entries=%d, elo=%.1f)",
+                        len(league.entries), learner_rating,
+                    )
 
             if (it + 1) % cfg.save_every == 0 or (it + 1) == cfg.iterations:
                 ckpt = ckpt_dir / f"{run_name}.pt"

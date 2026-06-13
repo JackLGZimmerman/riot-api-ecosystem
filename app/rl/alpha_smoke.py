@@ -7,6 +7,7 @@ Validates, without ClickHouse, that:
   4. One self-play episode round-trips into trainable tensors.
   5. One learner update reduces total loss.
   6. Device auto-selection picks a torch device.
+  7. The adversarial league round-trips (admit, PFSP, asymmetric episode, SPRT).
 
 Run:
     python -m app.rl.alpha_smoke
@@ -16,15 +17,27 @@ from __future__ import annotations
 
 import logging
 import sys
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
 
+from dataclasses import replace
+
 from app.rl.net import AlphaNetConfig, AlphaZeroNet, auto_device
-from app.rl.alpha_train import AlphaTrainConfig, _mcts_cfg, _update
-from app.rl.draft import DRAFT_SEQUENCE
+from app.rl.alpha_train import (
+    AlphaTrainConfig,
+    _eval_vs_champion,
+    _generate_league,
+    _mcts_cfg,
+    _update,
+)
+from app.rl.draft import DRAFT_SEQUENCE, Side
 from app.rl.example import dummy_predictor, dummy_sampler
+from app.rl.league import League, sprt
 from app.rl.selfplay import play_episode
+from app.rl.worker import bytes_to_state, state_to_bytes
 
 logger = logging.getLogger("alpha_smoke")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -105,8 +118,65 @@ def main() -> int:
         f"single update did not increase total loss ({before:.4f} -> {after:.4f})",
     )
 
+    _league_smoke(net, net_cfg, train_cfg, n_champions, champion_ids, device)
+
     logger.info("ALL SMOKE CHECKS PASSED")
     return 0
+
+
+def _league_smoke(net, net_cfg, train_cfg, n_champions, champion_ids, device) -> None:
+    """Admit a frozen entry, PFSP-sample it, play an asymmetric episode, SPRT."""
+    state_bytes = state_to_bytes({k: v.cpu() for k, v in net.state_dict().items()})
+    with tempfile.TemporaryDirectory() as tmp:
+        league = League()
+        league.admit(state_bytes, 0.0, tmp)
+        _assert(league.champion is not None, "league admit set a champion")
+
+        idx, entry = league.sample_opponent(np.random.default_rng(1))
+        _assert(0 <= idx < len(league.entries), "PFSP sampled a valid opponent")
+
+        opp = AlphaZeroNet(net_cfg).to(device).eval()
+        opp.load_state_dict(
+            bytes_to_state(Path(entry.path).read_bytes(), map_location=device)
+        )
+        ep = play_episode(
+            net, dummy_predictor,
+            n_champions=n_champions, champion_ids=champion_ids,
+            mcts_cfg=_mcts_cfg(train_cfg), device=device, sampler=dummy_sampler,
+            opponent_net=opp, learner_side=Side.BLUE, rng=np.random.default_rng(2),
+        )
+        _assert(
+            not bool(((ep.policy_targets > 0) & ~ep.masks).any()),
+            "asymmetric episode: every recorded action is legal",
+        )
+        _assert(
+            bool((ep.sides == int(Side.BLUE)).all()),
+            "asymmetric episode records only learner-side steps",
+        )
+
+        _assert(
+            sprt(8, 2, 0) in {"accept", "reject", "continue"},
+            "sprt returns a valid verdict",
+        )
+
+        # End-to-end glue: force the PFSP branch and run a tiny eval match.
+        cfg = replace(train_cfg, self_play_frac=0.0, episodes_per_iter=2, eval_games=2)
+        samples = _generate_league(
+            net, dummy_predictor, n_champions, champion_ids, cfg, device,
+            7, dummy_sampler, league, net_cfg, {},
+        )
+        _assert(len(samples) == cfg.episodes_per_iter, "league generation made one sample set per episode")
+        _assert(league.entries[idx].games > 0, "PFSP episodes recorded an H2H result")
+
+        w, l, d = _eval_vs_champion(
+            net, opp, dummy_predictor, n_champions, champion_ids, cfg, device,
+            dummy_sampler, 11,
+        )
+        _assert(w + l + d == cfg.eval_games, "eval played the requested number of games")
+
+        n_before = len(league.entries)
+        league.admit(state_bytes, 5.0, tmp)
+        _assert(len(league.entries) == n_before + 1, "admit grows the pool")
 
 
 def _loss_only(net, episode, cfg: AlphaTrainConfig, device) -> float:
