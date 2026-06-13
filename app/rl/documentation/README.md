@@ -81,7 +81,7 @@ masked (illegal) action.
 
 Each champion has a per-role, per-build eligibility set — most
 champions only see play in 1-2 roles, and each role has a small set of
-realistic builds. The pool is a JSON file checked into the repo:
+realistic builds. The pool is generated local data at:
 
 ```text
 app/rl/data/champion_pool.json
@@ -89,7 +89,8 @@ app/rl/data/champion_pool.json
 
 Format: `{ "champion_id": [["ROLE", build_id, weight], ...] }`. Weights
 are relative likelihoods within a champion; `make_pool_sampler` uses
-them to rank (role-assignment, build-assignment) combinations.
+them to rank (role-assignment, build-assignment) combinations. The generated
+pool is ignored by git; regenerate it after catalog changes.
 
 Generate from the priors:
 
@@ -237,7 +238,8 @@ python -m app.rl.alpha_train
 ```
 
 Checkpoints land in `app/rl/data/policies/{run_name}.pt` and metrics
-in `app/rl/data/logs/{run_name}.jsonl`.
+in `app/rl/data/logs/{run_name}.jsonl`; both paths are generated local data
+and ignored by git.
 
 ### `AlphaTrainConfig`
 
@@ -297,7 +299,8 @@ weights once per iteration.
 
 Per iteration, one JSONL row with `policy_loss`, `value_loss`,
 `grad_norm`, `blue_reward_mean`, `red_reward_mean`, `play_sec`,
-`update_sec`. Checkpoints every `save_every` iterations.
+`update_sec`. Checkpoints every `save_every` iterations. These outputs are
+local run artifacts, not maintained repository fixtures.
 
 ### Predictor reward usage
 
@@ -348,8 +351,8 @@ AlphaStar PFSP and Stockfish-fishtest SPRT practices, kept lean. The
 hidden-information boundary is preserved: opponents see only public draft state.
 
 - **Pool** (`league.py`): frozen checkpoints `{path, rating, games, wins}`
-  persisted under `data/policies/league/` (`index.json` + `entry_k.pt`). The
-  current best is the champion.
+  persisted locally under `data/policies/league/` (`index.json` + `entry_k.pt`).
+  The current best is the champion.
 - **PFSP sampling**: each league episode samples an opponent with weight
   proportional to `(1 - learner_winrate_vs)^p` (default p=2), concentrating
   training on hard-but-beatable adversaries. A `self_play_frac` of episodes

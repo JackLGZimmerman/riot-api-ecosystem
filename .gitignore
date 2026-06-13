@@ -121,5 +121,8 @@ app/ml/data/experiments/
 app/ml/data/cache/
 app/classification/data/embeddings/
 
-# Generated RL artifacts (python -m app.rl.pool generate)
+# Generated RL artifacts
 app/rl/data/champion_pool.json
+app/rl/data/logs/
+app/rl/data/policies/
+app/rl/data/runs/
