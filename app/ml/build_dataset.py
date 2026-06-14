@@ -22,6 +22,7 @@ from app.ml.cache_layout import (
 )
 from app.ml.config import DatasetConfig
 from app.ml.encoder_sidecar import EncoderSidecarLookup
+from app.ml.patch_features import feature_metadata, write_patch_feature_arrays
 from app.core.utils.smoothing import smooth_rate_by_mode
 from clickhouse_connect.driver.exceptions import StreamFailureError
 
@@ -328,6 +329,7 @@ def _write_meta(
                 "split_ranges": split_ranges,
                 "identity": identity,
                 "identity_encoder_sidecar": sidecar_meta,
+                "production_features": feature_metadata(),
                 "smoothing": {
                     "prior_mean": cfg.smoothing_prior_mean,
                     "prior_strength": cfg.smoothing_prior_strength,
@@ -394,6 +396,13 @@ def build(cfg: DatasetConfig | None = None) -> Path:
             )
         offset += written
         logger.info("Wrote split %s: %d games", split_name, written)
+
+    write_patch_feature_arrays(
+        cfg=cfg,
+        arrays=arrays,
+        split_counts=counts,
+        split_order=SPLIT_ORDER,
+    )
 
     for array in arrays.values():
         flush = getattr(array, "flush", None)

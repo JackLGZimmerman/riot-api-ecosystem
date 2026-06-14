@@ -16,6 +16,7 @@ P1_CNT_FILE = "p1_cnt.npy"
 CHAMPION_ID_FILE = "champion_id.npy"
 BUILD_ID_FILE = "build_id.npy"
 BLUE_WIN_FILE = "blue_win.npy"
+PATCH_FEATURES_FILE = "patch_features.npy"
 IDENTITY_STATIC_SIDECAR_FILE = "identity_static_sidecar.npy"
 IDENTITY_FULL_GAME_SIDECAR_FILE = "identity_full_game_sidecar.npy"
 IDENTITY_TEMPORAL_SIDECAR_FILE = "identity_temporal_sidecar.npy"
@@ -28,6 +29,7 @@ ARRAY_FILES = {
     "champion_id": CHAMPION_ID_FILE,
     "build_id": BUILD_ID_FILE,
     "blue_win": BLUE_WIN_FILE,
+    "patch_features": PATCH_FEATURES_FILE,
 }
 
 DISK_DTYPES = {
@@ -36,6 +38,7 @@ DISK_DTYPES = {
     "champion_id": np.int16,
     "build_id": np.int16,
     "blue_win": np.uint8,
+    "patch_features": np.float32,
 }
 
 ARRAY_SHAPES = {
@@ -44,6 +47,7 @@ ARRAY_SHAPES = {
     "champion_id": (N_PLAYERS_PER_GAME,),
     "build_id": (N_PLAYERS_PER_GAME,),
     "blue_win": (),
+    "patch_features": (2,),
 }
 
 SIDECAR_ARRAY_FILES = {

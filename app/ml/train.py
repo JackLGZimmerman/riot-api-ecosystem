@@ -79,6 +79,7 @@ class RawTensorSplit:
     identity_temporal_sidecar: torch.Tensor | None = None
     identity_encoder_support: torch.Tensor | None = None
     semantic_group_features: torch.Tensor | None = None
+    patch_features: torch.Tensor | None = None
 
 
 class _SidecarGatherer:
@@ -249,7 +250,15 @@ def _drop_unused_model_arrays(
         "identity_temporal_sidecar": not requires_all_sidecars,
         "identity_encoder_support": not sidecar_enabled,
         "semantic_group_features": not semantic_group_features_enabled,
+        "patch_features": int(config.patch_feature_dim) <= 0,
     }
+    if int(config.patch_feature_dim) > 0:
+        value = split.patch_features
+        if value is None or value.ndim != 2 or value.shape[1] != int(config.patch_feature_dim):
+            raise ValueError(
+                f"HGNN config enables patch_features, but the cache is missing "
+                f"patch_features [games, {int(config.patch_feature_dim)}]; rebuild the dataset cache."
+            )
     if semantic_group_features_enabled:
         value = split.semantic_group_features
         if (
@@ -511,6 +520,8 @@ def _hgnn_config_from_meta(
         n_builds=int(meta["n_builds"]),
         build_vocab=tuple(meta["build_vocab"]),
     )
+    if int(meta.get("patch_feature_dim", 0)) > 0:
+        base["patch_feature_dim"] = int(meta["patch_feature_dim"])
     sidecar = meta.get("identity_encoder_sidecar")
     if isinstance(sidecar, dict):
         dims = sidecar.get("dims", {})
@@ -566,6 +577,7 @@ def _hgnn_inputs_from_raw(
         p1_cnt=raw.p1_cnt,
         strength=strength,
         semantic_group_features=raw.semantic_group_features,
+        patch_features=raw.patch_features,
         device=device,
         **sidecar,
     )

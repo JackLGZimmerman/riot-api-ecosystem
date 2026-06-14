@@ -26,6 +26,9 @@ class SplitData:
     # Per-slot identity ids (HGNN identity embeddings); None for legacy caches.
     champion_id: np.ndarray | None = None
     build_id: np.ndarray | None = None
+    # Production game-level residual features. Signed edge columns are already
+    # blue-minus-red; coverage columns are unsigned.
+    patch_features: np.ndarray | None = None
     # Optional frozen three-encoder sidecar blocks; None for caches built
     # without an encoder_sidecar_path.
     identity_static_sidecar: np.ndarray | None = None
@@ -61,6 +64,13 @@ def identity_meta(cfg: DatasetConfig) -> dict:
     identity = dict(meta["identity"])
     if "identity_encoder_sidecar" in meta:
         identity["identity_encoder_sidecar"] = meta["identity_encoder_sidecar"]
+    features = meta.get("production_features")
+    if isinstance(features, dict):
+        patch_names = tuple(
+            str(name) for name in features.get("patch_feature_names", ())
+        )
+        identity["patch_feature_names"] = patch_names
+        identity["patch_feature_dim"] = len(patch_names)
     return identity
 
 
@@ -180,6 +190,25 @@ def load_splits(
     for name in ("champion_id", "build_id"):
         if paths[name].exists():
             arrays[name] = np.load(paths[name], mmap_mode="r")[:n]
+    feature_meta = meta.get("production_features")
+    if isinstance(feature_meta, dict):
+        expected_patch_dim = len(feature_meta.get("patch_feature_names", ()))
+    else:
+        expected_patch_dim = 0
+    patch_path = paths["patch_features"]
+    if patch_path.exists():
+        value = np.load(patch_path, mmap_mode="r")[:n]
+        if expected_patch_dim > 0 and (value.ndim != 2 or value.shape[1] != expected_patch_dim):
+            raise ValueError(
+                f"Dataset cache patch_features must have shape [games, {expected_patch_dim}]; "
+                "rebuild the cache."
+            )
+        arrays["patch_features"] = value
+    elif expected_patch_dim > 0:
+        raise ValueError(
+            "Dataset cache metadata declares patch_features, but patch_features.npy is missing; "
+            "rebuild the cache."
+        )
     for name, path in sidecar_array_paths(cfg.cache_dir).items():
         if path.exists():
             arrays[name] = np.load(path, mmap_mode="r")[:n]

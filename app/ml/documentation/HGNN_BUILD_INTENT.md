@@ -226,8 +226,8 @@ taken, redefines the label from 15-minute time-capped purchases (primary
 label first; optionally a time-capped secondary), then: extend the label
 definition in SQL, bump the cache format (v33), regenerate the sidecar and
 semantic-context artifacts at the new identity grain, retrain 3 seeds,
-re-promote via `promote.py`, and re-run `verify_equivalence.py`-style
-no-regression checks.
+re-promote via `promote.py`, and recreate or run frozen-logit no-regression
+checks.
 
 Go/no-go inputs, all recorded in `EXPERIMENTS.md` first: Phase A's accepted
 marginal metrics and oracle references, plus a train-side check that a model
@@ -516,7 +516,8 @@ Metric promotion gates:
 - RL/search reward aggregation stays weighted by profile probabilities, with
   retained mass surfaced.
 - Training path is regression-free: train-side cache arrays untouched in
-  Phase A, and `verify_equivalence.py` passes after any model-code refactor.
+  Phase A, and a frozen-logit equivalence/no-regression check is recreated or
+  run after any model-code refactor.
 
 ## Non-Goals
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 import torch
@@ -26,6 +27,7 @@ from app.ml.semantic_group_features import (
     build_semantic_group_features,
     static_hp_range_lookups,
 )
+from app.ml.patch_features import ServingPatchFeatureProvider
 from app.ml.hgnn_model import (
     HGNNWinModel,
     build_hgnn_inputs,
@@ -36,6 +38,12 @@ from app.ml.hgnn_model import (
     resolve_device,
 )
 from app.core.utils.smoothing import smooth_rate_by_mode
+
+
+class PatchFeatureProvider(Protocol):
+    """Serves fixed draft-time patch features for HGNN patch-head artifacts."""
+
+    def features_for_batch(self, n: int) -> np.ndarray: ...
 
 
 def _team_tuples(
@@ -130,10 +138,12 @@ class WinRatePredictor:
         encoder_sidecar: EncoderSidecarLookup | None,
         semantic_context_lookup: SemanticContextRawLookup | None,
         device: str,
+        patch_feature_provider: PatchFeatureProvider | None = None,
     ) -> None:
         self._model = model.to(device).eval()
         self._priors = priors
         self._semantic_context_lookup = semantic_context_lookup
+        self._patch_feature_provider = patch_feature_provider
         self._prior_strength = prior_strength
         self._smoothing_prior_strength = smoothing_prior_strength
         self._amplification_threshold = amplification_threshold
@@ -144,6 +154,15 @@ class WinRatePredictor:
         # Identity-embedding mapping from the trained artifact's config.
         self._n_champions = model.config.n_champions
         self._n_builds = model.config.n_builds
+        self._patch_feature_dim = int(model.config.patch_feature_dim)
+        if self._patch_feature_dim > 0 and self._patch_feature_provider is None:
+            raise ValueError(
+                "HGNN checkpoint requires patch_features, but no runtime "
+                "PatchFeatureProvider was supplied. Pass load_predictor("
+                "serving_patch=(season, patch)) or patch_feature_provider=..."
+            )
+        if self._patch_feature_provider is not None:
+            self._patch_features_for_batch(1)
         # The checkpoint's build_vocab is the single canonical ordering; the
         # prior table must agree exactly, never be re-sorted into its own order.
         vocab = [str(label) for label in model.config.build_vocab]
@@ -172,6 +191,28 @@ class WinRatePredictor:
         else:
             self._semantic_hp_lookup = None
             self._semantic_range_lookup = None
+
+    def _patch_features_for_batch(self, n: int) -> np.ndarray | None:
+        if self._patch_feature_dim <= 0:
+            return None
+        if self._patch_feature_provider is None:
+            raise RuntimeError(
+                "HGNN checkpoint requires patch_features, but the predictor has "
+                "no runtime PatchFeatureProvider"
+            )
+        patch_features = np.asarray(
+            self._patch_feature_provider.features_for_batch(n),
+            dtype=np.float32,
+        )
+        expected = (int(n), self._patch_feature_dim)
+        if patch_features.shape != expected:
+            raise ValueError(
+                f"PatchFeatureProvider returned shape {patch_features.shape}; "
+                f"expected {expected}"
+            )
+        if not np.isfinite(patch_features).all():
+            raise ValueError("PatchFeatureProvider returned non-finite patch_features")
+        return patch_features
 
     def _batch_inputs(
         self,
@@ -249,6 +290,7 @@ class WinRatePredictor:
             ),
             identity_encoder_support=sidecar_support,
             semantic_group_features=semantic_group_features,
+            patch_features=self._patch_features_for_batch(n),
             device=self._device,
         )
 
@@ -365,6 +407,9 @@ class WinRatePredictor:
 def load_predictor(
     cfg: TrainConfig | None = None,
     dataset_cfg: DatasetConfig | None = None,
+    *,
+    patch_feature_provider: PatchFeatureProvider | None = None,
+    serving_patch: tuple[int, int] | None = None,
 ) -> WinRatePredictor:
     cfg = cfg or TrainConfig()
     dataset_cfg = dataset_cfg or DatasetConfig()
@@ -385,6 +430,18 @@ def load_predictor(
     semantic_context_lookup = (
         load_semantic_context_raw_lookup() if requires_semantic_context else None
     )
+    if int(model.config.patch_feature_dim) > 0 and patch_feature_provider is None:
+        if serving_patch is None:
+            raise ValueError(
+                "HGNN checkpoint requires patch_features. Supply "
+                "serving_patch=(season, patch) so a train-only patch provider "
+                "can be built, or pass patch_feature_provider explicitly."
+            )
+        patch_feature_provider = ServingPatchFeatureProvider.from_train_aggregate(
+            cfg=dataset_cfg,
+            season=int(serving_patch[0]),
+            patch=int(serving_patch[1]),
+        )
 
     return WinRatePredictor(
         model,
@@ -396,5 +453,6 @@ def load_predictor(
         prior_confidence_matchups=dataset_cfg.prior_confidence_matchups,
         encoder_sidecar=encoder_sidecar,
         semantic_context_lookup=semantic_context_lookup,
+        patch_feature_provider=patch_feature_provider,
         device=device,
     )

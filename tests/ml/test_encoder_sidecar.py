@@ -186,6 +186,7 @@ def test_hgnn_sidecar_inputs_swap_half_contract() -> None:
     full_game = rng.normal(size=(2, 10, 3)).astype(np.float32)
     temporal = rng.normal(size=(2, 10, 4)).astype(np.float32)
     support = rng.uniform(0.0, 80.0, size=(2, 10)).astype(np.float32)
+    patch_features = np.array([[0.05, 1.0]], dtype=np.float32).repeat(2, axis=0)
     group_features = rng.uniform(
         0.0,
         1.0,
@@ -202,6 +203,7 @@ def test_hgnn_sidecar_inputs_swap_half_contract() -> None:
         identity_temporal_sidecar=temporal,
         identity_encoder_support=support,
         semantic_group_features=group_features,
+        patch_features=patch_features,
     )
 
     swapped = swap_hgnn_inputs(inputs)
@@ -217,6 +219,39 @@ def test_hgnn_sidecar_inputs_swap_half_contract() -> None:
         swapped["semantic_group_features"][:, :5],
         inputs["semantic_group_features"][:, 5:],
     )
+    assert torch.allclose(
+        swapped["patch_features"][:, 0], -inputs["patch_features"][:, 0]
+    )
+    assert torch.allclose(
+        swapped["patch_features"][:, 1], inputs["patch_features"][:, 1]
+    )
+
+
+def test_hgnn_patch_features_require_batch_shape() -> None:
+    inputs = _semantic_hgnn_inputs(batch_size=2, seed=10)
+    base_inputs = {
+        key: value for key, value in inputs.items() if not key.startswith("identity_")
+    }
+    model = HGNNWinModel(
+        _semantic_moe_config(
+            use_learned_semantic_moe=False,
+            patch_feature_dim=2,
+            patch_residual_hidden=(),
+        )
+    ).eval()
+
+    with pytest.raises(ValueError, match=r"patch_features must have shape"):
+        model(
+            **base_inputs,
+            patch_features=torch.zeros((1, 2), dtype=torch.float32),
+        )
+
+    with torch.no_grad():
+        out = model(
+            **base_inputs,
+            patch_features=torch.zeros((2, 2), dtype=torch.float32),
+        )
+    assert out["patch_logit"].shape == (2,)
 
 
 def test_learned_semantic_moe_flag_disabled_preserves_old_outputs() -> None:
@@ -233,9 +268,11 @@ def test_learned_semantic_moe_flag_disabled_preserves_old_outputs() -> None:
     assert set(without_sidecars) == {
         "base_logit",
         "context_logit",
+        "patch_logit",
         "final_logit",
     }
     assert torch.allclose(without_sidecars["context_logit"], torch.zeros(2))
+    assert torch.allclose(without_sidecars["patch_logit"], torch.zeros(2))
     assert torch.allclose(
         without_sidecars["base_logit"], with_ignored_sidecars["base_logit"]
     )

@@ -33,6 +33,33 @@ class _BuildSensitiveModel:
         return {"final_logit": build_id.float().sum(dim=1) * 0.4 - 2.0}
 
 
+class _PatchSensitiveModel:
+    """Fake HGNN whose logit depends on cached game-level patch features."""
+
+    config = SimpleNamespace(
+        use_learned_semantic_moe=False,
+        use_semantic_group_features=False,
+    )
+
+    def __init__(self) -> None:
+        self.seen_patch_features: list[torch.Tensor] = []
+
+    def eval(self) -> "_PatchSensitiveModel":
+        return self
+
+    def __call__(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        patch_features = inputs["patch_features"]
+        self.seen_patch_features.append(patch_features.detach().cpu())
+        return {"final_logit": patch_features[:, 0]}
+
+
+class _RequiresPatchModel(_PatchSensitiveModel):
+    def __call__(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        if "patch_features" not in inputs:
+            raise ValueError("patch_features required")
+        return super().__call__(**inputs)
+
+
 def _p1() -> dict[tuple[int, str, str], tuple[float, int]]:
     p1: dict[tuple[int, str, str], tuple[float, int]] = {}
     for champion, position in zip(BLUE + RED, POSITIONS + POSITIONS):
@@ -67,6 +94,7 @@ def test_score_split_marginal_matches_brute_force_average() -> None:
     split = SimpleNamespace(
         champion_id=np.array([BLUE + RED, BLUE + RED], dtype=np.int64),
         blue_win=np.array([1.0, 0.0]),
+        patch_features=None,
     )
 
     scores = score_split_marginal(
@@ -98,6 +126,7 @@ def test_score_split_marginal_modal_is_top_world_probability() -> None:
     split = SimpleNamespace(
         champion_id=np.array([BLUE + RED], dtype=np.int64),
         blue_win=np.array([1.0]),
+        patch_features=None,
     )
 
     scores = score_split_marginal(
@@ -117,3 +146,60 @@ def test_score_split_marginal_modal_is_top_world_probability() -> None:
     # Modal world = all-"carry" (build id 0 everywhere) -> sigmoid(-2.0).
     assert scores.probabilities == pytest.approx([1.0 / (1.0 + np.exp(2.0))])
     assert scores.n_worlds.tolist() == [1]
+
+
+def test_score_split_marginal_repeats_patch_features_across_worlds() -> None:
+    catalog = build_catalog(_p1(), VOCAB)
+    split = SimpleNamespace(
+        champion_id=np.array([BLUE + RED, BLUE + RED], dtype=np.int64),
+        blue_win=np.array([1.0, 0.0]),
+        patch_features=np.array([[0.25, 1.0], [-0.5, 1.0]], dtype=np.float32),
+    )
+    model = _PatchSensitiveModel()
+
+    scores = score_split_marginal(
+        model,
+        split,
+        catalog,
+        _tables(),
+        strength=20.0,
+        device="cpu",
+        gatherer=None,
+        k_slot=2,
+        max_worlds=2,
+        early_stop_mass=2.0,
+        batch_rows=3,
+        log_every=0,
+    )
+
+    assert scores.probabilities == pytest.approx(
+        [1.0 / (1.0 + np.exp(-0.25)), 1.0 / (1.0 + np.exp(0.5))]
+    )
+    assert scores.n_worlds.tolist() == [2, 2]
+    seen = np.concatenate(model.seen_patch_features, axis=0)
+    assert seen.shape == (4, 2)
+    assert seen[:, 0].tolist() == pytest.approx([0.25, 0.25, -0.5, -0.5])
+
+
+def test_score_split_marginal_propagates_missing_patch_feature_failure() -> None:
+    catalog = build_catalog(_p1(), VOCAB)
+    split = SimpleNamespace(
+        champion_id=np.array([BLUE + RED], dtype=np.int64),
+        blue_win=np.array([1.0]),
+        patch_features=None,
+    )
+
+    with pytest.raises(ValueError, match="patch_features required"):
+        score_split_marginal(
+            _RequiresPatchModel(),
+            split,
+            catalog,
+            _tables(),
+            strength=20.0,
+            device="cpu",
+            gatherer=None,
+            k_slot=1,
+            max_worlds=1,
+            early_stop_mass=2.0,
+            log_every=0,
+        )

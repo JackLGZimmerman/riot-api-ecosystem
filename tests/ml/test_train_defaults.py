@@ -121,6 +121,17 @@ def test_hgnn_loader_ignores_removed_legacy_state_keys(tmp_path) -> None:
     assert strength == pytest.approx(30.0)
 
 
+def test_patch_dim_is_loaded_from_cache_metadata() -> None:
+    cfg = _hgnn_config_from_meta(
+        {
+            **_meta(),
+            "patch_feature_dim": 2,
+        },
+    )
+
+    assert cfg.patch_feature_dim == 2
+
+
 def test_batch_indices_can_cap_train_rows_per_epoch() -> None:
     batches = list(
         _batch_indices(

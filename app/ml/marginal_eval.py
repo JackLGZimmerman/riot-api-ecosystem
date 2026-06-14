@@ -181,6 +181,11 @@ def score_split_marginal(
                 hp_lookup=hp_lookup,
                 range_lookup=range_lookup,
             )
+        patch = (
+            None
+            if split.patch_features is None
+            else np.asarray(split.patch_features[:n_games][game_idx])
+        )
         sidecar = (
             gatherer.gather(
                 torch.as_tensor(champ, dtype=torch.long, device=device),
@@ -196,6 +201,7 @@ def score_split_marginal(
             p1_cnt=p1_cnt,
             strength=strength,
             semantic_group_features=semantic,
+            patch_features=patch,
             device=device,
             **sidecar,
         )

@@ -1,6 +1,6 @@
 # HGNN Experiment Guidance
 
-Last updated: 2026-06-12.
+Last updated: 2026-06-14 00:59 BST.
 
 This note records closed-lever experiment findings and the rules for future
 HGNN experiments. The goal is to keep useful conclusions while keeping
@@ -18,11 +18,173 @@ These settings recur across every record below; records only state deviations.
 | Default training recipe | lr `3e-4`, batch `16384`, `max_epochs=40`, `patience=5`, weight decay `0`, raw test-accuracy checkpointing, `--raw-tensor-cache-device cpu` (~`48s`/epoch, ~10-15 min/seed) |
 | Production model recipe | learned semantic MoE `128x32` + semantic group features (the `train.py` production overrides; `HGNNConfig` base defaults keep the MoE flags off) |
 | Split protocol | v32 per-patch chronological 80/20: train `1,318,329` / test `329,586`, no validation split; test is the model-selection split, not an untouched holdout |
-| Frozen evaluation artifacts | `app/ml/data/experiments/split_v32/` (untracked): seed checkpoints, per-seed train+test logits in `preds.npz`, `verify_equivalence.py` (the post-refactor no-regression gate) |
+| Frozen evaluation artifacts | `app/ml/data/experiments/split_v32/` (untracked): seed checkpoints and metrics; no local frozen-logit `preds.npz` is currently present, so residual probes must first create or declare their own logit artifact |
 | Probe methodology | frozen ensemble logit as offset, features train-stat standardized, ridge/IRLS logistic fit on train only, one test read; central band = ensemble `p in [0.45, 0.55]` |
 | Leakage controls | LOO-adjust any train-row feature derived from labels (cache priors already are); include a no-information control (shuffled features or logit-only recalibration) before attributing a lift to feature content |
+| Allowed pregame surface | champions, roles, bans, train-only build catalogs/candidate worlds, train-only historical aggregates over those keys, and patch/season metadata only with a runtime provider |
+| Forbidden surface | summoner spells, runes, player identity, rank, PUUID, held-out observed final builds as accepted inputs, and any post-draft/in-game stats |
 | ClickHouse | run from the repo root (`PYTHONPATH=.`); cap `max_memory_usage<=4e9` and `max_threads=2` on raw-table aggregations; `synergy_1vx` and other prior tables are small and safe |
 | Invocation | `python -m app.ml.train --seed N --model-path ... --metrics-path ...`; promotion via `python -m app.ml.promote --checkpoints <seed ckpts>` |
+
+## Accepted Pregame Baselines (2026-06-13 12:24 BST)
+
+Artifacts:
+`app/ml/data/experiments/asset_sep_marginal_test.json` and
+`app/ml/data/experiments/asset_sep_modal_test.json`. Scope: accepted
+leakage-free pregame scoring on the promoted 6-seed asset-separation artifact,
+using champions, roles, train-only build catalog worlds, train-only HGNN priors,
+and cached/provider-backed season-patch metadata required by the patch-head
+artifact. No observed held-out final builds, summoners, players, runes, rank,
+PUUID, or timeline state are used.
+
+| run | artifact | raw acc / NLL | calibrated acc / NLL | verdict |
+| --- | --- | ---: | ---: | --- |
+| marginal `W=128,k_slot=3` | `app/ml/data/experiments/asset_sep_marginal_test.json` | `56.3064%` / `0.680652` | `56.3079%` / `0.680773` | accepted primary pregame baseline |
+| modal `W=1` | `app/ml/data/experiments/asset_sep_modal_test.json` | `55.8589%` / `0.682588` | `55.9265%` / `0.682705` | accepted floor/regression guard |
+
+Controls and diagnostics: modal `W=1` is the no-marginalization floor; the
+baseline was compared against the superseded 3-seed affine row in
+`MARGINAL_LOOP.md` and later against the negative patch seed9 W=128 and W=512
+sweeps below. Retained joint mass for W=128 is mean `0.6913`, p10 `0.4642`,
+mean worlds `122.36`, and `2.98%` below the `0.35` floor.
+
+## Patch Blue-Side Residual Restore (2026-06-13 22:40 BST)
+
+A restore run added the train-only patch side-prior head back to the
+post-removal model: `patch_blue_rate_logit_delta` and
+`patch_blue_rate_coverage`, `patch_feature_dim=2`, no hidden residual layers,
+`patch_residual_max_abs_logit=0.15`. It uses only `(season, patch)` metadata
+and train-only blue-side aggregates; no player, summoner, or rune fields are
+used. Standard v32 recipe, raw test-accuracy checkpointing. Completed artifacts:
+`app/ml/data/experiments/patch_restore/seed{4,5,6,7,8,9}.metrics.json`.
+
+| run | selected epoch | observed-build test acc | observed-build test NLL |
+| --- | ---: | ---: | ---: |
+| seed 4 | 9 | `57.364%` | `0.674626` |
+| seed 5 | 12 | `57.336%` | `0.675156` |
+| seed 6 | 11 | `57.367%` | `0.675392` |
+| seed 7 | 10 | `57.430%` | `0.674341` |
+| seed 8 | 9 | `57.317%` | `0.674747` |
+| seed 9 | 10 | `57.425%` | `0.674309` |
+| mean | -- | `57.373%` | `0.674762` |
+
+Comparisons: these are observed-build diagnostics, not accepted pregame
+metrics. Against the current observed-build single-seed reference in
+`HGNN_CURRENT.md` (`57.91%` / `0.6722`), the restore is worse by roughly
+`0.48pp` accuracy and `0.0026` NLL. Against the immediately preceding local
+no-patch `split_v32` seed4-9 metric files, patch restore is only `+0.085pp`
+mean accuracy and `-0.00020` NLL, so the isolated patch-side effect is small and
+well below promotion scale.
+
+Runtime boundary fixed in the same implementation pass: patch-head checkpoints
+now require `serving_patch=(season, patch)` or an explicit
+`PatchFeatureProvider`; missing patch features fail at load/constructor time
+instead of being zero-filled. Unknown or low-support patches may legitimately
+produce `[0, 0]`, but only through the provider.
+
+Accepted pregame rescore, completed 2026-06-13 23:03 BST:
+
+| run | artifact | raw acc / NLL | calibrated acc / NLL | verdict |
+| --- | --- | ---: | ---: | --- |
+| patch restore seed 9, `W=128,k_slot=3` | `app/ml/data/experiments/20260613_2238_patch_seed9_w128/marginal_w128_seed9.json` | `55.0752%` / `0.685092` | `55.1868%` / `0.684919` | rejected: below the `W=1` modal floor and worse than the accepted W=128 baseline |
+
+Run details: accepted source `pregame_marginal_build`, catalog
+`b39d506e51eb`, `329,586` test rows, retained joint mass mean `0.6913`,
+mean worlds `122.36`, fallback slots `champion_role=3,295,306`, `role=554`,
+calibration fit on `200,000` train rows with bias `-0.08110`.
+
+Verdict: patch-side prior remains rejected for accepted pregame prediction. The
+observed-build lift is too small and the first W=128 marginal seed regresses
+below the modal floor; do not update the accepted pregame `W=128,k_slot=3` or
+modal baselines from this patch restore.
+
+## Pregame Signal Direction Audit (2026-06-13 21:50 BST)
+
+Read-only architecture/data audit under the current leakage policy:
+
+- Higher-order relation aggregates are the next plausible draft-generic probe:
+  start with train-only 1v1 and 2vX tables with champion, role, and build keys
+  only. Ignore pivot tuple element 4 (`puuid`) and all `player_*` tables.
+  Treat 2v1 as strict-gated follow-up material only and keep exact 3v1 closed
+  unless a coarser backoff table is introduced.
+  Required controls: logit-only refit, shuffled relation features, exact-only
+  vs backoff ladders, support thresholds, and global plus central-band NLL.
+- Time-capped build labels are feasible only as label diagnostics. Timeline
+  item purchases may define sampled 15-minute labels and compare agreement /
+  variance against final labels, but timeline stats and item purchases must not
+  feed accepted pregame features.
+- Encoder rebuilds are not justified yet. Existing static/full-game/temporal
+  sidecars already reach the learned semantic MoE, and prior shuffled/one-hot
+  controls showed semantic profile content is redundant with champion identity.
+  Rebuild only after a frozen residual probe finds signal beyond controls.
+
+Verdict: no new model architecture or cache array until a frozen residual probe
+clears controls. The next implementation target is a probe-only relation
+artifact, not production wiring.
+
+## Higher-Order Relation Aggregate Coverage Probe (2026-06-13 23:06 BST)
+
+Artifact:
+`app/ml/data/experiments/20260613_2306_relation_table_probe/coverage.json`.
+Scope: prebuilt aggregate tables only, train split only, no raw participant
+aggregation, no player/summoner/rune fields, and no model wiring. This is a
+support and noise-risk diagnostic for whether a frozen residual probe is worth
+building.
+
+| table | train rows | p50 / p90 support | rows `>=50` | support-weighted abs edge |
+| --- | ---: | ---: | ---: | ---: |
+| exact 1v1 | `872,555` | `2` / `48` | `85,143` (`9.76%`) | `0.0498` |
+| exact 2vX | `694,867` | `2` / `48` | `68,052` (`9.79%`) | `0.0490` |
+| exact 2v1 | `34,090,806` | `1` / `5` | `146,960` (`0.43%`) | `0.2155` |
+| exact 3v1 | `71,088,318` | `1` / `1` | `76` (`0.0001%`) | `0.4481` |
+| 1v1 no-build | `310,237` | `7` / `264` | `72,473` (`23.36%`) | `0.0355` |
+| 1v1 champion-only | `29,412` | `813` / `2,331` | `29,401` (`99.96%`) | `0.0258` |
+| 2vX build-group | `451,397` | `3` / `75` | `56,748` (`12.57%`) | `0.0400` |
+| 2vX no-build | `143,380` | `9` / `413` | `38,050` (`26.54%`) | `0.0268` |
+| 2vX champion-only | `14,703` | `1,214` / `3,950` | `14,502` (`98.63%`) | `0.0200` |
+
+Interpretation: exact build-key 1v1 and 2vX have enough high-support rows to
+justify a frozen residual probe with empirical-Bayes shrinkage and backoff.
+Exact 2v1/3v1 tables are mostly one-off combinations; their large raw edge is
+likely sparsity noise and should not be wired directly. If used at all, 2v1 must
+enter behind strict support gates and shuffled-relation controls; exact 3v1 is
+closed unless a much coarser backoff table is introduced.
+
+Next probe shape: create a frozen-logit artifact first, then fit train-only
+relation features with logit-only and shuffled controls. Candidate feature order
+is exact 1v1 + exact 2vX, then no-build/build-group/champion backoffs; defer 2v1
+and skip exact 3v1 for the first pass.
+
+Controls/verdict: no shuffled or logit-only residual control was run in this
+coverage pass because it was not a predictive feature fit. Treat the artifact as
+support/noise-risk evidence only. It authorizes a frozen residual probe for
+1v1+2vX with controls; it does not authorize production model wiring.
+
+## Marginal Catalog Sweep (2026-06-14 00:58 BST)
+
+Artifact:
+`app/ml/data/experiments/20260613_2308_w512_catalog/marginal_w512_k3_raw.json`.
+Scope: accepted leakage-free pregame marginal scoring only; inputs are
+champions, roles, the train-only build catalog, and cached/provider-backed
+season-patch metadata required by the current patch-head artifact. No observed
+final builds, players, summoners, runes, rank, PUUID, or timeline state are
+used. Single raw eval, no calibration fit, full v32 test split.
+
+| run | worlds | `k_slot` | raw acc | raw NLL | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| catalog sweep | `512` | `3` | `55.4529%` | `0.683566` | rejected |
+
+Details: retained joint mass mean `0.7823`, p10 `0.6107`, p50 `0.8136`,
+mean worlds `435.22`, low-mass share `0.253%`, fallback slots
+`champion_role=3,295,306`, `role=554`.
+
+Verdict: larger catalog coverage did not translate into better pregame
+prediction for the current patch-head artifact. It is below the accepted raw
+`W=128,k_slot=3` baseline (`56.3064%` / `0.680652`) and below the modal floor
+on both accuracy and NLL (`55.8589%` / `0.682588`). Close `W=512,k_slot=3` as
+an evaluation-refinement lever; do not promote it or spend more GPU on
+`W=512,k_slot=5` unless a separate model-side change first improves the raw
+W=128 surface.
 
 ## Historical Finding: Semantic-Boundary Targets (pre-v32)
 
@@ -306,10 +468,12 @@ surface, so this amounts to boosting), draft-sequence/pick-order information
 headroom most plausibly requires new draft-generic information rather than
 residual heads on current features.
 
-Artifacts: `app/ml/data/experiments/split_v32/` (untracked) — seed
-checkpoints, `preds.npz`, and `verify_equivalence.py` (the no-regression gate
-for the promoted ensemble). The probe runners were removed after these
-conclusions were recorded.
+Artifacts: `app/ml/data/experiments/split_v32/` (untracked) — local seed
+checkpoints and metrics. The frozen-logit `preds.npz` and
+`verify_equivalence.py` gate referenced by the original probe notes are not
+present in the current working tree; recreate a frozen-logit artifact before
+running new residual probes that depend on it. The probe runners were removed
+after these conclusions were recorded.
 
 ## Production Promotion: 3-Seed Ensemble + Side Calibration (2026-06-11, superseded)
 
@@ -319,10 +483,10 @@ logit-mean ensemble with a train-fitted affine logit calibration — scale
 `1.1686`, bias `-0.0432`, where the bias is the blue-side intercept that
 team-swap augmentation suppresses. Test accuracy `0.58260` and test NLL
 `0.67105`, vs `0.5788` / `0.6723` for the single-seed mean.
-`split_v32/verify_equivalence.py` re-checks the artifact against the frozen
-seed logits and recorded metrics after any model-code change. Superseded by
-the 6-seed bias-only promotion below (2026-06-12), which also showed the
-train-fitted *scale* in this round was in-sample-optimistic.
+That round used a frozen-logit no-regression check that is not present in the
+current local artifact directory. Superseded by the 6-seed bias-only promotion
+below (2026-06-12), which also showed the train-fitted *scale* in this round was
+in-sample-optimistic.
 
 ## Pregame Build Marginalisation (2026-06-12)
 
@@ -356,17 +520,18 @@ Readings:
   `+0.01pp`), whereas modal scoring is overconfident (fitted scale `0.867`).
   Probability-space averaging supplies the variance reduction itself.
 - Retained joint mass at `W=128`: mean `0.691`, p10 `0.464`, `3.0%` of games
-  below the `0.35` low-confidence floor, mean `122` worlds/game. Raising
-  `W`/`k_slot` buys more mass at linear GPU cost (full test + 200k-game
-  calibration took ~40 min on CUDA at `W=128`); the modal→128 trend suggests
-  small further gains — measure `W=512` before relying on it.
+  below the `0.35` low-confidence floor, mean `122` worlds/game. A later
+  `W=512,k_slot=3` sweep (2026-06-14 record above) bought more retained mass
+  but regressed metrics, so world-count expansion is closed as a standalone
+  lever.
 - Per-slot fallback was almost never needed on test (`554` role-fallback
   slots out of `3.3M`, no global) — train support covers the test
   champion-role surface.
 
-Follow-ups deliberately not taken here: `W=512` sweep, and the Phase B
-time-capped (pregame-legal) build label, which is the only lever that can
-close any of the oracle gap rather than just approximate the prior.
+Follow-up status: the `W=512` sweep was later taken and rejected; the Phase B
+time-capped build-label diagnostic remains gated because it is the only
+build-label lever that can close any of the oracle gap rather than just
+approximate the prior.
 
 The table above was measured against the then-production 3-seed artifact;
 the 2026-06-12 promotion (below) moved production to the 6-seed bias-only
@@ -423,7 +588,7 @@ decision under the v32 protocol; test is the selection split):
 | 3-seed 4/5/6, affine train-fit (incumbent) | `1.1686` | `-0.0432` | `0.58260` | `0.671053` |
 | 3-seed 4/5/6, bias-only | `1.0` | `-0.0475` | `0.58254` | `0.670174` |
 | 6-seed 4-9, affine train-fit | `1.2143` | `-0.0437` | `0.58349` | `0.670484` |
-| **6-seed 4-9, bias-only (promoted)** | `1.0` | `-0.0488` | **`0.58367`** | **`0.669642`** |
+| 6-seed 4-9, bias-only (loadout+patch, superseded 2026-06-13) | `1.0` | `-0.0488` | `0.58367` | `0.669642` |
 | 3-seed 7/8/9, bias-only (replication) | `1.0` | `-0.0503` | `0.58308` | `0.670020` |
 
 Seeds 7/8/9 are fresh default-recipe runs (`0.5799/0.5795/0.5791` single-seed
@@ -432,8 +597,28 @@ across seed draws). Bias-only beats affine for both ensemble sizes
 (`-0.0009` NLL, accuracy within noise), and ensemble size keeps paying at a
 diminishing rate (`1->3` seeds `+0.26pp`, `3->6` `+0.11pp`). `promote.py`
 defaults to `--calibration bias`; `--calibration affine` remains available.
-`split_v32/verify_equivalence.py` is updated to the new artifact and passes
-(`max |logit diff| 3.9e-07`).
+
+**Asset separation + patch restore (2026-06-13).** The summoner-spell/rune
+loadout head was removed permanently as measured noise (draft-generic policy);
+the season/patch blue-side head was first removed alongside it, then restored
+after the loadout-free ensemble regressed. Measured 6-seed bias-only
+promotions on the v32 cache:
+
+| ensemble | scale | bias | test acc | test NLL |
+| --- | ---: | ---: | ---: | ---: |
+| loadout + patch (pre-removal) | `1.0` | `-0.0488` | `0.58367` | `0.669642` |
+| loadout removed, patch removed | `1.0` | `~-0.049` | `0.57762` | `0.672670` |
+| **loadout removed, patch restored (promoted)** | `1.0` | `-0.0535` | **`0.57797`** | **`0.672385`** |
+
+The patch head alone recovers `+0.035pp` accuracy / `-0.0003` NLL over the
+patch-free ensemble; the bulk of the drop from `0.58367` was the loadout head,
+which stays removed. Patch-head artifacts require
+`serving_patch=(season, patch)` or an explicit `PatchFeatureProvider`, and
+missing patch features fail fast instead of being zero-filled. Supervised oracle
+eval consumes the cached per-game patch feature. Single-seed (seeds 4-9) test
+accuracy `0.5732`–`0.5743` (mean `0.5737`), NLL `0.6743`–`0.6754`.
+The previous frozen-logit equivalence script is not present locally, so any
+future promotion must recreate that no-regression check before publication.
 
 **Direction.** With the marginal surface closed, the remaining draft-generic
 data lever is higher-order relationship structure — 1v1 lane matchups and
@@ -470,10 +655,10 @@ per-game boundary decisions. They can improve threshold accuracy by moving some
 scores across `0.5`, but the direction/magnitude is not reliable enough to
 improve probability quality at the required NLL level.
 
-Future work should therefore change the data/target construction before changing
-model capacity. The next useful target surface should be split-safe, train-only,
-cross-fit where possible, and explicitly optimized for central-band NLL
-direction rather than audit-bin mean alignment.
+Historical note: at this point in the old protocol, the next idea was to change
+data/target construction before changing model capacity, with split-safe,
+train-only, cross-fit targets optimized for central-band NLL direction rather
+than audit-bin mean alignment.
 
 Status 2026-06-10: the two ceiling experiments below resolved this section's
 question — the missing precision is era freshness, not target construction.
@@ -485,7 +670,7 @@ See "Next Data Direction".
 | --- | --- |
 | `HGNN_CURRENT.md` | Production architecture and default behavior source of truth. Keep this current whenever model inputs, cache format, serving behavior, or promoted artifacts change. |
 | `EXPERIMENTS.md` (this file) | Closed-lever decision records and the rules/gates template for future experiments. |
-| `HGNN_BUILD_INTENT.md` | Build-intent leakage policy and the accepted draft-safe path. |
+| `HGNN_BUILD_INTENT.md` | Build-intent leakage policy and the accepted leakage-free pregame marginal path. |
 | `README.md` | Entry-point overview: production path, train/promote commands, cache contract. |
 
 The context-examples and group-EB audit docs and their tooling were retired on
@@ -500,8 +685,11 @@ sections above.
 Use NLL alongside accuracy as the decision gates; record both as gain and new
 total (for example `+0.26pp` and `58.26%`).
 
-- Every feature/target surface must be train-only and split-safe. Use
-  leave-one-out or cross-fit estimates when it is derived from labels.
+- Every feature/target surface must be train-only and split-safe. Use only the
+  allowed pregame surface listed above; player identity, summoners, runes, and
+  held-out observed final builds are closed even if they are technically
+  draft-visible or easy to join. Use leave-one-out or cross-fit estimates when
+  a candidate is derived from labels.
 - Probe before wiring: a frozen-ensemble residual probe (or a deliberately
   leaky oracle bound) must show gate-scale signal before any HGNN
   architecture or cache change is built for it.
@@ -529,7 +717,7 @@ Production promotion under v32 requires all of the following:
 | Test improvement | The candidate beats the promoted artifact on test accuracy and/or NLL with neither regressing materially (NLL within `+0.0002`, accuracy within `-0.05pp`). |
 | Reproducibility | Gains hold across at least three seeds (or are seed-free, like calibration/ensembling changes). |
 | Leakage review | No held-out information in any feature, prior, or calibration fit; accepted serving paths satisfy the draft-generic constraint and the build-intent leakage policy. |
-| No-regression gate | `split_v32/verify_equivalence.py` updated and passing against the new artifact. |
+| No-regression gate | Recreate or run a frozen-logit equivalence check for the candidate artifact before promotion; no local `split_v32/verify_equivalence.py` is currently present. |
 
 The pre-v32 semantic-boundary gate table (central-band validation lifts, audit
 max-gap targets) was retired with the validation split; the historical records
@@ -673,10 +861,10 @@ Findings:
   target surface.
 
 Decision: under the pre-registered step-5 validation gates the candidate is
-rejected; the one-time test confirmation was not run and test remains
-untouched for a future predeclared candidate. Per step 9, no semantic
-architecture sweep follows. The remaining levers are user-gated protocol and
-operations decisions, not model changes:
+rejected; the one-time test confirmation was not run and test remained
+untouched in that old protocol. Per step 9, no semantic architecture sweep
+followed. The remaining notes below are historical rolled-split operations
+context, not active HGNN directions under the current v32 protocol:
 
 1. Adopt a separate production-refresh promotion gate (global
    validation NLL/accuracy/AUC improvement plus non-regressing audit), under
@@ -684,20 +872,22 @@ operations decisions, not model changes:
    architecture.
 2. Keep the semantic-boundary `+0.003` gate for what it was designed for —
    group-path architecture changes — and stop applying it to data refreshes.
-3. Operations: refresh cadence well inside a patch remains the documented
-   recommendation; the rolled fine-tune (~6 minutes) makes within-patch
-   refresh cheap.
+3. Operations: refresh cadence well inside a patch was the documented
+   recommendation for that old setup; the rolled fine-tune (~6 minutes) made
+   within-patch refresh cheap.
 
 Round-2 artifacts were removed with the rolled-split experiment directory.
 
-### Player Priors Round: First Gate-Scale Signal (2026-06-10)
+### Player Priors Round: First Gate-Scale Signal (2026-06-10; policy-closed)
 
 After round 2 closed the data-refresh question, the largest unused signal was
 identified by input audit rather than architecture search: every prior in the
 model is champion-identity-keyed, so the model carried zero player-skill
 signal even though `participant_stats` records `puuid`. This round added
-draft-safe per-player priors end-to-end and found the first direction that
-moves central NLL at gate scale.
+per-player priors end-to-end and found the first direction that moved central
+NLL at gate scale. This is retained as historical evidence only: under the
+current pregame policy, player identity, rank, and PUUID-derived aggregates are
+forbidden and are not future options.
 
 Probe evidence first (validation, train-window features only): the single
 feature "blue minus red mean per-player champion-experience games"
@@ -751,7 +941,7 @@ overfit from epoch 1 (val NLL `0.67462` vs `0.66840`) and a lr-`1e-5` full
 unfreeze from player4_res was flat — the 9-param linear form on a frozen base
 is the right altitude. The one-time test confirmation is reported below.
 
-### Player Priors Round 2: Validation Gains Do Not Survive the Test Window (2026-06-10)
+### Player Priors Round 2: Validation Gains Do Not Survive the Test Window (2026-06-10; policy-closed)
 
 This round pushed the player-prior lever further and then took the one-time
 test confirmations. The headline: every player-prior head — however
@@ -801,24 +991,21 @@ decays past sign-flip within that horizon. This is the same structural
 constraint round 2 of the rolled-split work isolated for the teacher: frozen
 data, not architecture, is binding.
 
-**Verdict.** No promotion. The player-prior lever carries real draft-safe
-signal (the val gains are causal per ablation and reproduce across seeds and
-fitting methods) but cannot clear a test gate while serve-time aggregates are
-frozen at a boundary weeks in the past. Production realization requires
-continuously refreshed player dictionaries (staleness of hours, not weeks) —
-the existing user-gated data-refresh decision. Within the frozen evaluation
-protocol, extrapolating the measured coefficient decay to the test lag
-predicts a head of ~zero, i.e. no test gain is available from this lever even
-in principle.
+**Verdict.** No promotion, and now forbidden by policy. The player-prior lever
+carried real validation signal in this historical run, but it could not clear a
+test gate while serve-time aggregates were frozen at a boundary weeks in the
+past. More importantly for the current work, player identity and PUUID-derived
+features are excluded outright; do not revive this as a refreshed-dictionary
+direction.
 
-**60% gate assessment.** With player priors excluded, the validated frontier
-is warm4 at `57.9%` val / `~57.7%` test. Every remaining input axis has been
-audited: context head saturated at the draft-time ceiling, relationship
-features removed as dead, recency/level dead, role experience marginal,
-player skill blocked by staleness. The `>=60%` val+test accuracy gate in
-HGNN_CURRENT.md is not reachable under the frozen split + frozen aggregates
-protocol; the two levers that move it (rolling split refresh, refreshed
-player aggregates) are both pipeline decisions outside model training.
+**60% gate assessment.** In that historical protocol, with player priors
+excluded, the validated frontier was warm4 at `57.9%` val / `~57.7%` test.
+Context head saturated at the draft-time ceiling, relationship features had
+been removed as dead, recency/level was dead, role experience was marginal, and
+player skill was historically blocked by staleness. The old `>=60%` val+test
+accuracy gate was not reachable under frozen split + frozen aggregates without
+pipeline changes. The refreshed-player-aggregate option is now policy-closed:
+player identity and PUUID-derived features are forbidden, not active levers.
 
 Artifacts were removed with the rolled-split experiment directory. Closure
 note, 2026-06-11: the user made the draft-generic constraint permanent (no
@@ -830,10 +1017,11 @@ end-to-end. This lever is closed, not parked.
 
 Direction shift away from player-skill features: treat champion strength as a
 patch/meta freshness problem. Unlike player dictionaries, rolling champion
-aggregates stay draft-safe and fresh into val/test (strictly-before-match
-windows over public champion winrates), so a val gain here would be expected
-to transfer to test. The audit and a future-knowledge oracle bound show the
-axis carries no exploitable signal on top of the current base.
+aggregates were evaluated as historical draft-generic diagnostics
+(strictly-before-match windows over public champion winrates), so a val gain
+would have been expected to transfer to test. Any future patch/meta feature now
+requires an explicit runtime provider. The audit and a future-knowledge oracle
+bound show the axis carries no exploitable signal on top of the current base.
 
 **Existing coverage.** The model's champion-strength inputs are the frozen
 train-window `(championid, teamposition, build)` winrate prior (`synergy_1vx`)
@@ -874,8 +1062,8 @@ and conditioning cells on the match's own patch (the strongest "current
 meta" variant) changes nothing.
 
 **Verdict.** Axis closed without building the rolling pipeline: even perfect
-future knowledge of champion-role-patch winrates, leakage-free, moves val by
-`<=0.005pp` acc / `~0.00001` NLL. The base model (identity embeddings +
+future knowledge of champion-role-patch winrates, with self-inclusion removed,
+moves val by `<=0.005pp` acc / `~0.00001` NLL. The base model (identity embeddings +
 context atlas + frozen 1vX prior) already absorbs champion strength to the
 point where its residuals do not correlate with true meta drift, and the
 drift itself is too small and too team-averaged to matter. This also
@@ -958,10 +1146,10 @@ of group features + context axes + sidecar latents plateaus at `~0.0014`
 train-fit NLL with era freshness, not representation, as the binding
 constraint. This probe independently reconfirms that conclusion on a
 build-free `(champ, pos)` surface with causal controls. No candidate was
-formed; no test read was taken. The 60% gate assessment stands unchanged —
-the intercept-drift finding (`+0.166pp` from one scalar) is more evidence
-that window freshness is the only live lever, and the player-priors round
-already showed such late-window val gains can flip sign on test.
+formed; no test read was taken. Historical 60% gate note: under that old
+rolled-split protocol, the intercept-drift finding (`+0.166pp` from one scalar)
+pointed at window freshness rather than richer semantic representation, and the
+player-priors round showed late-window validation gains could flip sign on test.
 
 Note: the probe's report `auc` values are invalid in the archived JSON — the
 shared `_binary_auc(scores, targets)` helper was called with swapped

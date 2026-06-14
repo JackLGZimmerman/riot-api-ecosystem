@@ -21,6 +21,7 @@ def _split(labels: np.ndarray) -> SplitData:
         win_rate=np.zeros((n, 10), dtype=np.float32),
         p1_cnt=np.zeros((n, 10), dtype=np.float32),
         blue_win=labels.astype(np.float64, copy=False),
+        patch_features=np.zeros((n, 2), dtype=np.float32),
         identity_static_sidecar=np.zeros((n, 10, 2), dtype=np.float32),
         identity_full_game_sidecar=np.zeros((n, 10, 3), dtype=np.float32),
         identity_temporal_sidecar=np.zeros((n, 10, 4), dtype=np.float32),
@@ -32,10 +33,17 @@ def test_default_model_config_drops_optional_model_arrays_before_tensor_cache() 
     split = _split(np.array([0, 1], dtype=np.float64))
 
     dropped = _drop_unused_model_arrays(split, HGNNConfig())
+    assert dropped.patch_features is None
     assert dropped.identity_static_sidecar is None
     assert dropped.identity_full_game_sidecar is None
     assert dropped.identity_temporal_sidecar is None
     assert dropped.identity_encoder_support is None
+
+    feature_kept = _drop_unused_model_arrays(
+        split,
+        HGNNConfig(patch_feature_dim=2),
+    )
+    assert feature_kept.patch_features is split.patch_features
 
     moe_kept = _drop_unused_model_arrays(
         split,

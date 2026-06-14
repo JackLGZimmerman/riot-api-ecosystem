@@ -1,11 +1,13 @@
 # HGNN Current State
 
-Last updated: 2026-06-13 12:25 BST.
+Last updated: 2026-06-14 00:59 BST.
 
 The model is draft-generic by hard constraint: no player information of any
 kind (no puuids, no player priors, no rank). The admissible surface is
-champions, positions, bans, and (champion, role, build)-keyed historical
-profiles via the encoder sidecars.
+champions, positions, bans, train-only build catalogs or hypothesised
+build-worlds, and season/patch metadata only when a real draft-time provider is
+bound at serving. Observed final `build_id` remains an oracle diagnostic, not
+pregame-visible data.
 
 ## Split Protocol (v32)
 
@@ -54,11 +56,14 @@ capacity is 128 experts with `top_k=32`. See
 [Identity Encoder Sidecars](#identity-encoder-sidecars).
 
 Serving through `app.ml.predictor.load_predictor()` supplies champions, roles,
-and build ids — exactly what the `app.rl.reward.Predictor` protocol provides.
-The model is **RL-servable**: all required inputs (champion identity, item-based
-build, team/role structure, frozen identity-encoder sidecars, and the learned
-semantic-MoE context head) are available at draft time; no runtime-unsupported
-inputs remain.
+and hypothesised build ids — exactly what the `app.rl.reward.Predictor`
+protocol provides per world. Patch-head checkpoints also require
+`serving_patch=(season, patch)` or an explicit `PatchFeatureProvider`, which
+serves a train-only, player-agnostic season/patch blue-side prior known at draft
+time. Missing patch features fail at load time instead of being zero-filled. No
+loadout, summoner-spell, or rune input remains in the contract. The model stays
+**RL-servable** only when every checkpoint-required input has a draft-time
+provider story.
 `WinRatePredictor.predict_marginal` additionally serves the pregame path: it
 takes no build ids, enumerates train-supported build worlds from the
 `app.ml.build_catalog` priors, and averages output probabilities (see
@@ -101,41 +106,46 @@ on test — see the 2026-06-12 record in `EXPERIMENTS.md`.
 
 | Promoted ensemble | Test accuracy | Test NLL | logit scale | logit bias |
 | --- | ---: | ---: | ---: | ---: |
-| 6-seed logit-mean + bias-only calibration | **58.3669%** | **0.669642** | `1.0` | `-0.0488` |
-| Previous 3-seed affine artifact | `58.2601%` | `0.671053` | `1.1686` | `-0.0432` |
-| Single-seed reference (mean of seeds 4-9) | `57.91%` | `0.6722` | — | — |
+| 6-seed logit-mean + bias-only calibration | **57.7968%** | **0.672385** | `1.0` | `-0.0535` |
+| Pre-restore loadout+patch ensemble (historical) | `58.3669%` | `0.669642` | `1.0` | `-0.0488` |
+| Single-seed reference (mean of seeds 4-9) | `57.37%` | `0.6748` | — | — |
 
 The promoted ensemble row is an observed-build/oracle diagnostic: it scores the
 cached final `build_id` and is not the accepted pregame number. The
 leakage-free accepted path is build marginalisation from the train-only build
-catalog. The pregame rows below were re-run on 2026-06-13 against the current
-6-seed artifact through `python -m app.ml.marginal_eval` with the
-`build_catalog.assert_pregame_native()` key-space guard active on the accepted
-path (catalog `b39d506e51eb`); the guard is a no-op on the real catalog and the
-oracle diagnostic is byte-identical to its prior record, confirming the asset
-separation did not perturb accepted scoring. Metrics in this table predate the
-loadout/patch-head removal and will be refreshed after the retrain.
+catalog. The current observed-build artifact is the patch-restored,
+loadout-removed 6-seed ensemble (2026-06-13): re-adding only the season/patch
+blue-side head recovered `+0.035pp` accuracy / `-0.0003` NLL over the
+patch-free ensemble (`57.762%` / `0.67267`); the larger gap to the
+pre-restore loadout+patch artifact (`58.3669%` / `0.669642`) was the
+summoner-spell/rune loadout head, removed permanently as measured noise.
+Accepted pregame rescoring did not clear gates: the patch-restored seed-9
+`W=128,k_slot=3` marginal rescore was `55.0752%` / `0.685092` raw, and the
+current artifact's raw `W=512,k_slot=3` catalog sweep was `55.4529%` /
+`0.683566`. Both are below the modal floor and the accepted W=128 baseline.
 
 | Prediction path | Build source | Artifact | Test accuracy | Test NLL |
 | --- | --- | --- | ---: | ---: |
-| Observed-build oracle diagnostic | cached final `build_id` | Current 6-seed bias-only ensemble | `58.3669%` | `0.669642` |
-| Leakage-free pregame marginal (`W=128`, `k_slot=3`) | train-only `P(build \| champion, role)` catalog | Current 6-seed ensemble | `56.3064%` raw / `56.3079%` calibrated | `0.680652` raw / `0.680773` calibrated |
-| Leakage-free modal baseline (`W=1`) | train-only top build per slot | Current 6-seed ensemble | `55.8589%` raw / `55.9265%` calibrated | `0.682588` raw / `0.682705` calibrated |
+| Observed-build oracle diagnostic | cached final `build_id` | Current 6-seed bias-only ensemble | `57.7968%` | `0.672385` |
+| Leakage-free pregame marginal (`W=128`, `k_slot=3`) | train-only `P(build \| champion, role)` catalog | Accepted 6-seed asset-separation baseline | `56.3064%` raw / `56.3079%` calibrated | `0.680652` raw / `0.680773` calibrated |
+| Leakage-free modal baseline (`W=1`) | train-only top build per slot | Accepted 6-seed asset-separation baseline | `55.8589%` raw / `55.9265%` calibrated | `0.682588` raw / `0.682705` calibrated |
+| Rejected catalog sweep (`W=512`, `k_slot=3`) | train-only `P(build \| champion, role)` catalog | Current patch-head artifact | `55.4529%` raw | `0.683566` raw |
 
-Gate reachability (2026-06-10, reaffirmed 2026-06-11): every draft-safe input
-axis has been audited — context head saturated at the draft-time ceiling,
-relationship features dead, recency/level dead, role experience marginal,
-player-skill priors blocked by aggregate staleness and now excluded outright
-by the draft-generic constraint, champion-strength / meta-drift features
-bounded out by a leakage-free future-knowledge oracle (`<=0.005pp` ceiling),
-and `(champion, position)` semantic identity profiles shown fully redundant
-with champion identity by shuffled-profile and one-hot controls (see
+Gate reachability (2026-06-10, reaffirmed 2026-06-13): the historical
+single-slot/context axes have been audited — context head saturated at the
+draft-time ceiling, old direct relationship features dead, recency/level dead,
+role experience marginal, player-skill priors now excluded outright by the
+draft-generic constraint, champion-strength / meta-drift features bounded out
+by a leakage-free future-knowledge oracle (`<=0.005pp` ceiling), and
+`(champion, position)` semantic identity profiles shown fully redundant with
+champion identity by shuffled-profile and one-hot controls (see
 `EXPERIMENTS.md` for each record). Remaining headroom most plausibly requires
-new draft-generic information rather than residual heads on current features.
+new train-only aggregate structure, with higher-order draft relation residuals
+the next low-cost probe.
 
 Under the current leakage policy, observed final build-value/profile residuals
-remain diagnostic only unless a draft-safe source or RL search supplies the
-build intent (see `HGNN_BUILD_INTENT.md`).
+remain diagnostic only unless an allowed train-only catalog, marginal world, or
+RL candidate source supplies the build intent (see `HGNN_BUILD_INTENT.md`).
 
 ## Architecture
 
@@ -154,8 +164,11 @@ flowchart TD
     nodes --> readout["Mean + attention team readout"]
     readout --> base["base_logit"]
     moe -.->|use_learned_semantic_moe=True| context_logit
-    base --> final["final_logit = base_logit + context_logit"]
+    cache --> patch["patch features<br/>season/patch blue-side drift"]
+    patch --> patch_logit["patch_logit<br/>bounded max abs 0.15"]
+    base --> final["final_logit = base_logit + context_logit + patch_logit"]
     context_logit --> final
+    patch_logit --> final
     final --> ensemble["mean over 6 seed members<br/>logit + bias"]
     ensemble --> prob["sigmoid = P(blue wins)"]
     prob --> metrics["accuracy / NLL metrics"]
@@ -203,8 +216,10 @@ slowly learn how their own semantic groups react to every allied and enemy group
 composition.
 
 Serving rebuilds the same compact group tensor from smoothed train identity
-metrics plus static champion HP/range lookups, so melee/ranged and natural
-tankiness remain available without a large per-game cache array.
+metrics plus deterministic champion-derived HP/range lookups. These lookup
+values are a function of champion id only, not summoner, player, rune, rank, or
+in-game state, so melee/ranged and natural tankiness remain available without a
+large per-game cache array.
 
 ### Retired Surfaces
 
@@ -276,6 +291,7 @@ flowchart TD
 | [../encoder_sidecar.py](../encoder_sidecar.py) | Identity-encoder latent loading, per-game lookup, and dedup gather tables. |
 | [../build_dataset.py](../build_dataset.py) | Cache builder for 1vX identity inputs and sidecar metadata. |
 | [../dataset.py](../dataset.py) | Cache loader and split dataclass. |
+| [../patch_features.py](../patch_features.py) | Train-only season/patch blue-side prior extraction (player-agnostic; LOO-adjusted, EB-shrunk). |
 | [../train.py](../train.py) | Production training, test-split selection, and accuracy/NLL metrics. |
 | [../promote.py](../promote.py) | Seed-checkpoint scoring, calibration fit, and production ensemble artifact writer. |
 | [../predictor.py](../predictor.py) | Draft-time runtime bridge. |
@@ -313,6 +329,7 @@ GPU holds the model and active minibatch rather than the full raw split cache.
 | Test evaluation | Always on: test is tensor-cached, evaluated every epoch, and written to metrics with accuracy/NLL and `selection_split: "test"`. |
 | Production artifact overwrite | Refused by default; `--allow-production-artifact-overwrite` is required for `train.py`. |
 | Production promotion | `python -m app.ml.promote --checkpoints <seed checkpoints>`; current artifact uses seeds 4-9 with logit-mean + train-fitted bias-only calibration. |
+| Patch residual serving | Patch-head checkpoints require `serving_patch=(season, patch)` or an explicit `PatchFeatureProvider`; missing patch features fail fast, and supervised eval consumes the cached per-game patch feature. |
 | Direct 1v1/2vX integrations, player priors | Removed from the model, cache, priors, and predictor. |
 | Learned semantic MoE head over all three identity sidecars | Enabled by the `train.py` production-recipe overrides (`HGNNConfig` base default is off). |
 | Semantic group features and relationship head | Enabled by the same production-recipe overrides for the learned semantic MoE. |

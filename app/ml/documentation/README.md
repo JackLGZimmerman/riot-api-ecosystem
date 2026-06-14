@@ -1,13 +1,15 @@
 # ML Win-Rate Model
 
-As of 2026-06-13, the production artifact is a calibrated 6-seed ensemble of
+As of 2026-06-14, the production artifact is a calibrated 6-seed ensemble of
 HGNN checkpoints. Each member uses champion/build identity embeddings on top of
 the smoothed 1vX champion-role/build prior and the promoted all-encoder learned
 semantic MoE over frozen static, full-game, and temporal identity latents. The
 old classification-derived semantic, profile, context, direct relationship,
-player-prior, loadout, and patch-residual inputs have been removed from the
-HGNN contract. The model is draft-generic by hard constraint: no player
-information of any kind, and no runtime-unsupported inputs — it is RL-servable.
+player-prior, summoner-spell, and rune (loadout) inputs have been removed from
+the HGNN contract. Season/patch metadata is allowed only when a patch-head
+checkpoint is served with `serving_patch=(season, patch)` or an explicit
+`PatchFeatureProvider`. The model is draft-generic by hard constraint: no player
+information of any kind, no summoners, no runes.
 
 The current identity-signal surface is the frozen identity-encoder sidecar
 artifact at `app/ml/data/semantic_identity_sidecar_compact.npz`. Production
@@ -67,10 +69,11 @@ Training writes:
 The promoted load path is `app/ml/data/hgnn_production_model.pt` (the ensemble
 artifact embeds its calibration and test metrics); `metrics_latest.json` is the
 default train metrics output path. Runtime prediction uses `load_predictor()`
-from `app/ml/predictor.py`. The production model is RL-servable: its required
-inputs (champion identity, item-based build, team/role structure, frozen
-identity-encoder sidecars, and the learned semantic-MoE context head) are all
-available at draft time through the `app.rl.reward.Predictor` protocol.
+from `app/ml/predictor.py`. The production model is RL-servable only when every
+checkpoint-required input is available at draft time: champion identity,
+hypothesised item-build worlds, team/role structure, frozen identity-encoder
+sidecars, semantic-MoE context, and an explicit patch provider for patch-head
+artifacts. Missing patch features fail fast; they are never silently zero-filled.
 
 ## Cache Contract
 
@@ -90,6 +93,7 @@ caches with a validation split must be rebuilt:
 | `champion_id.npy` | `[games, 10]` | champion embedding index |
 | `build_id.npy` | `[games, 10]` | build embedding index |
 | `blue_win.npy` | `[games]` | target label |
+| `patch_features.npy` | `[games, 2]` | train-only `(season, patch)` blue-side prior; requires runtime provider for patch-head artifacts |
 
 ## Identity Semantic Context
 

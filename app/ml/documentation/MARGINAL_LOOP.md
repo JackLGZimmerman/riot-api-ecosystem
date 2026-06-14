@@ -10,8 +10,10 @@ Hard constraints (every iteration):
 - No leakage of the game outcome into accepted scoring. Accepted modes never
   read a held-out row's observed `build_id`; all aggregations are
   `split = 'train'` only.
-- Draft-time information only: champions, roles, summoner spells, runes. No
-  player information of any kind (draft-generic constraint).
+- Draft-time information only: champions, roles, bans, train-only build
+  catalog/candidate worlds, and patch/season metadata only through an explicit
+  runtime provider. No observed final builds, player information, summoner
+  spells, runes, rank, or PUUID.
 - Detailed historical aggregations over draft-visible keys are allowed.
 - The model serves the RL drafting environment; the conditional
   `P(win | draft, build)` surface must remain scoreable per concrete world.
@@ -21,93 +23,87 @@ Hard constraints (every iteration):
 | Path | Artifact | Test acc | Test NLL |
 | --- | --- | ---: | ---: |
 | Oracle observed-build (diagnostic) | 6-seed bias-only | 0.58367 | 0.66964 |
+| Marginal `W=128, k=3` (raw) | 6-seed (loop baseline) | 0.56306 | 0.68065 |
+| Modal `W=1` (raw) | 6-seed | 0.55859 | 0.68259 |
 | Marginal `W=128, k=3` | 3-seed affine (superseded) | 0.56186 | 0.68152 |
 | Modal `W=1` | 3-seed affine (superseded) | 0.55798 | 0.68432 |
+
+The 6-seed refresh alone improved the marginal row by +0.12pp acc / −0.0009
+NLL over the 3-seed record. Raw (uncalibrated) W=128 ECE is 0.001; the
+train-fitted bias slightly hurts test NLL, so raw metrics are the baseline.
 
 Known structural facts that shape direction:
 
 - `P(build | champ, role)` is deterministic given inputs the model already
   sees — unconditioned marginalisation cannot add information, only honest
-  evaluation. The only way to *close* oracle gap pregame is conditioning the
-  build prior on draft-visible information beyond (champ, role).
-- Runes and summoner spells are draft-visible (admissible by constraint) and
-  are strong build-intent proxies; they enter the model today only through
-  the `_nobuild`-keyed loadout priors, so a build-conditioned rune
-  aggregation is genuinely new signal.
+  evaluation. Observed final build labels remain oracle diagnostics only.
 - ~40–45% of the final-label win association is outcome-side inflation
   (15-min label check); intent share is ≤~57%. Phase B (time-capped label)
   is the only lever on the label itself; it is expensive and stays gated.
 - 1vX prior-quality enrichment is closed by three bounds (EXPERIMENTS.md,
   2026-06-12); do not revisit (champ, role, build)-keyed feature residuals.
+- Patch residuals require a real serving provider before promotion. The
+  observed-build patch-restore run is closed as a tiny diagnostic gain; the
+  accepted pregame W=128 seed-9 rescore regressed below the modal floor.
+- Higher-order train-only relationship residuals are the next plausible
+  draft-generic probe, but must clear logit-only and shuffled controls before
+  cache/model wiring.
+- The `W=512,k_slot=3` catalog sweep improved retained mass but regressed
+  accuracy/NLL below the W=128 baseline and modal floor, so catalog-size
+  expansion is closed as a standalone lever.
 
 ## Iteration 1 — Design
 
-Two parallel tracks, GPU serialised (WSL2: one cache-heavy job at a time).
+Run serial GPU work only (WSL2: one cache-heavy job at a time). Sidecar audits
+may run in parallel, but implementation remains top-level owned.
 
-### Track R1 — baseline refresh on the promoted 6-seed artifact (run-only)
+### Track R1 — baseline refresh on the promoted 6-seed artifact (closed)
 
-The recorded marginal numbers are for the superseded 3-seed artifact, and the
-`W=512` sweep was deferred. Three serial runs, full test split:
+The modal and `W=128,k_slot=3` records have been refreshed on the promoted
+6-seed artifact and now define the raw loop baseline. The pre-registered
+full-test `W=512,k_slot=3` uncalibrated sweep was run under
+`app/ml/data/experiments/20260613_2308_w512_catalog/` and rejected:
 
-1. `modal --split test` (calibrated) — modal floor on the 6-seed artifact.
-2. `marginal --worlds 128 --k-slot 3` (calibrated) — the loop's baseline.
-3. `marginal --worlds 512 --k-slot 3 --no-calibrate` — measures the retained
-   mass → metric slope; if flat vs `W=128`, the world-count lever is closed
-   and conditioning is the only open lever.
+1. `marginal --worlds 512 --k-slot 3 --no-calibrate` — retained mass improved
+   to mean `0.7823`, but raw metrics regressed to `0.55453` / `0.68357`.
 
 Executed directly by the orchestrator as background runs (run-only work is
-not delegated). Outputs: `app/ml/data/experiments/loop1_*.json`.
+not delegated). Output paths are timestamped under
+`app/ml/data/experiments/<timestamp>_<lever>/`.
 
-### Track B1 — keystone-conditioned build prior (implementation)
+### Current loop directions
 
-Replace world weights `P(b | champ, role)` with
-`P(b | champ, role, keystone)` at eval time. The keystone
-(`participant_perk_ids.primary_perk_1`) is chosen pregame, is admissible,
-and discriminates build intent within a champion-role (e.g. AP vs AD or
-tank vs damage keystones). Mixture weights move toward the true conditional;
-the scored worlds and the model stay fixed.
+1. Patch-side prior audit: observed-build seed4-9 is closed as small diagnostic
+   lift, and the seed9 W=128 accepted marginal rescore is negative. Keep the
+   patch lever rejected unless a future same-seed control plan is explicitly
+   reopened.
+2. Higher-order relationship probe: frozen-logit residual over train-only 1v1
+   and 2vX aggregates first, with LOO train features and shuffled controls.
+   Exact 2v1 remains strict-gated follow-up material; exact 3v1 is closed until
+   a coarser backoff table exists.
+3. Marginal catalog sweep: `W=512,k_slot=3` is rejected; do not expand to
+   `W=512,k_slot=5` unless a separate model-side change first improves raw
+   W=128 metrics.
+4. Time-capped build-label scout: label-only diagnostics from timeline item
+   purchases; never predictor input.
+5. Encoder architecture scout: no rebuild unless low-cost residual probes beat
+   controls and remain draft-servable.
 
-Mechanics (decision-complete; sub-agent executes):
+### Iteration acceptance / decision rules
 
-- Train-only counts `(championid, teamposition, primary_perk_1, build) → n`
-  from `participant_stats ⋈ ml_game_split ⋈ participant_perk_ids ⋈
-  participant_item_value_totals`, memory-capped, cached locally.
-- Conditioned vector = nested EB: child counts restricted to the parent's
-  retained labels, smoothed toward the parent distribution
-  (`p = (n_b + τ_c·p_parent) / (N_child + τ_c)`, `τ_c=50`), child cell gated
-  at `N_child ≥ 50` else the parent vector is served unchanged. Conditioning
-  can only reweight parent-vetted profiles, never introduce new builds.
-- Per-slot keystone arrays for each split, built from a pivot query that
-  mirrors the cache builder's `ORDER BY matchid` row order, hard-validated
-  by exact champion-id equality against the cache; stored with a
-  champion-array checksum so stale arrays fail loudly.
-- `marginal_eval --condition keystone` (default `none`); payload reports
-  conditioned-slot share and child-support distribution. Calibration train
-  scoring uses the train keystone array (train rows see their own pregame
-  keystones — still draft-time information).
-
-Leakage audit: keystone is selected before the game starts; the aggregation
-is train-split only; test rows contribute only their own pregame keystone as
-a lookup key. The `puuid` in the join is row alignment only (same as the
-loadout features); no player identity is emitted.
-
-### Iteration 1 acceptance / decision rules
-
-- Baseline = R1's `W=128` calibrated row (6-seed artifact).
-- Conditioned marginal must improve test NLL vs that baseline without ECE
-  collapse; accuracy is secondary (promotion priority NLL-first).
-- If keystone conditioning pays: iteration 2 sweeps `τ_c`/child gate on
-  train scoring, then adds the summoner-spell pair and primary/sub style as
-  further conditioning axes.
-- If it is flat: the conditioning axis is probably mass-limited — check the
-  conditioned-slot share and child-support stats before declaring the axis
-  closed; the remaining lever would be Phase B (time-capped label), which
-  needs an explicit go decision.
-- All accepted results recorded in `EXPERIMENTS.md` with build source
-  `pregame_marginal_build`.
+- Baseline = raw `W=128,k=3` 6-seed row (`0.563064` / `0.680652`).
+- World-count changes must improve both raw accuracy and raw NLL against the
+  W=128 baseline before they stay open.
+- Every experiment, including negative/insignificant runs, is timestamped in
+  `EXPERIMENTS.md` with artifact path, allowed inputs, forbidden inputs not
+  used, metrics, controls, and verdict.
 
 ## Iteration Log
 
 | Iter | Lever | Test acc | Test NLL | Verdict |
 | --- | --- | ---: | ---: | --- |
-| 1 | 6-seed baseline refresh + W=512 + keystone conditioning | pending | pending | pending |
+| 1 | 6-seed baseline refresh | 0.56306 | 0.68065 | raw W=128 baseline accepted |
+| 2 | patch restore observed-build diagnostic | 0.57373 | 0.67476 | tiny diagnostic lift; not accepted pregame |
+| 3 | patch restore seed9 W=128 marginal | 0.55075 raw / 0.55187 cal | 0.68509 raw / 0.68492 cal | rejected; below modal floor, artifact `20260613_2238_patch_seed9_w128` |
+| 4 | relation aggregate coverage probe | n/a | n/a | exact 1v1/2vX support sufficient for frozen probe; exact 3v1 closed, artifact `20260613_2306_relation_table_probe` |
+| 5 | W=512,k=3 catalog sweep | 0.55453 | 0.68357 | rejected; below W=128 baseline and modal floor, artifact `20260613_2308_w512_catalog` |

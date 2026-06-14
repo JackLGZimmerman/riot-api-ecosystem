@@ -11,6 +11,7 @@ from app.ml.cache_layout import ARRAY_FILES, ARRAY_SHAPES, CACHE_FORMAT, DISK_DT
 from app.ml.config import DatasetConfig, TrainConfig
 from app.ml.encoder_sidecar import build_encoder_sidecar_metadata, save_encoder_sidecar
 from app.ml.hgnn_model import load_hgnn_model
+from app.ml.patch_features import feature_metadata
 from app.ml.train import train
 
 SIDE_DIMS = {"static": 2, "full_game": 3, "temporal": 4}
@@ -32,6 +33,7 @@ def _write_compact_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12
         "champion_id": champion_id,
         "build_id": build_id,
         "blue_win": blue_win,
+        "patch_features": np.zeros((n_games, 2), dtype=np.float32),
     }
     cache_dir.mkdir(parents=True, exist_ok=True)
     for name, filename in ARRAY_FILES.items():
@@ -94,6 +96,7 @@ def _write_compact_cache(cache_dir, artifact_path, *, n_games=12, n_champions=12
                     "dims": {**SIDE_DIMS, "total": sum(SIDE_DIMS.values())},
                     "metadata": {},
                 },
+                "production_features": feature_metadata(),
             }
         )
     )
@@ -143,6 +146,7 @@ def test_train_gathers_sidecar_for_learned_moe_from_artifact_without_per_game_ar
     model, config, _ = load_hgnn_model(model_path)
     assert config.use_learned_semantic_moe is True
     assert config.identity_full_game_sidecar_dim == SIDE_DIMS["full_game"]
+    assert config.patch_feature_dim == 2
     assert model.learned_semantic_moe is not None
 
     metrics = json.loads(metrics_path.read_text())

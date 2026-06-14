@@ -125,7 +125,9 @@ The build-marginal path stays byte-for-byte equivalent. The separation is
   explicit and enforced in `build_catalog.py` (taxonomy constants + key-space
   guard + `BuildCatalog.assert_pregame_native()`), and call the guard at the two
   accepted catalog entry points (`predict_marginal`, `marginal_eval`). No model,
-  cache, or metric change. `verify_equivalence.py` must stay green.
+  cache, or metric change. Recreate or run a frozen-logit equivalence check
+  before promotion; the older `verify_equivalence.py` runner is no longer a
+  maintained local artifact.
 - **Step 2 (later):** annotate the build-conditional surfaces with the
   `build_conditional` family tag where an executor touches them, so the two
   families are self-documenting in code.
@@ -220,8 +222,9 @@ format.
   - `assert_pregame_native_key_space` rejects a build-keyed (3-tuple) asset.
   - `validate_accepted_build_source` still rejects `oracle`/`train_observed`
     (regression).
-- **No-regression gate:** `verify_equivalence.py` stays green (production
-  artifact contract unchanged).
+- **No-regression gate:** recreate or run a frozen-logit equivalence check
+  before promotion (production artifact contract unchanged; the older
+  `verify_equivalence.py` runner is historical).
 
 Run order (CPU-only unit tests, GPU not required):
 

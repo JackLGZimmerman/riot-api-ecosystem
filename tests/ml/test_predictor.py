@@ -33,6 +33,7 @@ class _SemanticModel:
             identity_temporal_sidecar_dim=4,
             use_learned_semantic_moe=True,
             use_semantic_group_features=True,
+            patch_feature_dim=0,
         )
         self.seen_features: torch.Tensor | None = None
 
@@ -167,6 +168,7 @@ class _BuildSensitiveModel:
             identity_temporal_sidecar_dim=0,
             use_learned_semantic_moe=False,
             use_semantic_group_features=False,
+            patch_feature_dim=0,
         )
 
     def to(self, _device: str) -> "_BuildSensitiveModel":
@@ -178,6 +180,41 @@ class _BuildSensitiveModel:
     def __call__(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         build_id = inputs["build_id"]
         return {"final_logit": build_id.float().sum(dim=1) * 0.4 - 2.0}
+
+
+class _PatchSensitiveModel:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(
+            n_champions=1000,
+            n_builds=1,
+            build_vocab=("carry",),
+            identity_static_sidecar_dim=0,
+            identity_full_game_sidecar_dim=0,
+            identity_temporal_sidecar_dim=0,
+            use_learned_semantic_moe=False,
+            use_semantic_group_features=False,
+            patch_feature_dim=2,
+        )
+        self.seen_patch_features: torch.Tensor | None = None
+
+    def to(self, _device: str) -> "_PatchSensitiveModel":
+        return self
+
+    def eval(self) -> "_PatchSensitiveModel":
+        return self
+
+    def __call__(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        patch_features = inputs["patch_features"]
+        self.seen_patch_features = patch_features.detach().cpu()
+        return {"final_logit": patch_features[:, 0]}
+
+
+class _PatchProvider:
+    def __init__(self, features: tuple[float, float]) -> None:
+        self.features = np.asarray(features, dtype=np.float32)
+
+    def features_for_batch(self, n: int) -> np.ndarray:
+        return np.tile(self.features.reshape(1, 2), (int(n), 1))
 
 
 def test_predict_marginal_matches_brute_force_average() -> None:
@@ -230,6 +267,77 @@ def test_predict_marginal_matches_brute_force_average() -> None:
     assert result.low_confidence is False
     assert result.fallback_sources == ("champion_role",) * 10
     assert result.build_source == "pregame_marginal_build"
+
+
+def test_predictor_rejects_patch_checkpoint_without_provider() -> None:
+    with pytest.raises(ValueError, match="requires patch_features"):
+        WinRatePredictor(
+            _PatchSensitiveModel(),
+            _priors(),
+            prior_strength=20.0,
+            smoothing_prior_strength=20.0,
+            amplification_threshold=0.0,
+            smoothing_mode="cascade",
+            prior_confidence_matchups=50.0,
+            encoder_sidecar=None,
+            semantic_context_lookup=None,
+            device="cpu",
+        )
+
+
+def test_predictor_supplies_runtime_patch_features() -> None:
+    model = _PatchSensitiveModel()
+    predictor = WinRatePredictor(
+        model,
+        _priors(),
+        prior_strength=20.0,
+        smoothing_prior_strength=20.0,
+        amplification_threshold=0.0,
+        smoothing_mode="cascade",
+        prior_confidence_matchups=50.0,
+        encoder_sidecar=None,
+        semantic_context_lookup=None,
+        device="cpu",
+        patch_feature_provider=_PatchProvider((0.25, 1.0)),
+    )
+    blue = list(range(1, 6))
+    red = list(range(6, 11))
+
+    probability = predictor(
+        blue,
+        red,
+        {champion: position for champion, position in zip(blue, POSITIONS)},
+        {champion: position for champion, position in zip(red, POSITIONS)},
+        {champion: 0 for champion in blue},
+        {champion: 0 for champion in red},
+    )
+    batch = predictor.predict_batch(
+        [
+            (
+                blue,
+                red,
+                {champion: position for champion, position in zip(blue, POSITIONS)},
+                {champion: position for champion, position in zip(red, POSITIONS)},
+                {champion: 0 for champion in blue},
+                {champion: 0 for champion in red},
+            ),
+            (
+                blue,
+                red,
+                {champion: position for champion, position in zip(blue, POSITIONS)},
+                {champion: position for champion, position in zip(red, POSITIONS)},
+                {champion: 0 for champion in blue},
+                {champion: 0 for champion in red},
+            ),
+        ]
+    )
+
+    assert probability == pytest.approx(1.0 / (1.0 + np.exp(-0.25)))
+    assert batch.tolist() == pytest.approx([probability, probability])
+    assert model.seen_patch_features is not None
+    assert tuple(model.seen_patch_features.shape) == (2, 2)
+    assert model.seen_patch_features[:, 0].tolist() == pytest.approx([0.25, 0.25])
+    assert model.seen_patch_features[:, 1].tolist() == pytest.approx([1.0, 1.0])
 
 
 def test_predictor_rejects_out_of_vocab_build_id(
@@ -324,3 +432,61 @@ def test_load_predictor_loads_semantic_context_for_grouped_model(
 
     assert seen["load_priors"] is True
     assert seen["load_semantic_context_raw_lookup"] is True
+
+
+def test_load_predictor_rejects_patch_checkpoint_without_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(predictor_module, "resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        predictor_module,
+        "load_hgnn_model",
+        lambda _path, *, device: (_PatchSensitiveModel(), None, 20.0),
+    )
+    monkeypatch.setattr(predictor_module, "load_priors", _priors)
+
+    with pytest.raises(ValueError, match="requires patch_features"):
+        predictor_module.load_predictor(
+            cfg=TrainConfig(model_path=Path("unused.pt")),
+            dataset_cfg=DatasetConfig(encoder_sidecar_path=None),
+        )
+
+
+def test_load_predictor_builds_serving_patch_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, tuple[int, int]] = {}
+
+    class FakeServingPatchFeatureProvider:
+        @classmethod
+        def from_train_aggregate(
+            cls,
+            *,
+            cfg: DatasetConfig,
+            season: int,
+            patch: int,
+        ) -> _PatchProvider:
+            del cfg
+            seen["serving_patch"] = (season, patch)
+            return _PatchProvider((0.1, 1.0))
+
+    monkeypatch.setattr(predictor_module, "resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        predictor_module,
+        "load_hgnn_model",
+        lambda _path, *, device: (_PatchSensitiveModel(), None, 20.0),
+    )
+    monkeypatch.setattr(predictor_module, "load_priors", _priors)
+    monkeypatch.setattr(
+        predictor_module,
+        "ServingPatchFeatureProvider",
+        FakeServingPatchFeatureProvider,
+    )
+
+    predictor_module.load_predictor(
+        cfg=TrainConfig(model_path=Path("unused.pt")),
+        dataset_cfg=DatasetConfig(encoder_sidecar_path=None),
+        serving_patch=(16, 11),
+    )
+
+    assert seen["serving_patch"] == (16, 11)

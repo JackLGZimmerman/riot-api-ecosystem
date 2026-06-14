@@ -17,6 +17,7 @@ import torch
 from torch import nn
 
 from app.core.utils.common import TEAM_PAIRS as TEAM_PAIRS
+from app.ml.patch_features import PATCH_SIGNED_FEATURE_INDICES
 from app.ml.semantic_group_features import SEMANTIC_GROUP_FEATURE_DIM
 
 N_PLAYERS = 10
@@ -72,6 +73,10 @@ class HGNNConfig:
     semantic_group_relationship_hidden: tuple[int, ...] = (128,)
     semantic_group_relationship_dropout: float = 0.0
     semantic_group_relationship_l2_weight: float = 0.0
+    patch_feature_dim: int = 0
+    patch_residual_hidden: tuple[int, ...] = ()
+    patch_residual_dropout: float = 0.0
+    patch_residual_max_abs_logit: float = 0.15
 
 
 ENCODER_SIDECAR_INPUTS = (
@@ -167,6 +172,7 @@ def build_hgnn_inputs(
     identity_temporal_sidecar: Any | None = None,
     identity_encoder_support: Any | None = None,
     semantic_group_features: Any | None = None,
+    patch_features: Any | None = None,
     device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
     """Turn raw cache/prior arrays into the model's node/edge tensors.
@@ -199,6 +205,7 @@ def build_hgnn_inputs(
         ("identity_temporal_sidecar", identity_temporal_sidecar),
         ("identity_encoder_support", identity_encoder_support),
         ("semantic_group_features", semantic_group_features),
+        ("patch_features", patch_features),
     ):
         if value is not None:
             inputs[name] = to_tensor(value)
@@ -214,6 +221,19 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
 
     def swap_halves(x: torch.Tensor, half: int) -> torch.Tensor:
         return torch.cat([x[:, half:], x[:, :half]], dim=1)
+
+    def flip_signed_columns(
+        x: torch.Tensor,
+        signed_indices: tuple[int, ...],
+        name: str,
+    ) -> torch.Tensor:
+        if x.ndim != 2:
+            raise ValueError(f"{name} must have shape [batch, features]")
+        out = x.clone()
+        if signed_indices:
+            idx = torch.as_tensor(signed_indices, dtype=torch.long, device=x.device)
+            out.index_copy_(1, idx, -x.index_select(1, idx))
+        return out
 
     swapped = {
         "champion_id": swap_halves(inputs["champion_id"], 5),
@@ -234,6 +254,12 @@ def swap_hgnn_inputs(inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
         key = f"{prefix}_1vx"
         if key in inputs:
             swapped[key] = swap_halves(inputs[key], 5)
+    if "patch_features" in inputs:
+        swapped["patch_features"] = flip_signed_columns(
+            inputs["patch_features"],
+            PATCH_SIGNED_FEATURE_INDICES,
+            "patch_features",
+        )
     return swapped
 
 
@@ -1286,6 +1312,18 @@ class HGNNWinModel(nn.Module):
             nn.init.zeros_(self.team_slot_readout[-1].weight)
             nn.init.zeros_(self.team_slot_readout[-1].bias)
         self.head = _mlp(c.node_dim * 4, c.readout_hidden, 1, dropout=c.dropout)
+        self.patch_residual = (
+            _mlp(
+                int(c.patch_feature_dim),
+                c.patch_residual_hidden,
+                1,
+                dropout=c.patch_residual_dropout,
+            )
+            if int(c.patch_feature_dim) > 0
+            else None
+        )
+        if self.patch_residual is not None:
+            _zero_last_linear(self.patch_residual)
 
     def _readout(self, team: torch.Tensor) -> torch.Tensor:  # team: [B, 5, d]
         pooled = torch.cat([team.mean(dim=1), self.attn_pool(team)], dim=-1)
@@ -1293,6 +1331,54 @@ class HGNNWinModel(nn.Module):
         if self.team_slot_readout is not None:
             out = out + self.team_slot_readout(team.flatten(start_dim=1))
         return out
+
+    def _game_feature_block(
+        self,
+        value: torch.Tensor | None,
+        *,
+        batch_size: int,
+        dim: int,
+        reference: torch.Tensor,
+        name: str,
+    ) -> torch.Tensor:
+        if dim <= 0:
+            return reference.new_zeros((batch_size, 0))
+        if value is None:
+            return reference.new_zeros((batch_size, dim))
+        if value.ndim != 2 or value.shape[0] != batch_size or value.shape[1] != dim:
+            raise ValueError(f"{name} must have shape [batch, {dim}]")
+        return value.to(dtype=reference.dtype, device=reference.device)
+
+    def _residual_feature_logit(
+        self,
+        head: nn.Module | None,
+        value: torch.Tensor | None,
+        *,
+        batch_size: int,
+        dim: int,
+        reference: torch.Tensor,
+        name: str,
+        max_abs_logit: float | None = None,
+    ) -> torch.Tensor:
+        if head is None or dim <= 0:
+            return reference.new_zeros((batch_size,))
+        if value is None:
+            raise ValueError(
+                f"{name} is required when its residual head is configured; "
+                "rebuild the dataset cache or disable the head."
+            )
+        features = self._game_feature_block(
+            value,
+            batch_size=batch_size,
+            dim=dim,
+            reference=reference,
+            name=name,
+        )
+        logit = head(features).squeeze(-1)
+        if max_abs_logit is not None and max_abs_logit > 0.0:
+            scale = float(max_abs_logit)
+            logit = scale * torch.tanh(logit / scale)
+        return logit
 
     def _learned_semantic_moe_outputs(
         self,
@@ -1365,6 +1451,7 @@ class HGNNWinModel(nn.Module):
         identity_temporal_sidecar: torch.Tensor | None = None,
         identity_encoder_support: torch.Tensor | None = None,
         semantic_group_features: torch.Tensor | None = None,
+        patch_features: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         # Node init: multiplicative identity (§3) fused with the 1vX posterior.
         identity_components = self.identity.components(champion_id, build_id)
@@ -1381,6 +1468,16 @@ class HGNNWinModel(nn.Module):
         b = self._readout(h[:, 5:])
         head_parts = [a, b, a - b, a * b]
         base_logit = self.head(torch.cat(head_parts, dim=-1)).squeeze(-1)
+        batch_size = int(base_logit.shape[0])
+        patch_logit = self._residual_feature_logit(
+            self.patch_residual,
+            patch_features,
+            batch_size=batch_size,
+            dim=int(self.config.patch_feature_dim),
+            reference=base_logit,
+            name="patch_features",
+            max_abs_logit=float(self.config.patch_residual_max_abs_logit),
+        )
         moe_outputs = self._learned_semantic_moe_outputs(
             identity_components=identity_components,
             identity_static_sidecar=identity_static_sidecar,
@@ -1397,7 +1494,8 @@ class HGNNWinModel(nn.Module):
         return {
             "base_logit": base_logit,
             "context_logit": context_logit,
-            "final_logit": base_logit + context_logit,
+            "patch_logit": patch_logit,
+            "final_logit": base_logit + context_logit + patch_logit,
             **(moe_outputs or {}),
         }
 
@@ -1415,6 +1513,7 @@ class HGNNWinModel(nn.Module):
         identity_temporal_sidecar: torch.Tensor | None = None,
         identity_encoder_support: torch.Tensor | None = None,
         semantic_group_features: torch.Tensor | None = None,
+        patch_features: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         inputs = {
             "champion_id": champion_id,
@@ -1430,6 +1529,7 @@ class HGNNWinModel(nn.Module):
             "identity_temporal_sidecar": identity_temporal_sidecar,
             "identity_encoder_support": identity_encoder_support,
             "semantic_group_features": semantic_group_features,
+            "patch_features": patch_features,
         }
         inputs.update(optional)
         filtered = {key: value for key, value in inputs.items() if value is not None}
@@ -1451,6 +1551,7 @@ def _config_from_payload(payload: dict[str, Any]) -> HGNNConfig:
         "semantic_moe_router_hidden",
         "semantic_moe_expert_hidden",
         "semantic_group_relationship_hidden",
+        "patch_residual_hidden",
     ):
         if key in config_dict:
             config_dict[key] = tuple(config_dict[key])

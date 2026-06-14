@@ -1,7 +1,7 @@
 """AlphaZero-style training loop for the draft env.
 
-Run:
-    python -m app.rl.alpha_train
+Run for patch-head HGNN artifacts:
+    HGNN_SERVING_PATCH_SEASON=16 HGNN_SERVING_PATCH=11 python -m app.rl.alpha_train
 
 Each epoch:
   1. Generate ``episodes_per_epoch`` self-play episodes (MCTS-improved).
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 
 from app.core.config.settings import PROJECT_ROOT
 from app.core.logging.logger import setup_logging_config
@@ -55,6 +57,9 @@ class AlphaTrainConfig:
     reward_mode: RewardMode = "expected_value"
     risk_lambda: float = 0.5
     pool_path: Path = DEFAULT_POOL_PATH
+    # Required only when the loaded HGNN artifact has patch residual features.
+    serving_patch_season: int | None = None
+    serving_patch: int | None = None
     # MCTS
     simulations: int = 64
     c_puct: float = 1.5
@@ -84,6 +89,7 @@ class AlphaTrainConfig:
     # Persistence
     run_name: str | None = None
     save_every: int = 5
+    tensorboard_dir: Path | None = None
 
 
 def _mcts_cfg(cfg: AlphaTrainConfig) -> MCTSConfig:
@@ -96,6 +102,32 @@ def _mcts_cfg(cfg: AlphaTrainConfig) -> MCTSConfig:
         temperature=cfg.temperature,
         temperature_drop_step=cfg.temperature_drop_step,
     )
+
+
+def _serving_patch(cfg: AlphaTrainConfig) -> tuple[int, int] | None:
+    if cfg.serving_patch_season is None and cfg.serving_patch is None:
+        return None
+    if cfg.serving_patch_season is None or cfg.serving_patch is None:
+        raise ValueError(
+            "serving_patch_season and serving_patch must be set together "
+            "for patch-head HGNN artifacts"
+        )
+    return int(cfg.serving_patch_season), int(cfg.serving_patch)
+
+
+def _entrypoint_config() -> AlphaTrainConfig:
+    return AlphaTrainConfig(
+        top_k_build_configs=8,
+        serving_patch_season=_env_int("HGNN_SERVING_PATCH_SEASON"),
+        serving_patch=_env_int("HGNN_SERVING_PATCH"),
+    )
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    return int(raw)
 
 
 def _stack(samples: list[EpisodeSamples]) -> EpisodeSamples:
@@ -118,11 +150,11 @@ _WORKER: dict[str, Any] = {}
 
 def _worker_init(net_cfg_dict: dict, train_cfg_dict: dict, device_str: str) -> None:
     torch.set_num_threads(1)
-    predictor = load_predictor()
+    train_cfg = AlphaTrainConfig(**train_cfg_dict)
+    predictor = load_predictor(serving_patch=_serving_patch(train_cfg))
     net_cfg = AlphaNetConfig(**net_cfg_dict)
     device = torch.device(device_str)
     net = AlphaZeroNet(net_cfg).to(device).eval()
-    train_cfg = AlphaTrainConfig(**train_cfg_dict)
     sampler = make_pool_sampler(
         load_pool(train_cfg.pool_path), train_cfg.top_k_build_configs
     )
@@ -325,7 +357,7 @@ def train(cfg: AlphaTrainConfig) -> Path:
     device = auto_device(cfg.device)
     logger.info("AlphaZero device: %s", device)
 
-    predictor = load_predictor()
+    predictor = load_predictor(serving_patch=_serving_patch(cfg))
     n_champions = len(predictor.champion_ids)
     champion_ids = predictor.champion_ids
     net_cfg = AlphaNetConfig(n_champions=n_champions, hidden=cfg.hidden)
@@ -338,6 +370,9 @@ def train(cfg: AlphaTrainConfig) -> Path:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_path = RL_DATA_DIR / "logs" / f"{run_name}.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    tb_dir = cfg.tensorboard_dir or (RL_DATA_DIR / "tensorboard" / run_name)
+    tb_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(tb_dir))
 
     # League setup: load (or bootstrap) the opponent pool and the live Elo.
     league_dir = cfg.league_dir or (ckpt_dir / "league")
@@ -364,7 +399,7 @@ def train(cfg: AlphaTrainConfig) -> Path:
 
     try:
         for it in range(cfg.iterations):
-            t0 = time.time()
+            t0 = time.perf_counter()
             base_seed = 10_000 * (it + 1)
             if league is not None:
                 samples = _generate_league(
@@ -388,12 +423,12 @@ def train(cfg: AlphaTrainConfig) -> Path:
                     base_seed,
                     inline_sampler,
                 )
-            t_play = time.time() - t0
+            t_play = time.perf_counter() - t0
 
             batch = _stack(samples)
-            t1 = time.time()
+            t1 = time.perf_counter()
             stats = _update(net, opt, batch, cfg=cfg, device=device)
-            t_update = time.time() - t1
+            t_update = time.perf_counter() - t1
 
             metrics = {
                 "iter": it,
@@ -408,6 +443,20 @@ def train(cfg: AlphaTrainConfig) -> Path:
             }
             with log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(metrics) + "\n")
+            _write_tensorboard_metrics(writer, metrics, step=it)
+            if league is not None:
+                _write_tensorboard_metrics(
+                    writer,
+                    {
+                        "league/entries": float(len(league.entries)),
+                        "league/champion_rating": float(league.champion.rating if league.champion else 0.0),
+                        "league/h2h_games": float(sum(entry.games for entry in league.entries)),
+                        "league/h2h_wins": float(sum(entry.wins for entry in league.entries)),
+                    },
+                    step=it,
+                )
+                league.save(league_dir)
+            writer.flush()
             logger.info(
                 "iter=%d play=%.1fs upd=%.2fs blue=%.3f red=%.3f pol=%.4f val=%.4f",
                 it,
@@ -440,6 +489,19 @@ def train(cfg: AlphaTrainConfig) -> Path:
                     "league eval w=%d l=%d d=%d score=%.3f elo=%.1f verdict=%s",
                     w, l, d, score, learner_rating, verdict,
                 )
+                _write_tensorboard_metrics(
+                    writer,
+                    {
+                        "league_eval/wins": float(w),
+                        "league_eval/losses": float(l),
+                        "league_eval/draws": float(d),
+                        "league_eval/score": float(score),
+                        "league_eval/learner_rating": float(learner_rating),
+                        "league_eval/verdict": {"accept": 1.0, "continue": 0.0, "reject": -1.0}[verdict],
+                    },
+                    step=it,
+                )
+                writer.flush()
                 if verdict == "accept":
                     league.admit(
                         state_to_bytes(
@@ -466,6 +528,7 @@ def train(cfg: AlphaTrainConfig) -> Path:
                 )
                 logger.info("Saved checkpoint: %s", ckpt)
     finally:
+        writer.close()
         if pool is not None:
             pool.close()
             pool.join()
@@ -474,5 +537,14 @@ def train(cfg: AlphaTrainConfig) -> Path:
     return final
 
 
+def _write_tensorboard_metrics(
+    writer: SummaryWriter, metrics: dict[str, float | int], *, step: int
+) -> None:
+    for key, value in metrics.items():
+        if key == "iter":
+            continue
+        writer.add_scalar(key, float(value), step)
+
+
 if __name__ == "__main__":
-    train(AlphaTrainConfig(top_k_build_configs=8))
+    train(_entrypoint_config())
